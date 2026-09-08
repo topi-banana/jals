@@ -49,7 +49,11 @@ fn indexed(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
 /// could silence [`ProjectIndex::method_set_complete`] for the whole workspace without a red test.
 fn indexed_with_stdlib(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
     let nodes = parsed(sources);
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_library(&platform()).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform())
+            .build(),
+    );
     mismatches_of(&nodes, &index, file)
 }
 

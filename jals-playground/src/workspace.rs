@@ -65,6 +65,25 @@ pub const SAMPLE_FILES: &[(&str, &str)] = &[
 pub const MANIFEST_PATH: &str = "jals.toml";
 pub const BUILD_SCRIPT_PATH: &str = "build.rhai";
 
+/// One coherent browser-resolution result, as one value.
+///
+/// A struct rather than a parameter list because every field arrives from the same place and is
+/// installed in one uninterruptible pass — and because seven positional arguments of four different
+/// collection types is a call nobody can read at the site.
+pub struct ResolvedInputs {
+    pub classpath: LoweredClasspath,
+    pub feature_set: FeatureSet,
+    pub build_features: BTreeSet<String>,
+    pub artifacts: ArtifactCache<MemoryCache>,
+    pub library_sources: Vec<(FileKey, String)>,
+    pub source_dep_sources: Vec<(FileKey, String)>,
+    /// The packages to index, or `None` to keep the ones already there.
+    ///
+    /// `None` is a manifest that did not parse: the graph phase already reported that, and emptying
+    /// the index of `java.lang` on top of it would turn one diagnostic into one per line.
+    pub packages: Option<Vec<jals_editor::PackageSource>>,
+}
+
 /// The shared editor core driven through the [`MonacoHost`], plus the path of the active file.
 ///
 /// The core's [`MemoryStorage`] is the single source of truth for files, overlays, and artifacts —
@@ -157,16 +176,16 @@ impl Workspace {
     /// Install one coherent browser-resolution result. Feature metadata and verified artifacts are
     /// visible before the async index rebuild starts; once mutation begins, the whole operation runs
     /// to completion under the playground workspace lock.
-    pub async fn apply_project_inputs(
-        &mut self,
-        classpath: LoweredClasspath,
-        feature_set: FeatureSet,
-        build_features: BTreeSet<String>,
-        artifacts: ArtifactCache<MemoryCache>,
-        library_sources: Vec<(FileKey, String)>,
-        source_dep_sources: Vec<(FileKey, String)>,
-        packages: Option<Vec<jals_editor::PackageSource>>,
-    ) {
+    pub async fn apply_project_inputs(&mut self, inputs: ResolvedInputs) {
+        let ResolvedInputs {
+            classpath,
+            feature_set,
+            build_features,
+            artifacts,
+            library_sources,
+            source_dep_sources,
+            packages,
+        } = inputs;
         let workspace = self.editor.workspace_mut();
         // The combined setter resets the per-file `cfg` analysis when the selection changed
         // (and no-ops when it did not), before the dependency/classpath folds rebuild below.
@@ -1177,18 +1196,18 @@ mod tests {
             let dependency =
                 FileKey::parse(".jals/source-dependency/dependencies/node/sources/Dependency.java")
                     .unwrap();
-            ws.apply_project_inputs(
-                LoweredClasspath::default(),
-                FeatureSet::default(),
-                BTreeSet::new(),
-                ArtifactCache::new(MemoryCache::default()),
-                Vec::new(),
-                vec![(
+            ws.apply_project_inputs(ResolvedInputs {
+                classpath: LoweredClasspath::default(),
+                feature_set: FeatureSet::default(),
+                build_features: BTreeSet::new(),
+                artifacts: ArtifactCache::new(MemoryCache::default()),
+                library_sources: Vec::new(),
+                source_dep_sources: vec![(
                     dependency.clone(),
                     "package com.example; class Dependency {}".to_string(),
                 )],
-                None,
-            )
+                packages: None,
+            })
             .await;
 
             let source = ws.active_source();
@@ -1212,15 +1231,15 @@ mod tests {
             .expect("a later build script view excludes detached dependency sources");
             assert!(ws.storage_snapshot().view().file(&dependency).is_err());
 
-            ws.apply_project_inputs(
-                LoweredClasspath::default(),
-                FeatureSet::default(),
-                BTreeSet::new(),
-                ArtifactCache::new(MemoryCache::default()),
-                Vec::new(),
-                Vec::new(),
-                None,
-            )
+            ws.apply_project_inputs(ResolvedInputs {
+                classpath: LoweredClasspath::default(),
+                feature_set: FeatureSet::default(),
+                build_features: BTreeSet::new(),
+                artifacts: ArtifactCache::new(MemoryCache::default()),
+                library_sources: Vec::new(),
+                source_dep_sources: Vec::new(),
+                packages: None,
+            })
             .await;
             assert!(ws.editor.workspace().view().file(&dependency).is_err());
             assert!(ws.goto_definition(line, col).await.is_none());
@@ -1244,15 +1263,18 @@ mod tests {
                 .unwrap();
             transaction.commit().await.unwrap();
 
-            ws.apply_project_inputs(
-                LoweredClasspath::default(),
-                FeatureSet::default(),
-                BTreeSet::new(),
-                ArtifactCache::new(MemoryCache::default()),
-                Vec::new(),
-                vec![(collision.clone(), "class DependencyOwned {}".to_string())],
-                None,
-            )
+            ws.apply_project_inputs(ResolvedInputs {
+                classpath: LoweredClasspath::default(),
+                feature_set: FeatureSet::default(),
+                build_features: BTreeSet::new(),
+                artifacts: ArtifactCache::new(MemoryCache::default()),
+                library_sources: Vec::new(),
+                source_dep_sources: vec![(
+                    collision.clone(),
+                    "class DependencyOwned {}".to_string(),
+                )],
+                packages: None,
+            })
             .await;
 
             assert_eq!(

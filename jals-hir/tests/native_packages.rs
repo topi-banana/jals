@@ -6,7 +6,7 @@
 //! below is about: the origin is its own, the declarations are complete rather than lenient, and a
 //! package outranks a stub of the same name because the one with a body is the one that will run.
 
-use jals_hir::{LibraryFidelity, FileAnalysis, FileId, ItemOrigin, ProjectIndex, TypeResolution};
+use jals_hir::{FileAnalysis, FileId, ItemOrigin, LibraryFidelity, ProjectIndex, TypeResolution};
 use jals_syntax::SyntaxNode;
 
 /// The platform library at **signature** fidelity — what every host but a linking wasm build
@@ -56,8 +56,11 @@ fn index_of(project: &str, packages: &[&str]) -> (ProjectIndex, SyntaxNode) {
             ..unit
         });
     }
-    let index =
-        jals_exec::block_on_inline(ProjectIndex::builder(&project).with_library(&library).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&project)
+            .with_library(&library)
+            .build(),
+    );
     (index, project[0].1.clone())
 }
 
@@ -74,7 +77,10 @@ fn a_packages_type_is_indexed_under_its_own_origin() {
     let item = index
         .item_by_fqn("jals.io.Out")
         .expect("the package's class is indexed");
-    assert_eq!(index.item(item).origin, ItemOrigin::Library(LibraryFidelity::Complete));
+    assert_eq!(
+        index.item(item).origin,
+        ItemOrigin::Library(LibraryFidelity::Complete)
+    );
     // Real source, written by the package's author — so silence about an annotation is a fact.
     assert!(ItemOrigin::Library(LibraryFidelity::Complete).carries_annotations());
     // Never a file the host owns: the text is a constant in the binary that shipped the package.
@@ -134,7 +140,10 @@ fn a_package_outranks_a_stub_of_the_same_name() {
     let item = index
         .item_by_fqn("java.io.PrintStream")
         .expect("indexed by both");
-    assert_eq!(index.item(item).origin, ItemOrigin::Library(LibraryFidelity::Complete));
+    assert_eq!(
+        index.item(item).origin,
+        ItemOrigin::Library(LibraryFidelity::Complete)
+    );
 }
 
 /// A project type still outranks a package's, exactly as it outranks a library source's: the

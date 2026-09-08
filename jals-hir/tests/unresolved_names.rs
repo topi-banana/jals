@@ -40,7 +40,11 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
 /// method, in file then offset order.
 fn reported(sources: &[&str]) -> Vec<String> {
     let nodes = nodes(sources);
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_library(&platform()).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform())
+            .build(),
+    );
     let mut out = Vec::new();
     for (file, root) in &nodes {
         let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));

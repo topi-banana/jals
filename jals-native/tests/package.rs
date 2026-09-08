@@ -167,7 +167,10 @@ fn the_declaration_macro_carries_both_halves_and_a_host_free_source_list() {
     assert_eq!(Demo::VERSION, 2);
 
     // Reachable as a constant: no `Rc`, no trait object, no state.
-    let kinds: Vec<(&str, SourceKind)> = Demo::SOURCES.iter().map(|s| (s.path.as_ref(), s.kind)).collect();
+    let kinds: Vec<(&str, SourceKind)> = Demo::SOURCES
+        .iter()
+        .map(|s| (s.path.as_ref(), s.kind))
+        .collect();
     assert_eq!(
         kinds,
         vec![
@@ -355,12 +358,18 @@ fn a_selection_separates_what_is_indexed_from_what_is_compiled() {
 
     // A signature unit is nameable and never compiled. This is the property that keeps a type the
     // backend answers for itself from also being one the module declares.
-    let compiled: Vec<&str> = selection.link_sources().map(|(_, s)| s.path.as_ref()).collect();
+    let compiled: Vec<&str> = selection
+        .link_sources()
+        .map(|(_, s)| s.path.as_ref())
+        .collect();
     assert_eq!(compiled, vec!["demo/Clock.java"]);
 
     let bindings = selection.bindings();
     assert!(!bindings.is_empty());
-    assert_eq!(bindings.keys().collect::<Vec<_>>(), vec![("demo/Clock", "now()J")]);
+    assert_eq!(
+        bindings.keys().collect::<Vec<_>>(),
+        vec![("demo/Clock", "now()J")]
+    );
     assert!(bindings.get("demo/Clock", "now()J").is_some());
     assert!(bindings.get("demo/Clock", "nope()V").is_none());
     assert!(format!("{bindings:?}").contains("now()J"));
@@ -428,12 +437,17 @@ fn a_name_two_routes_offer_is_refused_naming_both() {
         .push(Box::new(builtin))
         .push(Box::new(project));
 
-    let ambiguous = chain.resolve("demo.clock").expect_err("two routes offer it");
+    let ambiguous = chain
+        .resolve("demo.clock")
+        .expect_err("two routes offer it");
     let ResolveError::Ambiguous { name, routes } = &ambiguous else {
         panic!("an ambiguity, not {ambiguous:?}");
     };
     assert_eq!(name, "demo.clock");
-    assert_eq!(routes, &vec!["built in".to_owned(), "this project".to_owned()]);
+    assert_eq!(
+        routes,
+        &vec!["built in".to_owned(), "this project".to_owned()]
+    );
     assert!(ambiguous.to_string().contains("built in"));
     assert!(ambiguous.to_string().contains("this project"));
 

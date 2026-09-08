@@ -44,7 +44,7 @@ pub use manifest::{
     FeatureSet, FileMappings, FrontendKind, GitDependency, GitRef, JarDependency, Manifest,
     ManifestParseError, MappingDigest, MappingEntry, MappingError, MappingFormatKind,
     MappingSource, Package, PathDependency, Platform, ProjectPackage, ProjectPackageKind,
-    RemapSite, ResolvedBuildFeatures, ResourcePattern,
-    ResourcePatternError, Run, UrlMappings, ValidationError,
+    RemapSite, ResolvedBuildFeatures, ResourcePattern, ResourcePatternError, Run, UrlMappings,
+    ValidationError,
 };
 pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};

@@ -489,6 +489,8 @@ fn an_origin_that_reads_no_annotations_says_so() {
     // silence as a claim has to be able to tell which.
     assert!(jals_hir::ItemOrigin::Project.carries_annotations());
     assert!(jals_hir::ItemOrigin::Source.carries_annotations());
-    assert!(!jals_hir::ItemOrigin::Library(jals_hir::LibraryFidelity::Signatures).carries_annotations());
+    assert!(
+        !jals_hir::ItemOrigin::Library(jals_hir::LibraryFidelity::Signatures).carries_annotations()
+    );
     assert!(!jals_hir::ItemOrigin::Classpath.carries_annotations());
 }

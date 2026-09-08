@@ -1377,9 +1377,7 @@ impl ProjectIndex {
                 library
                     .iter()
                     .filter(|(_, fidelity, _)| matches!(fidelity, LibraryFidelity::Complete))
-                    .map(|(file, fidelity, facts)| {
-                        (*file, *facts, ItemOrigin::Library(*fidelity))
-                    }),
+                    .map(|(file, fidelity, facts)| (*file, *facts, ItemOrigin::Library(*fidelity))),
             )
             .collect();
         let records: Vec<(FileId, &FileFacts, ItemOrigin)> = library
@@ -3715,7 +3713,10 @@ mod tests {
                 (
                     unit.file,
                     unit.fidelity,
-                    block_on_inline(ProjectIndex::extract_library_file(&unit.root, unit.fidelity)),
+                    block_on_inline(ProjectIndex::extract_library_file(
+                        &unit.root,
+                        unit.fidelity,
+                    )),
                 )
             })
             .collect();

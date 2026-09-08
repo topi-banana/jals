@@ -46,8 +46,7 @@ impl Platform {
     ///   members the *compiler* synthesises per declaration — a constant.s `ordinal()`, a record.s
     ///   accessors. There is no single body either could carry that would produce them, so they
     ///   are declared for analysis and never lowered.
-    const SIGNATURE_ONLY: &'static [&'static str] =
-        &[
+    const SIGNATURE_ONLY: &'static [&'static str] = &[
         "java/util/",
         "java/lang/Object.java",
         "java/lang/Iterable.java",
@@ -106,7 +105,11 @@ impl Platform {
             fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
         let mut paths: Vec<PathBuf> = Vec::new();
         for entry in entries {
-            paths.push(entry.with_context(|| format!("failed to read {}", dir.display()))?.path());
+            paths.push(
+                entry
+                    .with_context(|| format!("failed to read {}", dir.display()))?
+                    .path(),
+            );
         }
         paths.sort();
         for path in paths {
@@ -140,8 +143,9 @@ impl Platform {
 
     fn generate(root: &Path) -> Result<String> {
         let sources = Self::sources(root)?;
-        let (signatures, implementation): (Vec<&String>, Vec<&String>) =
-            sources.iter().partition(|path| Self::is_signature_only(path));
+        let (signatures, implementation): (Vec<&String>, Vec<&String>) = sources
+            .iter()
+            .partition(|path| Self::is_signature_only(path));
         ensure!(
             !implementation.is_empty(),
             "every platform source is signature-only, which would compile to an empty module"

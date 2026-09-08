@@ -40,7 +40,11 @@ impl Stream {
     /// input a program controls, so a refusal would report a defect in this package as a defect in
     /// the program.
     pub(crate) const fn of(identifier: i32) -> Self {
-        if identifier == 1 { Self::Err } else { Self::Out }
+        if identifier == 1 {
+            Self::Err
+        } else {
+            Self::Out
+        }
     }
 }
 

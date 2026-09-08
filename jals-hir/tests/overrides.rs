@@ -40,7 +40,11 @@ fn build(sources: &[&str]) -> (Vec<(FileId, SyntaxNode)>, ProjectIndex) {
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_library(&platform()).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform())
+            .build(),
+    );
     (nodes, index)
 }
 

@@ -45,7 +45,11 @@ impl Decimal {
             return String::from(if value < 0.0 { "-Infinity" } else { "Infinity" });
         }
         if value == 0.0 {
-            return String::from(if value.is_sign_negative() { "-0.0" } else { "0.0" });
+            return String::from(if value.is_sign_negative() {
+                "-0.0"
+            } else {
+                "0.0"
+            });
         }
         Self::lay_out(&format!("{:e}", value.abs()), value.is_sign_negative())
     }
@@ -59,7 +63,11 @@ impl Decimal {
             return String::from(if value < 0.0 { "-Infinity" } else { "Infinity" });
         }
         if value == 0.0 {
-            return String::from(if value.is_sign_negative() { "-0.0" } else { "0.0" });
+            return String::from(if value.is_sign_negative() {
+                "-0.0"
+            } else {
+                "0.0"
+            });
         }
         Self::lay_out(&format!("{:e}", value.abs()), value.is_sign_negative())
     }
@@ -82,7 +90,9 @@ impl Decimal {
     /// side of it — Java writes `100.0` and `0.001`, never `100.` or `.001`.
     fn plain(digits: &str, exponent: i32) -> String {
         if exponent >= 0 {
-            let point = exponent as usize + 1;
+            // Non-negative on this branch, so the widening is total rather than a narrowing that
+            // happens to be safe — `unsigned_abs` says so where an `as` would only be believed.
+            let point = exponent.unsigned_abs() as usize + 1;
             let mut out = String::from(digits);
             while out.len() < point {
                 out.push('0');
@@ -91,7 +101,7 @@ impl Decimal {
             let fraction = if fraction.is_empty() { "0" } else { fraction };
             return format!("{whole}.{fraction}");
         }
-        let zeros = "0".repeat((-exponent - 1) as usize);
+        let zeros = "0".repeat((-exponent - 1).unsigned_abs() as usize);
         format!("0.{zeros}{digits}")
     }
 
@@ -114,9 +124,7 @@ impl Decimal {
     /// since every numeric spelling agrees.
     fn admitted(text: &str) -> Option<&str> {
         let trimmed = Self::without_suffix(text);
-        let magnitude = trimmed
-            .strip_prefix(['+', '-'])
-            .unwrap_or(trimmed);
+        let magnitude = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
         if magnitude.starts_with(|c: char| c.is_ascii_alphabetic()) {
             return (magnitude == "NaN" || magnitude == "Infinity").then_some(trimmed);
         }
@@ -149,6 +157,10 @@ mod tests {
     use super::Decimal;
 
     #[test]
+    #[allow(
+        clippy::approx_constant,
+        reason = "a rendering fixture, not an approximation of a constant"
+    )]
     fn a_double_renders_the_way_java_renders_one() {
         for (value, expected) in [
             (0.0, "0.0"),
@@ -160,7 +172,7 @@ mod tests {
             (0.0001, "1.0E-4"),
             (1.0e7, "1.0E7"),
             (9_999_999.0, "9999999.0"),
-            (1.4142135623730951, "1.4142135623730951"),
+            (1.414_213_562_373_095_1, "1.4142135623730951"),
             (f64::MAX, "1.7976931348623157E308"),
             (f64::MIN_POSITIVE, "2.2250738585072014E-308"),
             (1.0 / 3.0, "0.3333333333333333"),
@@ -236,7 +248,11 @@ mod tests {
         assert_eq!(Decimal::parse("+Infinity"), Some(f64::INFINITY));
         for rejected in ["inf", "Inf", "INF", "infinity", "nan", "NAN", "-inf"] {
             assert_eq!(Decimal::parse(rejected), None, "Java rejects `{rejected}`");
-            assert_eq!(Decimal::parse_f32(rejected), None, "Java rejects `{rejected}`");
+            assert_eq!(
+                Decimal::parse_f32(rejected),
+                None,
+                "Java rejects `{rejected}`"
+            );
         }
         assert_eq!(Decimal::parse_f32("Infinity"), Some(f32::INFINITY));
     }

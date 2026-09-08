@@ -70,7 +70,11 @@ fn compile_across(sources: &[&str]) -> Result<Vec<CompiledClass>, LowerError> {
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_library(&platform()).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&roots)
+            .with_library(&platform())
+            .build(),
+    );
     let last = FileId(u32::try_from(sources.len() - 1).expect("file id"));
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&roots[sources.len() - 1].1));
     let semantics = analysis.in_project(&index, last);

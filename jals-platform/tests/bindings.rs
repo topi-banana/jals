@@ -29,7 +29,7 @@ impl FakeHost {
                 .array
                 .borrow()
                 .iter()
-                .map(|value| *value as u16)
+                .map(|value| u16::try_from(*value).unwrap_or(0xFFFD))
                 .collect::<Vec<_>>(),
         )
     }
@@ -76,7 +76,9 @@ impl NativeHost for FakeHost {
         _args: &[NativeValue],
         _results: &mut [NativeValue],
     ) -> Result<(), NativeError> {
-        Err(NativeError::Call("this fixture instantiates nothing".to_owned()))
+        Err(NativeError::Call(
+            "this fixture instantiates nothing".to_owned(),
+        ))
     }
 }
 
@@ -135,7 +137,7 @@ fn the_package_carries_its_name_its_version_and_its_java() {
     assert_eq!(JavaBase::VERSION, 1);
 
     // Reachable with no host constructed at all — what an index needs and a language server has.
-    assert!(!JavaBase::SOURCES.is_empty());
+    assert_ne!(JavaBase::SOURCES.len(), 0);
     assert!(
         JavaBase::SOURCES
             .iter()
@@ -169,7 +171,11 @@ fn object_and_java_util_are_declared_and_never_compiled() {
         .map(|source| source.path.as_ref())
         .collect();
     assert!(implemented.contains(&"java/lang/String.java"));
-    assert!(!implemented.iter().any(|path| path.starts_with("java/util/")));
+    assert!(
+        !implemented
+            .iter()
+            .any(|path| path.starts_with("java/util/"))
+    );
 
     // And the tier rule reads the same way through `tiers`, which is what a host folds in.
     let linked: Vec<&str> = JavaBase::tiers(true)

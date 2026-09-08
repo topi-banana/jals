@@ -981,13 +981,21 @@ impl CompileWasm {
                 }
                 for ty in index.resolved_param_tys(member) {
                     layout.declare_array(&ty, module)?;
-                    params.push(layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 let returned = index.resolved_member_ty(member);
                 layout.declare_array(&returned, module)?;
                 let results = match returned {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?],
+                    ty => alloc::vec![
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?
+                    ],
                 };
                 let descriptor = Descriptor::method_descriptor(member, index, false)
                     .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
@@ -1043,11 +1051,19 @@ impl CompileWasm {
                 };
                 let mut params = alloc::vec![layout.class_ref(item)?];
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 let results = match index.resolved_member_ty(member) {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?],
+                    ty => alloc::vec![
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?
+                    ],
                 };
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
@@ -1142,7 +1158,11 @@ impl CompileWasm {
                     params.push(layout.class_ref(enclosing)?);
                 }
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 // The captures come after every declared parameter, so a declared one keeps its slot.
                 let captured = is_constructor
@@ -1157,7 +1177,11 @@ impl CompileWasm {
                 } else {
                     match index.resolved_member_ty(member) {
                         Ty::Void => Vec::new(),
-                        ty => alloc::vec![layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?],
+                        ty => alloc::vec![
+                            layout
+                                .val_type(&ty)
+                                .map_err(|error| error.in_signature(member, index))?
+                        ],
                     }
                 };
 

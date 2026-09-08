@@ -99,8 +99,14 @@ mod tests {
 
     #[test]
     fn from_raw_routes_each_space() {
-        assert_eq!(WorkspaceFileId::from_raw(FileId(0)), WorkspaceFileId::Project(0));
-        assert_eq!(WorkspaceFileId::from_raw(FileId(7)), WorkspaceFileId::Project(7));
+        assert_eq!(
+            WorkspaceFileId::from_raw(FileId(0)),
+            WorkspaceFileId::Project(0)
+        );
+        assert_eq!(
+            WorkspaceFileId::from_raw(FileId(7)),
+            WorkspaceFileId::Project(7)
+        );
         assert_eq!(
             WorkspaceFileId::from_raw(FileId(SOURCES_JAR_FILE_BASE)),
             WorkspaceFileId::SourcesJar(0)

@@ -63,7 +63,11 @@ fn module_of_parts(sources: &[&str], libraries: &[&str], options: WasmOptions) -
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_library(&platform()).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&roots)
+            .with_library(&platform())
+            .build(),
+    );
 
     let analyses: Vec<FileAnalysis> = roots
         .iter()

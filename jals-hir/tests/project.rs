@@ -218,8 +218,11 @@ fn unresolved_types_reports_only_genuine_unknowns() {
     let platform = jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
         &jals_platform::JavaBase::tiers(false),
     ));
-    let index =
-        jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_library(&platform).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform)
+            .build(),
+    );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[0].1));
 
     let found =

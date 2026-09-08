@@ -444,8 +444,10 @@ mod tests {
             options: &options,
         };
 
-        let outcome =
-            jals_exec::block_on_inline(JalsBackend::new(None, PackageSelection::empty()).compile(&request)).expect("compile");
+        let outcome = jals_exec::block_on_inline(
+            JalsBackend::new(None, PackageSelection::empty()).compile(&request),
+        )
+        .expect("compile");
         assert!(!outcome.success());
         assert!(
             outcome

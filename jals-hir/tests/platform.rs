@@ -91,7 +91,10 @@ fn string_resolves_to_a_stdlib_project_item() {
     let id = ty
         .project_id()
         .expect("with the stubs indexed, `String` is a project (not external) type");
-    assert_eq!(index.item(id).origin, ItemOrigin::Library(LibraryFidelity::Signatures));
+    assert_eq!(
+        index.item(id).origin,
+        ItemOrigin::Library(LibraryFidelity::Signatures)
+    );
     assert_eq!(index.item(id).fqn.to_string(), "java.lang.String");
 }
 
@@ -216,7 +219,10 @@ fn java_util_types_need_an_import_but_then_resolve_to_stubs() {
         .project_id()
         .expect("List resolves to the stub when imported");
     assert_eq!(index.item(id).fqn.to_string(), "java.util.List");
-    assert_eq!(index.item(id).origin, ItemOrigin::Library(LibraryFidelity::Signatures));
+    assert_eq!(
+        index.item(id).origin,
+        ItemOrigin::Library(LibraryFidelity::Signatures)
+    );
 }
 
 // --- Generic invariance: the same nominal type with differing type arguments -----------------
@@ -339,7 +345,11 @@ fn builder_with_stdlib_never_panics_and_project_items_are_in_bounds() {
         "🦀 class Broken { int (}",
     ];
     let nodes = nodes(&sources);
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_library(&platform()).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform())
+            .build(),
+    );
     // Every *project* item's name range stays within its source; stub items live at reserved high
     // file ids and are excluded from this host-source bounds check.
     for (_, item) in index

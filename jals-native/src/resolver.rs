@@ -58,7 +58,10 @@ impl core::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unknown { name, available } if available.is_empty() => {
-                write!(f, "there is no package named `{name}`; this build offers none")
+                write!(
+                    f,
+                    "there is no package named `{name}`; this build offers none"
+                )
             }
             Self::Unknown { name, available } => write!(
                 f,
@@ -264,8 +267,7 @@ impl SourceResolver {
         for (path, text, kind) in sources {
             package.source(path, text, kind);
         }
-        self.packages
-            .insert(String::from(name), Rc::new(package));
+        self.packages.insert(String::from(name), Rc::new(package));
         self
     }
 

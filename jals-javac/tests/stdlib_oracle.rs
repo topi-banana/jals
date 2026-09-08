@@ -162,7 +162,8 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
         "found no java.lang/java.util/java.io signatures for release {release} in ct.sym"
     );
 
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&[]).with_library(&platform()).build());
+    let index =
+        jals_exec::block_on_inline(ProjectIndex::builder(&[]).with_library(&platform()).build());
     let mut checked = 0usize;
     let mut wrong = Vec::new();
 

@@ -529,12 +529,9 @@ mod tests {
              [build]\nbackend = { type = \"jals\" }\n\n\
              [run]\nmain-class = \"com.example.Main\"\n",
         );
-        let artifact = block_on_inline(Compile::workspace(
-            &manifest,
-            &subset_sources(),
-            platform(),
-        ))
-        .expect("the subset compiles");
+        let artifact =
+            block_on_inline(Compile::workspace(&manifest, &subset_sources(), platform()))
+                .expect("the subset compiles");
         assert_eq!(artifact.name, "demo.jar");
         assert!(artifact.bytes.starts_with(b"PK\x03\x04"), "not a zip");
         assert!(
@@ -548,12 +545,9 @@ mod tests {
     #[test]
     fn the_wasm_backend_yields_one_module() {
         let manifest = manifest("[build]\nbackend = { type = \"jals-wasm\" }\n");
-        let artifact = block_on_inline(Compile::workspace(
-            &manifest,
-            &subset_sources(),
-            platform(),
-        ))
-        .expect("the subset compiles");
+        let artifact =
+            block_on_inline(Compile::workspace(&manifest, &subset_sources(), platform()))
+                .expect("the subset compiles");
         assert_eq!(artifact.name, WASM_ARTIFACT);
         assert!(artifact.bytes.starts_with(b"\0asm"), "not a wasm module");
     }
@@ -563,12 +557,9 @@ mod tests {
     #[test]
     fn a_module_runs_in_the_host_that_compiled_it() {
         let manifest = manifest("[build]\nbackend = { type = \"jals-wasm\" }\n");
-        let artifact = block_on_inline(Compile::workspace(
-            &manifest,
-            &subset_sources(),
-            platform(),
-        ))
-        .expect("the subset compiles");
+        let artifact =
+            block_on_inline(Compile::workspace(&manifest, &subset_sources(), platform()))
+                .expect("the subset compiles");
         assert!(artifact.runnable);
 
         // A `static` method reached by name, with its argument read against the type the export
@@ -603,12 +594,9 @@ mod tests {
     #[test]
     fn a_jar_is_not_something_this_host_can_run() {
         let manifest = manifest("[build]\nbackend = { type = \"jals\" }\n");
-        let artifact = block_on_inline(Compile::workspace(
-            &manifest,
-            &subset_sources(),
-            platform(),
-        ))
-        .expect("the subset compiles");
+        let artifact =
+            block_on_inline(Compile::workspace(&manifest, &subset_sources(), platform()))
+                .expect("the subset compiles");
         assert!(!artifact.runnable);
     }
 
@@ -626,12 +614,8 @@ mod tests {
             .iter()
             .map(|(path, text)| ((*path).to_owned(), (*text).to_owned()))
             .collect();
-        let artifact = block_on_inline(Compile::workspace(
-            &manifest,
-            &files,
-            platform(),
-        ))
-        .expect("the seed project compiles");
+        let artifact = block_on_inline(Compile::workspace(&manifest, &files, platform()))
+            .expect("the seed project compiles");
         assert_eq!(artifact.name, "seed.jar");
         assert!(artifact.bytes.starts_with(b"PK\x03\x04"), "not a zip");
     }
@@ -641,13 +625,9 @@ mod tests {
     fn an_unrepresentable_path_is_rejected_rather_than_panicking() {
         let manifest = manifest("[build]\nbackend = { type = \"jals\" }\n");
         let files = vec![("a/../b.java".to_owned(), "class B {}\n".to_owned())];
-        let error = block_on_inline(Compile::workspace(
-            &manifest,
-            &files,
-            platform(),
-        ))
-        .err()
-        .expect("the path is not project-relative");
+        let error = block_on_inline(Compile::workspace(&manifest, &files, platform()))
+            .err()
+            .expect("the path is not project-relative");
         assert!(matches!(error, CompileFailure::InvalidPath(_)), "{error}");
     }
 
@@ -674,18 +654,10 @@ mod tests {
         let manifest =
             manifest("[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals\" }\n");
         let sources = subset_sources();
-        let first = block_on_inline(Compile::workspace(
-            &manifest,
-            &sources,
-            platform(),
-        ))
-        .expect("first compile");
-        let second = block_on_inline(Compile::workspace(
-            &manifest,
-            &sources,
-            platform(),
-        ))
-        .expect("second compile");
+        let first = block_on_inline(Compile::workspace(&manifest, &sources, platform()))
+            .expect("first compile");
+        let second = block_on_inline(Compile::workspace(&manifest, &sources, platform()))
+            .expect("second compile");
         assert_eq!(first.bytes, second.bytes);
     }
 }

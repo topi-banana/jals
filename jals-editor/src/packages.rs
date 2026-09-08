@@ -10,9 +10,9 @@
 //! in-memory tree. No host path is named anywhere in this file.
 
 use alloc::borrow::ToOwned;
-use alloc::string::ToString;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use jals_config::{ProjectPackage, ProjectPackageKind};

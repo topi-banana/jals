@@ -2153,7 +2153,7 @@ impl Platform {
 
     /// The package name to resolve, or `None`.
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
+    pub const fn name(&self) -> Option<&str> {
         match self {
             Self::Named(name) => Some(name.as_str()),
             Self::None => None,
@@ -6094,5 +6094,163 @@ mod tests {
             in_managed.validate(),
             Err(ValidationError::RemapOutputInManagedRoot { .. })
         ));
+    }
+
+    /// `[build] platform` is a name or `none`, and defaults to the platform `jals` ships.
+    ///
+    /// Not in `[build] native-packages`, and that separation is the key's whole point: the platform
+    /// is not something a project opts into, it is what `java.lang` *is* on this target.
+    #[test]
+    fn platform_is_a_name_or_none_and_defaults_to_the_shipped_one() {
+        assert_eq!(Manifest::default().build.platform, Platform::default());
+        assert_eq!(
+            Manifest::default().build.platform.name(),
+            Some(Platform::DEFAULT)
+        );
+
+        let named: Manifest = "[build]\nplatform = \"acme.base\"\n"
+            .parse()
+            .expect("parses");
+        assert_eq!(named.build.platform.name(), Some("acme.base"));
+
+        let none: Manifest = "[build]\nplatform = \"none\"\n".parse().expect("parses");
+        assert_eq!(none.build.platform, Platform::None);
+        assert_eq!(none.build.platform.name(), None);
+
+        assert!("[build]\nplatform = \"\"\n".parse::<Manifest>().is_err());
+    }
+
+    /// Every package name a project resolves, in the order a person would write them — and the
+    /// platform is in it **whatever the backend is**, because analysis indexes it either way.
+    #[test]
+    fn package_names_lists_the_platform_then_the_selections_then_the_declarations() {
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        m.build.native_packages = alloc::vec!["jals.io".to_owned()];
+        m.packages.insert(
+            "acme.util".to_owned(),
+            ProjectPackage {
+                java: "platform/java".to_owned(),
+                kind: ProjectPackageKind::Implementation,
+            },
+        );
+        assert_eq!(m.package_names(), ["java.base", "jals.io", "acme.util"]);
+        assert!(m.links_packages());
+
+        // A `javac` project still names the platform; what changes is the fidelity, not presence.
+        let mut javac = Manifest::default();
+        javac.build.backend = BackendKind::Javac {};
+        assert_eq!(javac.package_names(), ["java.base"]);
+        assert!(!javac.links_packages());
+
+        // `none` contributes no name at all, so its `java.lang` is genuinely absent.
+        let mut bare = Manifest::default();
+        bare.build.platform = Platform::None;
+        assert!(bare.package_names().is_empty());
+    }
+
+    /// A `[packages]` entry needs a name and a directory, and may not restate a name this manifest
+    /// already uses.
+    ///
+    /// A collision with a *built-in* route is the resolver chain's ambiguity instead: this is the
+    /// case where the author can see both lines, so it is reported where the lines are.
+    #[test]
+    fn validate_rejects_a_project_package_that_is_empty_or_already_named() {
+        let declared = |java: &str| ProjectPackage {
+            java: java.to_owned(),
+            kind: ProjectPackageKind::Implementation,
+        };
+
+        let mut empty = Manifest::default();
+        empty.packages.insert("acme.util".to_owned(), declared(""));
+        assert_eq!(
+            empty.validate(),
+            Err(ValidationError::InvalidProjectPackage {
+                name: "acme.util".to_owned(),
+            })
+        );
+
+        let mut clashes_with_platform = Manifest::default();
+        clashes_with_platform
+            .packages
+            .insert("java.base".to_owned(), declared("platform/java"));
+        assert_eq!(
+            clashes_with_platform.validate(),
+            Err(ValidationError::DuplicateProjectPackage {
+                name: "java.base".to_owned(),
+            })
+        );
+
+        let mut clashes_with_selection = Manifest::default();
+        clashes_with_selection.build.backend = BackendKind::JalsWasm {};
+        clashes_with_selection.build.native_packages = alloc::vec!["jals.io".to_owned()];
+        clashes_with_selection
+            .packages
+            .insert("jals.io".to_owned(), declared("platform/java"));
+        assert_eq!(
+            clashes_with_selection.validate(),
+            Err(ValidationError::DuplicateProjectPackage {
+                name: "jals.io".to_owned(),
+            })
+        );
+    }
+
+    /// A declared package's directory may not overlap a source root.
+    ///
+    /// A file under both would be compiled twice and indexed under two origins, with the second
+    /// insert silently losing — which is the kind of thing that shows up as a member that exists in
+    /// one query and not another.
+    #[test]
+    fn validate_rejects_a_project_package_inside_a_source_root() {
+        for (roots, java) in [
+            (alloc::vec!["src/main/java".to_owned()], "src/main/java"),
+            (
+                alloc::vec!["src/main/java".to_owned()],
+                "src/main/java/acme",
+            ),
+            (
+                alloc::vec!["src/main/java/acme".to_owned()],
+                "src/main/java",
+            ),
+            (alloc::vec!["src/main/java/".to_owned()], "src/main/java"),
+        ] {
+            let mut m = Manifest::default();
+            m.build.source_dirs = roots;
+            m.packages.insert(
+                "acme.util".to_owned(),
+                ProjectPackage {
+                    java: java.to_owned(),
+                    kind: ProjectPackageKind::Implementation,
+                },
+            );
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::ProjectPackageInSourceRoot {
+                    name: "acme.util".to_owned(),
+                    java: java.to_owned(),
+                }),
+                "`{java}` overlaps the source roots"
+            );
+        }
+
+        // A sibling directory is fine, and so is the default `kind`.
+        let parsed: Manifest =
+            "[build]\nsource-dirs = [\"src/main/java\"]\n\n[packages.\"acme.util\"]\njava = \"platform/java\"\n"
+                .parse()
+                .expect("parses");
+        assert_eq!(parsed.validate(), Ok(()));
+        assert_eq!(
+            parsed.packages["acme.util"].kind,
+            ProjectPackageKind::Implementation
+        );
+
+        let signatures: Manifest =
+            "[packages.\"acme.util\"]\njava = \"platform/java\"\nkind = \"signatures\"\n"
+                .parse()
+                .expect("parses");
+        assert_eq!(
+            signatures.packages["acme.util"].kind,
+            ProjectPackageKind::Signatures
+        );
     }
 }

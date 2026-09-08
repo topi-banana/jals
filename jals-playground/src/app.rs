@@ -1599,15 +1599,15 @@ impl Component for App {
                                 // copy, so the Monaco format provider can never read a feature set
                                 // the index has already moved past.
                                 features_mirror.set(resolution.feature_set);
-                                ws.apply_project_inputs(
-                                    resolution.classpath,
-                                    resolution.feature_set,
-                                    resolution.build_features,
-                                    resolution.artifacts,
-                                    resolution.sources.library,
-                                    resolution.sources.source_deps,
+                                ws.apply_project_inputs(crate::workspace::ResolvedInputs {
+                                    classpath: resolution.classpath,
+                                    feature_set: resolution.feature_set,
+                                    build_features: resolution.build_features,
+                                    artifacts: resolution.artifacts,
+                                    library_sources: resolution.sources.library,
+                                    source_dep_sources: resolution.sources.source_deps,
                                     packages,
-                                )
+                                })
                                 .await;
                                 // Re-analyse with the external types now in the index;
                                 // `MarkersComputed` drops the paint if a config model is showing.

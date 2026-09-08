@@ -53,7 +53,7 @@ struct Pending {
 
 impl Pending {
     /// The buffer for one stream.
-    fn of(&mut self, stream: Stream) -> &mut Vec<u16> {
+    const fn of(&mut self, stream: Stream) -> &mut Vec<u16> {
         match stream {
             Stream::Out => &mut self.out,
             Stream::Err => &mut self.err,
@@ -95,7 +95,13 @@ impl Bindings {
                 for index in offset..offset + count {
                     let value = host_ref.array_get(slot, index)?;
                     // A `char` crosses as an `i32`: wasm has no sixteen-bit value type, so the
-                    // low half is the code unit and the rest is the sign extension of nothing.
+                    // low half *is* the code unit and the rest is the sign extension of nothing.
+                    // Truncating is therefore the conversion rather than a risk in it.
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "the low sixteen bits are the code unit; the rest is sign extension"
+                    )]
                     buffer.push(value.as_i32().unwrap_or(0) as u16);
                 }
                 Ok(())
@@ -104,20 +110,24 @@ impl Bindings {
 
         let sink = Rc::clone(host);
         let flushed = Rc::clone(&pending);
-        package.bind("java/io/PrintStream", "flushStream(I)V", move |_, args, _| {
-            let stream = Stream::of(args.i32(0)?);
-            let mut pending = flushed.borrow_mut();
-            let buffer = pending.of(stream);
-            if buffer.is_empty() {
-                return Ok(());
-            }
-            // Lossy, and the loss is a real one: an unpaired surrogate becomes U+FFFD. That is what
-            // a program wrote, though — the pairing happened or it did not, and the buffering above
-            // is what makes a *paired* one arrive whole.
-            sink.write(stream, &String::from_utf16_lossy(buffer));
-            buffer.clear();
-            Ok(())
-        });
+        package.bind(
+            "java/io/PrintStream",
+            "flushStream(I)V",
+            move |_, args, _| {
+                let stream = Stream::of(args.i32(0)?);
+                let mut pending = flushed.borrow_mut();
+                let buffer = pending.of(stream);
+                if buffer.is_empty() {
+                    return Ok(());
+                }
+                // Lossy, and the loss is a real one: an unpaired surrogate becomes U+FFFD. That is what
+                // a program wrote, though — the pairing happened or it did not, and the buffering above
+                // is what makes a *paired* one arrive whole.
+                sink.write(stream, &String::from_utf16_lossy(buffer));
+                buffer.clear();
+                Ok(())
+            },
+        );
     }
 
     /// `System`'s two clock readings.
@@ -145,7 +155,7 @@ impl Bindings {
             "java/lang/Double",
             "doubleToRawLongBits(D)J",
             |_, args, mut out| {
-                out.set(0, NativeValue::I64(args.f64(0)?.to_bits() as i64));
+                out.set(0, NativeValue::I64(args.f64(0)?.to_bits().cast_signed()));
                 Ok(())
             },
         );
@@ -153,7 +163,10 @@ impl Bindings {
             "java/lang/Double",
             "longBitsToDouble(J)D",
             |_, args, mut out| {
-                out.set(0, NativeValue::F64(f64::from_bits(args.i64(0)? as u64)));
+                out.set(
+                    0,
+                    NativeValue::F64(f64::from_bits(args.i64(0)?.cast_unsigned())),
+                );
                 Ok(())
             },
         );
@@ -161,14 +174,21 @@ impl Bindings {
             "java/lang/Float",
             "floatToRawIntBits(F)I",
             |_, args, mut out| {
-                out.set(0, NativeValue::I32(args.f32(0)?.to_bits() as i32));
+                out.set(0, NativeValue::I32(args.f32(0)?.to_bits().cast_signed()));
                 Ok(())
             },
         );
-        package.bind("java/lang/Float", "intBitsToFloat(I)F", |_, args, mut out| {
-            out.set(0, NativeValue::F32(f32::from_bits(args.i32(0)? as u32)));
-            Ok(())
-        });
+        package.bind(
+            "java/lang/Float",
+            "intBitsToFloat(I)F",
+            |_, args, mut out| {
+                out.set(
+                    0,
+                    NativeValue::F32(f32::from_bits(args.i32(0)?.cast_unsigned())),
+                );
+                Ok(())
+            },
+        );
 
         package.bind("java/lang/Double", "toChars(D[C)I", |host, args, out| {
             let rendered = Decimal::of_f64(args.f64(0)?);
@@ -259,7 +279,7 @@ impl Bindings {
                 NativeValue::I32(i32::from(unit)),
             )?;
         }
-        out.set(0, NativeValue::I32(written as i32));
+        out.set(0, NativeValue::I32(written.cast_signed()));
         Ok(())
     }
 }

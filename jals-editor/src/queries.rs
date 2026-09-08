@@ -673,7 +673,10 @@ mod tests {
             for (_, root) in &roots {
                 analyses.push(FileAnalysis::of(root).await);
             }
-            let index = ProjectIndex::builder(&roots).with_library(&crate::test_support::TestPlatform::records()).build().await;
+            let index = ProjectIndex::builder(&roots)
+                .with_library(&crate::test_support::TestPlatform::records())
+                .build()
+                .await;
             Self {
                 roots,
                 analyses,

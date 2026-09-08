@@ -60,7 +60,11 @@ fn compile_with(sources: &[&str], options: WasmOptions) -> Result<Vec<u8>, WasmE
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_library(&platform()).build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&roots)
+            .with_library(&platform())
+            .build(),
+    );
 
     let analyses: Vec<FileAnalysis> = roots
         .iter()

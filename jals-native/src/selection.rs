@@ -47,7 +47,7 @@ impl PackageSelection {
 
     /// Whether nothing was selected.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
 
