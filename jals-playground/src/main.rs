@@ -34,7 +34,7 @@ mod download;
 mod fetcher;
 mod host;
 mod monaco;
-mod natives;
+mod packages;
 mod providers;
 mod workspace;
 

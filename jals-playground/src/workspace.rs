@@ -111,7 +111,29 @@ impl Workspace {
         .await
         .expect("an in-memory snapshot is immediate and infallible");
         let source_root = DirKey::parse("com/example").expect("sample source root is valid");
-        let editor = Editor::load(storage, ProjectLayout::new(vec![source_root]), MonacoHost).await;
+        // The platform, before any manifest has been read.
+        //
+        // A tab opens on a seed project that says `String` and `System.out`, and there is no
+        // fallback behind the packages: an index with none has no `java.lang` at all. So the
+        // default answer is seeded here and `apply_project_inputs` replaces it once the manifest
+        // resolves — which is also the honest default, since `[build] platform` defaults to the
+        // platform and `[build] backend` to one that does not link it.
+        //
+        // Straight from `SOURCES` rather than through a resolver: this needs the Java and no host
+        // state, which is exactly the case that constant exists for.
+        let platform: Vec<jals_editor::PackageSource> = jals_platform::JavaBase::SOURCES
+            .iter()
+            .map(|source| jals_editor::PackageSource {
+                path: source.path.clone().into_owned(),
+                text: source.text.clone().into_owned(),
+                fidelity: jals_hir::LibraryFidelity::Signatures,
+            })
+            .collect();
+        let layout = ProjectLayout {
+            package_sources: platform,
+            ..ProjectLayout::new(vec![source_root])
+        };
+        let editor = Editor::load(storage, layout, MonacoHost).await;
         // The first (sorted) indexed file is active on load.
         let active = editor
             .workspace()
@@ -143,6 +165,7 @@ impl Workspace {
         artifacts: ArtifactCache<MemoryCache>,
         library_sources: Vec<(FileKey, String)>,
         source_dep_sources: Vec<(FileKey, String)>,
+        packages: Option<Vec<jals_editor::PackageSource>>,
     ) {
         let workspace = self.editor.workspace_mut();
         // The combined setter resets the per-file `cfg` analysis when the selection changed
@@ -153,6 +176,13 @@ impl Workspace {
             .set_dependency_source_texts(library_sources, source_dep_sources)
             .await;
         workspace.set_classpath(classpath).await;
+        // The same packages the compile links. Indexing them is what keeps the editor beside the
+        // Run pane from reporting `System.out` as an unresolved name in a program that builds.
+        // `None` is a manifest that did not parse, which leaves the previous selection in place
+        // rather than emptying the index of `java.lang` on top of the error already reported.
+        if let Some(packages) = packages {
+            workspace.set_packages(packages).await;
+        }
     }
 
     /// Stage the live manifest and Rhai buffers into this workspace's own aggregate, execute the
@@ -1157,6 +1187,7 @@ mod tests {
                     dependency.clone(),
                     "package com.example; class Dependency {}".to_string(),
                 )],
+                None,
             )
             .await;
 
@@ -1188,6 +1219,7 @@ mod tests {
                 ArtifactCache::new(MemoryCache::default()),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
             .await;
             assert!(ws.editor.workspace().view().file(&dependency).is_err());
@@ -1219,6 +1251,7 @@ mod tests {
                 ArtifactCache::new(MemoryCache::default()),
                 Vec::new(),
                 vec![(collision.clone(), "class DependencyOwned {}".to_string())],
+                None,
             )
             .await;
 

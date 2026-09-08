@@ -37,11 +37,16 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   `[toolchain] runtime = "wasm"` runs the same tests as WebAssembly exports on the engine compiled
   into `jals` instead — no JDK at any step.
 - **Java packages written in Rust.** A `native` method compiles to a WebAssembly import, and a
-  **native package** is one Rust crate holding both halves of that declaration: the Java it
-  publishes and the host functions behind it. The two cannot disagree about a signature, because
-  the import's name *is* the descriptor. `jals` ships `jals.io`, which is what makes
-  `examples/hello_world_native` print `Hello, world!` from a module that still has no `String`
-  in it.
+  **package** is one value holding both halves of that declaration: the Java it publishes and the
+  host functions behind it, declared together by `java_package!`. The two cannot disagree about a
+  signature, because the import's name *is* the descriptor. A name resolves through a chain of
+  routes, and a name two routes offer is refused rather than shadowed.
+- **A `java.lang` that is one text, read two ways.** `jals-platform` is the standard library as a
+  package: `java.lang` and `java.io` in Java, behind twelve host functions — the operations Java
+  cannot express and a dependency-free `no_std` crate can. A `jals-wasm` build compiles it into its
+  own module and reads it as the code that will run; a `javac` build and every editor session read
+  the same files as a *record*, because the real JDK behind them is a superset. There is no second,
+  signature-only copy to keep in step, and no name list standing in for one.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `test` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
@@ -50,14 +55,14 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   then projected into verified source/classpath artifacts without mutating dependency trees.
 - **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
   (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-javac`, `jals-native`, `jals-storage`, `jals-config`) are `no_std` and
+  `jals-decompile`, `jals-javac`, `jals-native`, `jals-platform`, `jals-storage`, `jals-config`) are `no_std` and
   build for `wasm32-unknown-unknown`; `jals-classpath`'s resolution core, `jals-project`'s in-memory graph, and
   `jals-build`'s Rhai runner do too (host I/O sits behind `native` features). The browser playground
   therefore runs the same analysis, project-graph, and build-script stack client-side.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of eighteen product crates, including a browser playground:
+`jals` is a Cargo workspace of nineteen product crates, including a browser playground:
 
 | Crate                                | Description                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -76,7 +81,8 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 | [`jals-project`](jals-project)       | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts.                                                                   |
 | [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
 | [`jals-lsp`](jals-lsp)               | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only.                                                                                                                                                                                              |
-| [`jals-native`](jals-native)         | A Java package whose implementation is Rust: the Java it publishes and the host functions its `native` methods bind to, in one value. `[build] native-packages` selects one; the wasm backend turns each `native` method into an import and the runner links it. Ships `jals.io`.                                                                                                                                                                                                                       |
+| [`jals-native`](jals-native)         | What a Java package *is*, and how one is found: the Java it publishes and the host functions its `native` methods bind to, in one value, plus the resolver chain a name travels. Ships no Java of its own. `java_package!` declares both halves at once; the wasm backend turns each `native` method into an import and the runner links it. |
+| [`jals-platform`](jals-platform)     | The platform library `jals` ships: `java.lang` and `java.io` as a package, behind twelve host functions, with `java.util` and `java.lang.Object` as declarations. One text serves analysis and the compile at two fidelities, so there is no second copy to keep in step. |
 | [`jals-progress`](jals-progress)     | What a run is doing, as data: the event vocabulary portable crates report through, plus the timing ledger `--timings` renders as a self-contained HTML page. Draws nothing — a host decides what a fact looks like.                                                                                                                            |
 | [`jals-cli`](jals-cli)               | The `jals` command-line binary. Owns the terminal: one `Shell` writes every byte, and a cargo-shaped display turns the event stream into status lines and progress bars.                                                                                                                                                                                                                                                                                                                                                                                     |
 | [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser.                                                                                                                                                                                                                   |
@@ -99,7 +105,8 @@ jals/
 ├── jals-classpath/   # classpath + dependency resolution        (no_std + wasm-compatible core)
 ├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (no_std, wasm-compatible)
 ├── jals-exec/        # current-thread execution + worker fan-out (no_std, wasm-compatible)
-├── jals-native/      # a Java package implemented in Rust      (no_std, wasm-compatible)
+├── jals-native/      # what a Java package is, and how one is found (no_std, wasm-compatible)
+├── jals-platform/    # the `java.lang` / `java.io` jals ships        (no_std, wasm-compatible)
 ├── jals-progress/    # what a run is doing, as data + --timings  (no_std, wasm-compatible)
 ├── jals-storage/     # revisioned project storage               (no_std, wasm-compatible)
 ├── jals-project/     # transitive source-project graph          (no_std + wasm-compatible core)
@@ -609,7 +616,7 @@ each one as a warning rather than claiming Git support.
 the result as a download: `[build] backend = { type = "jals" }` packages one class file per declared
 type into a runnable `.jar`, and `{ type = "jals-wasm" }` emits a single WebAssembly module for the
 whole project. (`{ type = "javac" }`, the manifest default, has nothing to spawn in a browser tab and
-says so.) The compiler resolves against `jals-hir`'s embedded JDK stubs rather than a classpath, so
+says so.) The compiler resolves against the platform package this tab offers rather than a classpath, so
 resolved `[dependencies]` jars stay on the editor's classpath but not the compiler's, and any
 construct without a lowering yet is *reported* in the Build output tab rather than mis-emitted.
 

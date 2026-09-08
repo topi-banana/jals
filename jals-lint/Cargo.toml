@@ -13,6 +13,7 @@ jals-hir.workspace = true
 jals-syntax.workspace = true
 
 [dev-dependencies]
+jals-platform.workspace = true
 expect-test = "1.5"
 proptest.workspace = true
 # `tests/registry.rs` walks the serialized `jalslint.toml` schema rather than a list of keys, so a

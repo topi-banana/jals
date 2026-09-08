@@ -337,7 +337,7 @@ mod tests {
         let analysis = block_on_inline(FileAnalysis::of(&root));
         let index = block_on_inline(
             ProjectIndex::builder(&[(FileId(0), root.clone())])
-                .with_stdlib()
+                .with_library(&crate::test_support::TestPlatform::records())
                 .build(),
         );
         let semantics = analysis.in_project(&index, FileId(0));
@@ -373,7 +373,7 @@ mod tests {
         let analysis = block_on_inline(FileAnalysis::of(&root));
         let index = block_on_inline(
             ProjectIndex::builder(&[(FileId(0), root.clone())])
-                .with_stdlib()
+                .with_library(&crate::test_support::TestPlatform::records())
                 .build(),
         );
         let semantics = analysis.in_project(&index, FileId(0));
@@ -566,26 +566,28 @@ mod tests {
     /// A constructor reference matches the interface's arity, and a class that declares none still
     /// answers — with the descriptor but no member.
     ///
-    /// `String::new` is the documented `target: None`: the stubs carry no constructor for
-    /// `java.lang.String`, and `()V` exists where the member does not. A search that treated the
-    /// missing member as a failure would reject the commonest constructor reference there is.
+    /// `Object::new` is the documented `target: None`: the platform declares `java.lang.Object`
+    /// with no constructor — it *is* the backend.s `anyref`, so it is a signature unit that lists
+    /// only the members every reference has — and `()V` exists where the member does not. A search
+    /// that treated the missing member as a failure would reject the commonest constructor
+    /// reference there is.
     #[test]
     fn a_constructor_reference_answers_even_where_the_class_declares_no_constructor() {
         assert_eq!(
             refs(
                 "interface Make { P make(int v); }
-                 interface MakeText { String make(); }
+                 interface MakeAny { Object make(); }
                  class P {
                      P(int v) {}
                      void use() {
                          Make m = P::new;
-                         MakeText t = String::new;
+                         MakeAny t = Object::new;
                      }
                  }",
             ),
             [
                 "P::new => Constructs P.P/1",
-                "String::new => Constructs java.lang.String.<no member>"
+                "Object::new => Constructs java.lang.Object.<no member>"
             ]
         );
     }

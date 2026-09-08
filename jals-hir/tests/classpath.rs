@@ -8,6 +8,17 @@ use jals_hir::{FileAnalysis, FileId, ItemOrigin, Namespace, ProjectIndex, Source
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// `Box<T>` (generic, with `T get()` / `void set(T)`), compiled from `tests/fixtures/Box.java`.
 fn box_classfile() -> ClassFile {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Box.class");
@@ -31,7 +42,7 @@ fn expr_ty(src: &str, text: &str, classfiles: &[ClassFile]) -> String {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .with_classpath(&jals_exec::block_on_inline(ProjectIndex::lower_classpath(
                 classfiles,
             )))
@@ -75,7 +86,7 @@ fn classpath_type_is_not_a_navigation_target() {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node)])
-            .with_stdlib()
+            .with_library(&platform())
             .with_classpath(&jals_exec::block_on_inline(ProjectIndex::lower_classpath(
                 std::slice::from_ref(&box_classfile()),
             )))
@@ -109,7 +120,7 @@ fn classpath_type_navigates_to_library_source() {
     ));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node)])
-            .with_stdlib()
+            .with_library(&platform())
             .with_classpath(&classpath)
             .with_source_locations(&sources)
             .build(),
@@ -138,7 +149,7 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
     let lib_box = parse(BOX_SOURCE);
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .with_source_deps(&[(lib, lib_box)])
             .with_classpath(&jals_exec::block_on_inline(ProjectIndex::lower_classpath(
                 &[],
@@ -208,7 +219,7 @@ fn classpath_member_navigates_to_library_source() {
     ));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node)])
-            .with_stdlib()
+            .with_library(&platform())
             .with_classpath(&classpath)
             .with_source_locations(&sources)
             .build(),
@@ -249,7 +260,7 @@ fn index_with_stdlib_and_classpath(src: &str, classfiles: &[ClassFile]) -> Proje
     let lowered = jals_exec::block_on_inline(ProjectIndex::lower_classpath(classfiles));
     jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node)])
-            .with_stdlib()
+            .with_library(&platform())
             .with_classpath(&lowered)
             .build(),
     )

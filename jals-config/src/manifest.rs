@@ -19,7 +19,9 @@ use core::fmt;
 use core::str::FromStr;
 
 use jals_storage::{DirKey, FileKey, Name, RelativePath};
-use serde::Deserialize;
+use serde::de::Deserializer;
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 
 use crate::toolchain::Toolchain;
 
@@ -145,6 +147,24 @@ pub struct Manifest {
     /// which at most one is ever active. The plural form is what lets one reference cover a project
     /// that targets many releases, each with its own mapping text.
     pub mappings: BTreeMap<String, MappingEntry>,
+    /// Java packages this **project** declares (`[packages]`), keyed by package name.
+    ///
+    /// The third route a package name resolves through, beside the ones a binary is built with and
+    /// whatever an embedder registered — rhai's `FileModuleResolver` in shape, and the one that
+    /// makes package definition programmable without writing a Rust crate. A project fills a gap
+    /// the platform leaves (a `java.util` it implements itself, an API it wants declarations for)
+    /// by pointing at a directory of its own `.java`.
+    ///
+    /// **Java only.** There is no Rust half to declare here, so a `native` method in such a package
+    /// binds to nothing — and is refused where every unbound import is, when the module is
+    /// instantiated, with the owner and the descriptor both in hand. That is the same failure a
+    /// Rust package gets when its two halves disagree about a signature: one mechanism, not two,
+    /// and no second check for this crate to get subtly different.
+    ///
+    /// A name declared here that a built-in route also offers is **ambiguous** rather than an
+    /// override — see `jals_native::ResolveError::Ambiguous`. It is the rule this crate already
+    /// applies to a dependency named in two tables: one name denotes one entry wherever it is read.
+    pub packages: BTreeMap<String, ProjectPackage>,
     /// `[test]`: where a test run's extra sources live and where its classes go.
     pub test: Test,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
@@ -1698,7 +1718,31 @@ pub struct Build {
     /// Only [`BackendKind::JalsWasm`] can take one in, and [`Manifest::validate`] says so: a
     /// package's implementation is a host function an embedder supplies, and a class file has
     /// nowhere to put one.
+    ///
+    /// The **platform** library is not named here — see [`platform`](Self::platform). It is not a
+    /// third-party package a project opts into; it is what `java.lang` *is* on this target, and a
+    /// project that forgot to list it would be one whose every `String` stopped resolving.
     pub native_packages: Vec<String>,
+    /// Which **platform library** this project's Java is written against.
+    ///
+    /// The name of the package supplying `java.lang` and `java.io`, or [`Platform::None`].
+    ///
+    /// This key controls **linking, not analysis**. Every project's analysis indexes the platform,
+    /// because the source being edited names `String` whatever the backend is; what a linking build
+    /// changes is the *fidelity* those declarations are read at — see `jals_hir::LibraryFidelity`.
+    /// The three reachable states:
+    ///
+    /// | backend | this key | analysis reads the platform as | linked |
+    /// | --- | --- | --- | --- |
+    /// | `jals-wasm` | a name (the default) | the code that will run | yes |
+    /// | `jals-wasm` | `none` | — nothing is indexed at all | no |
+    /// | `javac` / `jals` | anything | a record; the real JDK is a superset | no |
+    ///
+    /// `none` is for a module that speaks only in primitives and arrays — the smallest thing this
+    /// backend produces, and a real configuration rather than a degraded one. It removes the
+    /// platform from *both* answers, because a project that will not link `java.lang` should not be
+    /// offered completions for it either.
+    pub platform: Platform,
     /// Optional post-compile step: **reobfuscate** the compiled classes and package them as a
     /// distributable jar.
     ///
@@ -2036,6 +2080,114 @@ impl FrontendKind {
     }
 }
 
+/// One Java package a project declares — `[packages."acme.util"]`.
+///
+/// ```toml
+/// [packages."acme.util"]
+/// java = "platform/java"
+/// kind = "signatures"      # or "implementation" (the default)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ProjectPackage {
+    /// The directory holding this package's `.java`, relative to the manifest.
+    ///
+    /// A **root**, not a source root: what is under it is read as a package's Java, not as the
+    /// project's own. The two must not overlap, and [`Manifest::validate`] says so — a file that
+    /// was both would be compiled twice and indexed under two origins, with the second insert
+    /// silently losing.
+    pub java: String,
+    /// Whether this package's Java carries bodies.
+    ///
+    /// The default is [`Implementation`](ProjectPackageKind::Implementation), because a project
+    /// that went to the trouble of declaring a package almost always wrote code. `signatures` is
+    /// for a type the project only needs to *name* — a shape an external tool supplies at run time,
+    /// or one the backend answers for itself.
+    #[serde(default)]
+    pub kind: ProjectPackageKind,
+}
+
+/// Whether a project-declared package's Java carries bodies.
+///
+/// The manifest's spelling of `jals_native::SourceKind`, and a separate type for the reason
+/// `jals-config` holds no `jals-native` dependency: this crate is the schema and that one is the
+/// vocabulary a package author writes against. A host converts, in the one place it resolves
+/// packages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectPackageKind {
+    /// Real Java, compiled into the artifact wherever this build links packages.
+    #[default]
+    Implementation,
+    /// Declarations only: indexed so the types are nameable, never compiled.
+    Signatures,
+}
+
+/// Which platform library a project's Java is written against — `[build] platform`.
+///
+/// A name, or the absence of one. The default is the platform `jals` ships, which is what makes a
+/// fresh project's `String` resolve without anybody writing a line of configuration.
+///
+/// Deserialized from a bare string (`platform = "java.base"`, `platform = "none"`) rather than a
+/// tagged table, because there are exactly two states and one of them is a name. `"none"` is
+/// therefore a name a platform may not have, which is stated here rather than discovered by a
+/// resolver: a package called `none` would be one nobody could select.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Platform {
+    /// The package named here supplies `java.lang` and `java.io`.
+    Named(String),
+    /// No platform at all: a module that speaks only in primitives and arrays.
+    ///
+    /// Not a degraded state. It is the smallest artifact this toolchain produces, and a project
+    /// that chooses it is analysed without `java.lang` too — offering completions for a library the
+    /// build will not link is offering completions for code that cannot compile.
+    None,
+}
+
+impl Platform {
+    /// The name `[build] platform = "none"` spells.
+    pub const NONE: &'static str = "none";
+
+    /// The platform `jals` ships, and every project's default.
+    pub const DEFAULT: &'static str = "java.base";
+
+    /// The package name to resolve, or `None`.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Named(name) => Some(name.as_str()),
+            Self::None => None,
+        }
+    }
+}
+
+impl Default for Platform {
+    fn default() -> Self {
+        Self::Named(String::from(Self::DEFAULT))
+    }
+}
+
+impl<'de> Deserialize<'de> for Platform {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        if name == Self::NONE {
+            return Ok(Self::None);
+        }
+        if name.is_empty() {
+            return Err(serde::de::Error::custom(
+                "`[build] platform` is a package name or `none`, not an empty string",
+            ));
+        }
+        Ok(Self::Named(name))
+    }
+}
+
+impl Serialize for Platform {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name().unwrap_or(Self::NONE))
+    }
+}
+
 /// The compile backend, selected by its `type` field (`[build.backend]`).
 ///
 /// Where [`FrontendKind`] decides what Java the backend sees, this decides what compiles it. Both
@@ -2123,6 +2275,7 @@ impl Default for Build {
             classpath: Vec::new(),
             javac_flags: Vec::new(),
             native_packages: Vec::new(),
+            platform: Platform::default(),
             remap: None,
         }
     }
@@ -2633,6 +2786,40 @@ impl Manifest {
             }
         }
 
+        // A `[packages]` key that another table in *this* manifest already names.
+        //
+        // Decidable here, and worth deciding here: a name a built-in route also offers comes out
+        // as an ambiguity from the resolver chain, which is the right answer for a collision
+        // between two *routes*. This is a collision inside one manifest, where the author can see
+        // both lines, and reporting it as "two routes offer it" would point away from the file that
+        // has the problem.
+        for name in self.packages.keys() {
+            if name.is_empty() {
+                return Err(ValidationError::InvalidProjectPackage { name: name.clone() });
+            }
+            if seen.contains(name.as_str()) || self.build.platform.name() == Some(name.as_str()) {
+                return Err(ValidationError::DuplicateProjectPackage { name: name.clone() });
+            }
+            let package = &self.packages[name];
+            if package.java.is_empty() {
+                return Err(ValidationError::InvalidProjectPackage { name: name.clone() });
+            }
+            // A directory that is also a source root would have its files compiled twice and
+            // indexed under two origins, with the second insert silently losing.
+            let root = package.java.trim_end_matches('/');
+            if self.build.source_dirs.iter().any(|dir| {
+                let dir = dir.trim_end_matches('/');
+                dir == root
+                    || root.starts_with(&alloc::format!("{dir}/"))
+                    || dir.starts_with(&alloc::format!("{root}/"))
+            }) {
+                return Err(ValidationError::ProjectPackageInSourceRoot {
+                    name: name.clone(),
+                    java: package.java.clone(),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -2782,6 +2969,50 @@ impl Manifest {
     /// (`compact-source-file` / `module-import` fire for a feature the set lacks).
     pub fn feature_set(&self) -> FeatureSet {
         FeatureSet::resolve(&self.package.features)
+    }
+
+    /// Whether this project's build **compiles a package's Java into its own artifact**.
+    ///
+    /// The one policy question behind the platform's two tiers, and it lives here so that every
+    /// host asks it rather than each re-deriving it from `[build] backend`. A host that matched on
+    /// the backend itself would be a second decision table — the mistake
+    /// [`BackendSelection`](https://docs.rs/jals-build) and `FrontendSelection` already exist to
+    /// prevent — and this one is worse to get wrong than either: reading a signature record as
+    /// though it were the running code accuses a correct program of calling a method the real JDK
+    /// has.
+    ///
+    /// True for exactly one backend, and that is not a coincidence about today's set. A package is
+    /// linked by supplying host functions to a WebAssembly module; a backend that emits class files
+    /// resolves `java.lang` out of whatever JVM runs them, which is a superset of anything shipped
+    /// here.
+    #[must_use]
+    pub const fn links_packages(&self) -> bool {
+        matches!(self.build.backend, BackendKind::JalsWasm {})
+    }
+
+    /// Every package name this project resolves: its platform, then `[build] native-packages`, then
+    /// whatever `[packages]` declares.
+    ///
+    /// The platform comes first so that a diagnostic listing what was asked for reads in the order
+    /// a person would write it, and it is included **whatever the backend is** — analysis indexes
+    /// the platform for a `javac` project too, at the fidelity
+    /// [`links_packages`](Self::links_packages) decides. A [`Platform::None`] project contributes no
+    /// name at all, and its `java.lang` is genuinely absent rather than merely unlinked.
+    ///
+    /// A `[packages]` key is named here rather than resolved separately, so a project-declared
+    /// package and a built-in one go through the same chain and a name both offer comes out as the
+    /// ambiguity it is. Resolving them apart is what would let one silently win.
+    pub fn package_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .build
+            .platform
+            .name()
+            .map(String::from)
+            .into_iter()
+            .collect();
+        names.extend(self.build.native_packages.iter().cloned());
+        names.extend(self.packages.keys().cloned());
+        names
     }
 
     /// Resolve the effective **build features** of this project from an already-chosen `seed`: the
@@ -3109,6 +3340,23 @@ pub enum ValidationError {
         /// The repeated name.
         name: String,
     },
+    /// A `[packages]` entry has an empty name or an empty `java` directory.
+    InvalidProjectPackage {
+        /// The offending key.
+        name: String,
+    },
+    /// A `[packages]` key is also named by `[build] native-packages` or `[build] platform`.
+    DuplicateProjectPackage {
+        /// The contested name.
+        name: String,
+    },
+    /// A `[packages]` entry.s `java` directory overlaps a `[build] source-dirs` root.
+    ProjectPackageInSourceRoot {
+        /// The package.
+        name: String,
+        /// Its declared directory.
+        java: String,
+    },
     /// A `[dependencies]` or `[dev-dependencies]` entry could not be classified — an empty `jar`, an
     /// unsupported URL scheme, or conflicting git refs. Wraps the classification [`DependencyError`]
     /// so the two layers share a single message and the variant set never drifts apart.
@@ -3300,6 +3548,20 @@ impl fmt::Display for ValidationError {
             Self::DuplicateNativePackage { name } => write!(
                 f,
                 "`[build] native-packages` lists `{name}` twice: a package is selected or it is not"
+            ),
+            Self::InvalidProjectPackage { name } => write!(
+                f,
+                "`[packages.\"{name}\"]` needs a name and a `java` directory, and has an empty one"
+            ),
+            Self::DuplicateProjectPackage { name } => write!(
+                f,
+                "`{name}` is declared in `[packages]` and named elsewhere in this manifest too: \
+                 one name denotes one package wherever it is read"
+            ),
+            Self::ProjectPackageInSourceRoot { name, java } => write!(
+                f,
+                "`[packages.\"{name}\"] java = \"{java}\"` overlaps a `[build] source-dirs` root: \
+                 a file under both would be compiled twice and indexed under two origins"
             ),
             Self::Dependency(err) => write!(f, "{err}"),
             Self::DuplicateDependency { name } => write!(

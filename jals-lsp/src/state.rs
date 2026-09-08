@@ -376,7 +376,7 @@ impl ProjectWorkspace {
         classfiles: &[jals_classfile::ClassFile],
         library_sources: Vec<FileKey>,
         source_dep_sources: Vec<FileKey>,
-        native_sources: Vec<jals_editor::PackageSource>,
+        package_sources: Vec<jals_editor::PackageSource>,
         materialized: BTreeMap<FileKey, PathBuf>,
         feature_set: FeatureSet,
         build_features: BTreeSet<String>,
@@ -386,7 +386,7 @@ impl ProjectWorkspace {
             project_sources,
             library_sources,
             source_dep_sources,
-            native_sources,
+            package_sources,
             feature_set,
             // What each project file's `#[cfg(feature = "…")]` evaluates against (used only
             // when `feature_set` enables the `attributes` dialect).

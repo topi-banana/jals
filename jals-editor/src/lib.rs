@@ -9,11 +9,14 @@
 extern crate alloc;
 
 mod diagnostics;
+#[cfg(test)]
+mod test_support;
 mod document;
 mod editor;
 mod folding;
 mod host;
 mod outline;
+pub mod packages;
 mod queries;
 mod selection;
 mod semantic;

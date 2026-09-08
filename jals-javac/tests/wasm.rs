@@ -11,6 +11,17 @@ use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
 use jals_javac::wasm::{CompileWasm, WasmError, WasmOptions};
 use jals_syntax::SyntaxNode;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Whether `name` is on this host. A missing engine is a missing *oracle*, not a broken compiler,
 /// so the tests that need one stand down — but they say so. A silent stand-down reads as "passed",
 /// and the defects these tests exist to catch are exactly the ones only an engine sees.
@@ -49,7 +60,7 @@ fn compile_with(sources: &[&str], options: WasmOptions) -> Result<Vec<u8>, WasmE
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_library(&platform()).build());
 
     let analyses: Vec<FileAnalysis> = roots
         .iter()
@@ -3380,8 +3391,12 @@ public class Boxing {
 }
 ";
     let error = compile(&[source]).expect_err("a wasm host has no `java.lang.Integer`");
+    // The type it needs, *and* the expression that needed it. On a library input every body is
+    // lowered rather than only the reachable ones, so a refusal naming only a type names nothing:
+    // there are tens of thousands of expressions it could have come from.
     assert!(
-        matches!(error, WasmError::NoRepresentation(ref what) if what == "java.lang.Integer"),
+        matches!(error, WasmError::NoRepresentation(ref what)
+            if what.starts_with("java.lang.Integer") && what.contains("holder.put(1)")),
         "got {error}"
     );
 }

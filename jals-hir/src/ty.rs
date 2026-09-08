@@ -12,18 +12,18 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::project::{ItemId, ItemOrigin, MemberId, ProjectIndex};
+use crate::project::{ItemId, MemberId, ProjectIndex};
 
-/// Whether a standard-library stub keeps its own hierarchy in an assignability question.
+/// Whether a signature record keeps its own hierarchy in an assignability question.
 ///
 /// The two answers exist because the same relation is read for opposite purposes: a diagnostic must
 /// never accuse a correct program, and an overload selection must never pick a body the program did
 /// not mean. See [`Ty::is_applicable_to`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Demotion {
-    /// A stub is demoted to its name, so its partial hierarchy produces no false mismatch.
+    /// A record is demoted to its name, so its partial hierarchy produces no false mismatch.
     Lenient,
-    /// A stub keeps its hierarchy, so its partial member set produces no false *match*.
+    /// A record keeps its hierarchy, so its partial member set produces no false *match*.
     Precise,
 }
 
@@ -362,19 +362,24 @@ impl Ty {
             return false;
         }
         // A type assigned to itself: the common case, and trivially assignable. Short-circuit before
-        // the (allocating) stub demotion below, which would only rebuild both sides and re-compare
-        // them equal anyway.
+        // the (allocating) demotion below, which would only rebuild both sides and re-compare them
+        // equal anyway.
         if self == target {
             return true;
         }
-        // A standard-library *stub* type carries only a partial hierarchy and member set (the common
-        // members, no generics — see [`crate::stdlib`]), so checking it precisely risks a false
-        // mismatch: an omitted supertype (`Integer` does not list `Comparable`) or autoboxing
-        // (`Integer n = 1;`). Demote a stub-origin project type to its external (by-name, lenient)
-        // form for assignment conversion; inference and hover still use the precise stub. Without an
-        // index there are no stub project types, so this is a no-op (the `infer_node` path unchanged).
+        // A library type indexed at signature fidelity carries only a partial hierarchy and member
+        // set — the real implementation is a superset of it — so checking it precisely risks a
+        // false mismatch: an omitted supertype (a record of `Integer` that does not list
+        // `Comparable`) or autoboxing (`Integer n = 1;`). Demote such a type to its external
+        // (by-name, lenient) form for assignment conversion; inference and hover still use the
+        // precise declarations. Without an index no type resolves to an item at all, so this is a
+        // no-op (the `infer_node` path unchanged).
+        //
+        // A library at `Complete` fidelity is *not* demoted, and that is the whole payoff of the
+        // fidelity axis: the same `String.java` checks strictly for the build that compiles it into
+        // its own module, because there what it does not declare the program does not have.
         let (lhs, rhs) = match demote {
-            Demotion::Lenient => (self.demote_stdlib(index), target.demote_stdlib(index)),
+            Demotion::Lenient => (self.demote_records(index), target.demote_records(index)),
             Demotion::Precise => (self.clone(), target.clone()),
         };
         // Identity covers equal primitives, the same project item, an equally-spelled external
@@ -476,34 +481,35 @@ impl Ty {
         ) && self.args_definitely_differ(target)
     }
 
-    /// This type with every standard-library *stub* class type (a [`ClassTy::Project`] whose item has
-    /// [`ItemOrigin::Stdlib`]) rewritten to its external (by-name) form, recursing through array
-    /// elements and type arguments. The stubs are intentionally partial, so assignment conversion
-    /// treats them leniently; see [`is_assignable_to`](Ty::is_assignable_to). Without an `index` (the
-    /// project-free path) there are no stub project types and this clones unchanged.
-    fn demote_stdlib(&self, index: Option<&ProjectIndex>) -> Self {
+    /// This type with every **signature record** class type (a [`ClassTy::Project`] whose item is a
+    /// library indexed at [`LibraryFidelity::Signatures`](crate::LibraryFidelity)) rewritten to its
+    /// external (by-name) form, recursing through array elements and type arguments. Such a record
+    /// is intentionally partial, so assignment conversion treats it leniently; see
+    /// [`is_assignable_to`](Ty::is_assignable_to). Without an `index` (the project-free path)
+    /// nothing resolves to an item and this clones unchanged.
+    fn demote_records(&self, index: Option<&ProjectIndex>) -> Self {
         let Some(index) = index else {
             return self.clone();
         };
         match self {
             Self::Class(ClassTy::Project { id, name, args })
-                if index.item(*id).origin == ItemOrigin::Stdlib =>
+                if index.item(*id).origin.is_signature_record() =>
             {
                 Self::Class(ClassTy::External {
                     name: name.clone(),
-                    args: args.iter().map(|a| a.demote_stdlib(Some(index))).collect(),
+                    args: args.iter().map(|a| a.demote_records(Some(index))).collect(),
                 })
             }
             Self::Class(ClassTy::Project { id, name, args }) => Self::Class(ClassTy::Project {
                 id: *id,
                 name: name.clone(),
-                args: args.iter().map(|a| a.demote_stdlib(Some(index))).collect(),
+                args: args.iter().map(|a| a.demote_records(Some(index))).collect(),
             }),
             Self::Class(ClassTy::External { name, args }) => Self::Class(ClassTy::External {
                 name: name.clone(),
-                args: args.iter().map(|a| a.demote_stdlib(Some(index))).collect(),
+                args: args.iter().map(|a| a.demote_records(Some(index))).collect(),
             }),
-            Self::Array(elem) => Self::Array(Box::new(elem.demote_stdlib(Some(index)))),
+            Self::Array(elem) => Self::Array(Box::new(elem.demote_records(Some(index)))),
             Self::Primitive(_) | Self::Void | Self::Null | Self::TypeVar { .. } | Self::Unknown => {
                 self.clone()
             }

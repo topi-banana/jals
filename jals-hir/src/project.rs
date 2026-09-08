@@ -56,6 +56,79 @@ use crate::ty::{ClassTy, Ty};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileId(pub u32);
 
+impl FileId {
+    /// Where the [`library`](Self::library) space starts. Everything at or above this is a file no
+    /// host can open.
+    ///
+    /// Chosen to sit above every base a host partitions the low range with, so a host's decoder
+    /// routes a library id and a classpath pseudo-id to its own "not a real file" arm without a
+    /// case of its own.
+    const LIBRARY_BASE: u32 = 0xF000_0000;
+
+    /// Where [`classfile`](Self::classfile) counts down from — immediately below the library space.
+    const CLASSFILE_TOP: u32 = Self::LIBRARY_BASE - 1;
+
+    /// How far the classfile block may descend before it would collide with a host's own ids.
+    ///
+    /// Not a limit anybody reaches (it is 256M classes on one classpath); it exists because the
+    /// block grows *downward* and nothing else states where it must stop.
+    const CLASSFILE_FLOOR: u32 = 0xE000_0000;
+
+    /// The `n`th library compilation unit's id.
+    ///
+    /// One allocator so every host numbers the same way. Two schemes for one space is what this
+    /// replaces: a compile that numbered a package's Java from zero — colliding with the project's
+    /// own files whenever the project had more than none — and an editor that numbered it from a
+    /// base of its own, so the same Java had two identities depending on which host indexed it.
+    ///
+    /// The space counts **up** from a fixed base, deliberately. Anchoring it to `u32::MAX` and
+    /// counting down made every id below it move whenever the library gained a file, which is how
+    /// the classpath block's start came to depend on how many stubs were indexed.
+    #[must_use]
+    pub const fn library(n: u32) -> Self {
+        Self(Self::LIBRARY_BASE.saturating_add(n))
+    }
+
+    /// This id's index within the [`library`](Self::library) space, or `None` when it is a host's
+    /// own id.
+    ///
+    /// The inverse, published so a host that partitions the low range for its own purposes routes
+    /// this space by *asking* rather than by restating the base. A host holding its own copy of
+    /// the number is a partition that agrees only until one side moves — and the classpath's
+    /// reserved block sits directly below this, so "not a library id" is not the same as "a file
+    /// the host owns"; use [`is_openable`](Self::is_openable) for that question.
+    #[must_use]
+    pub const fn library_index(self) -> Option<u32> {
+        if self.0 >= Self::LIBRARY_BASE {
+            Some(self.0 - Self::LIBRARY_BASE)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this id could name a file a host owns, rather than one of the two spaces this crate
+    /// reserves for text that has no file at all (a library unit, a classpath pseudo-file).
+    #[must_use]
+    pub const fn is_openable(self) -> bool {
+        self.0 < Self::CLASSFILE_FLOOR
+    }
+
+    /// The `j`th classpath pseudo-file's id, counting down from just below the library space.
+    ///
+    /// Saturating rather than wrapping: past [`CLASSFILE_FLOOR`](Self::CLASSFILE_FLOOR) the ids
+    /// stop being distinct, which loses navigation for the classes past it and corrupts nothing —
+    /// the alternative, wrapping into a host's own id range, would make a `.class` claim a project
+    /// file's identity.
+    const fn classfile(j: u32) -> Self {
+        let id = Self::CLASSFILE_TOP.saturating_sub(j);
+        Self(if id < Self::CLASSFILE_FLOOR {
+            Self::CLASSFILE_FLOOR
+        } else {
+            id
+        })
+    }
+}
+
 /// A fully-qualified type name, dotted at every level (`a.b.Outer.Inner`). Nested types use `.`
 /// (the source-level canonical name), matching how imports spell them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -95,79 +168,125 @@ pub struct ItemId(u32);
 /// The one type name the language supplies as a supertype without any source writing it.
 const OBJECT_FQN: &str = "java.lang.Object";
 
-/// Where an indexed [`Item`] comes from: the project's own sources, a `git`/`path` dependency's
-/// sources, a native package's Java, an external `.class` file, or an embedded standard-library
-/// stub.
+/// How faithful a **library** declaration is to the code that will actually run.
 ///
-/// All are indexed by the same machinery but treated differently at the edges — e.g. a stub has no
-/// real file the host can open, so navigation into it is suppressed.
+/// The same Java text answers this differently depending on the route it arrived by, which is the
+/// whole reason this is a separate axis rather than two origins. `java.lang.String` compiled into
+/// the module a `jals-wasm` project produces is [`Complete`](Self::Complete): what it does not
+/// declare, the program does not have. The identical file indexed for a `javac` build is
+/// [`Signatures`](Self::Signatures) — the JDK that supplies the implementation at run time is a
+/// superset of it, so a member it omits is a gap in the record and not an absence in the program.
+///
+/// Writing the two tiers as two *texts* is what this replaces. A signature copy kept beside an
+/// implementation is one specification with two authors, and the only thing standing between them
+/// is somebody remembering to edit both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryFidelity {
+    /// The declarations are the ones that will run: this Java is compiled into the same artifact
+    /// the project is.
+    ///
+    /// Read as [`Declarations::Complete`], so what the language implies but no line writes — an
+    /// implicit constructor, a record's accessors — is recorded. Not demoted in checking, and its
+    /// annotations are the author's own.
+    Complete,
+    /// The declarations are a *record* of a library this build does not compile, and the real
+    /// implementation is a superset of them.
+    ///
+    /// Read as [`Declarations::SignaturesOnly`], so nothing is inferred from an absence. Demoted to
+    /// external in type **checking** (see [`Ty::is_assignable_to`](crate::Ty::is_assignable_to)),
+    /// because a member set this partial would otherwise accuse a correct program; and it carries
+    /// no annotations, because nobody wrote any.
+    Signatures,
+}
+
+impl LibraryFidelity {
+    /// How a file at this fidelity is read.
+    ///
+    /// The two enums are one decision, and this is the only place they are joined. Choosing the
+    /// extraction mode at the *call site* — which is what a separate `extract_file` /
+    /// `extract_stub_file` selection was — is what let one route read a signature record as though
+    /// its silences were facts.
+    pub(crate) const fn declarations(self) -> Declarations {
+        match self {
+            Self::Complete => Declarations::Complete,
+            Self::Signatures => Declarations::SignaturesOnly,
+        }
+    }
+}
+
+/// Where an indexed [`Item`] comes from: the project's own sources, a `git`/`path` dependency's
+/// sources, a Java library the host supplied, or an external `.class` file.
+///
+/// All are indexed by the same machinery but treated differently at the edges — e.g. a library has
+/// no real file the host can open, so navigation into it is suppressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemOrigin {
     /// Declared in one of the project source files the host supplied to [`ProjectIndex::builder`].
     Project,
-    /// Declared in an embedded `java.lang` stub; present only via
-    /// [`ProjectIndexBuilder::with_stdlib`]. Carries signatures for inference and hover, but no
-    /// host-openable location.
-    Stdlib,
-    /// Decoded from a `.class` file on the classpath; present only via
-    /// [`ProjectIndexBuilder::with_classpath`]. Like a stub it has no host-openable source, but its
-    /// declared member set is *complete* for that class, so it is not treated leniently the way a
-    /// (deliberately partial) stub is.
-    Classpath,
     /// Declared in an external **library source** file — the `.java` of a `git`/`path`
     /// `[dependencies]` entry the host folds in via
     /// [`with_source_deps`](ProjectIndexBuilder::with_source_deps). Indexed from real source (so
     /// its member set is complete and it is *not* treated leniently) and locatable at its real
     /// [`file`](Item::file) / [`name_range`](Item::name_range), so it resolves types and is a
-    /// go-to-definition target — yet it is not one of the project's own files, so the host never lints
-    /// or renames it.
+    /// go-to-definition target — yet it is not one of the project's own files, so the host never
+    /// lints or renames it.
     Source,
-    /// Declared in the Java a **native package** publishes — a `jals-native` package the host
-    /// selected through `[build] native-packages`, folded in via
-    /// [`with_native_packages`](ProjectIndexBuilder::with_native_packages).
+    /// Declared in the Java a **package** publishes — the platform library, or a package the host
+    /// resolved for this project — folded in via
+    /// [`with_library`](ProjectIndexBuilder::with_library).
     ///
-    /// Indexed from real source, and *complete*: unlike a stub, which records signatures for a JDK
-    /// nobody here has, this Java is compiled into the artifact the project runs — what it does
-    /// not declare, the program does not have. So it is not treated leniently.
-    ///
-    /// What separates it from [`Source`](Self::Source) is that it has no file anywhere. Its text is
-    /// a compile-time constant in the binary that shipped the package, so there is nothing for a
-    /// host to open and [`item_location`] answers nothing for it — the same answer a stub gets, for
-    /// the same reason.
-    ///
-    /// [`item_location`]: https://docs.rs/jals-editor
-    Native,
+    /// The [`LibraryFidelity`] says whether those declarations are the ones that will run. What is
+    /// true of the origin at either tier is that it has **no file anywhere**: the text is a
+    /// constant in the binary that shipped the package, or a tree the host holds in memory, so
+    /// there is nothing to open and navigation into one yields no target.
+    Library(LibraryFidelity),
+    /// Decoded from a `.class` file on the classpath; present only via
+    /// [`ProjectIndexBuilder::with_classpath`]. Like a library it has no host-openable source, but
+    /// its declared member set is *complete* for that class, so it is not treated leniently the way
+    /// a [`Signatures`](LibraryFidelity::Signatures) record is.
+    Classpath,
 }
 
 impl ItemOrigin {
+    /// A library at the fidelity of a *record* rather than of running code.
+    ///
+    /// Named because three predicates here and one demotion in [`crate::ty`] ask exactly this, and
+    /// spelling the pattern out at each would be four places to revisit when a third tier arrives.
+    pub(crate) const fn is_signature_record(self) -> bool {
+        matches!(self, Self::Library(LibraryFidelity::Signatures))
+    }
+
     /// Whether an item of this origin was indexed from Java **source**, so what its declarations
     /// do not say is a fact rather than a gap.
     ///
-    /// [`Member::annotations`] is empty for two very different reasons. A project or library-source
-    /// member is empty because its author wrote no annotation; a stub or class-file member is empty
-    /// because neither is read for one — a stub has no annotations at all, and this crate does not
-    /// yet decode a class file's `RuntimeVisibleAnnotations`. A consumer that reads an unannotated
-    /// declaration as a *claim* (`jals-lint`'s `nullness-mismatch` under `default = "non-null"`)
-    /// must ask this first, or it reports every `null` passed to a library method that documents
-    /// itself as accepting one. Exhaustive, so a new origin has to answer deliberately.
+    /// [`Member::annotations`] is empty for two very different reasons. A project, library-source
+    /// or compiled-in member is empty because its author wrote no annotation; a signature record or
+    /// class-file member is empty because neither is read for one — a signature record has no
+    /// annotations at all, and this crate does not yet decode a class file's
+    /// `RuntimeVisibleAnnotations`. A consumer that reads an unannotated declaration as a *claim*
+    /// (`jals-lint`'s `nullness-mismatch` under `default = "non-null"`) must ask this first, or it
+    /// reports every `null` passed to a library method that documents itself as accepting one.
+    /// Exhaustive, so a new origin has to answer deliberately.
     pub const fn carries_annotations(self) -> bool {
         match self {
-            // A native package's Java is written by its author exactly as a project's is, so an
-            // annotation it does not carry is one nobody wrote.
-            Self::Project | Self::Source | Self::Native => true,
-            Self::Stdlib | Self::Classpath => false,
+            // A package's Java is written by its author exactly as a project's is, so an annotation
+            // it does not carry is one nobody wrote — but only where that Java is what runs. A
+            // signature record is silent about annotations for the same reason it is silent about
+            // the members it omits: nobody looked.
+            Self::Project | Self::Source | Self::Library(LibraryFidelity::Complete) => true,
+            Self::Library(LibraryFidelity::Signatures) | Self::Classpath => false,
         }
     }
 
-    /// Whether an item of this origin lives in a file the host owns and may rewrite — the only origin
-    /// the LSP renames or treats as a project input. Every other origin (a `java.lang` stub, a
+    /// Whether an item of this origin lives in a file the host owns and may rewrite — the only
+    /// origin the LSP renames or treats as a project input. Every other origin (a package's Java, a
     /// classpath `.class`, or a `git`/`path` library source) is external: navigable at most, never
     /// edited. An exhaustive match so a new origin must explicitly opt in here rather than silently
     /// becoming renamable.
     pub const fn is_host_editable(self) -> bool {
         match self {
             Self::Project => true,
-            Self::Stdlib | Self::Classpath | Self::Source | Self::Native => false,
+            Self::Library(_) | Self::Classpath | Self::Source => false,
         }
     }
 }
@@ -695,7 +814,7 @@ struct RawType {
 /// so reading the stub's silence as a declaration invents a member the JDK does not have — and
 /// every consumer is then free to call it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Declarations {
+pub(crate) enum Declarations {
     /// Real source: what is not written is what the language implies.
     Complete,
     /// A signature record: what is not written is simply not recorded.
@@ -797,40 +916,92 @@ impl SourceLocations {
     }
 }
 
+/// One library compilation unit to index, and how faithful it is to what will run.
+///
+/// The host parses the text and assigns the [`FileId`] — use [`FileId::library`] so every host
+/// numbers them the same way — and states the [`LibraryFidelity`]. Stating it is the host's job
+/// because it is not a property of the Java: the same `String.java` is
+/// [`Complete`](LibraryFidelity::Complete) for the build that compiles it into its module and
+/// [`Signatures`](LibraryFidelity::Signatures) for the one that will link a real JDK instead.
+#[derive(Debug, Clone)]
+pub struct LibraryFile {
+    /// Where this unit sits in the [`FileId`] space. See [`FileId::library`].
+    pub file: FileId,
+    /// The parsed `SOURCE_FILE` root.
+    ///
+    /// Owned rather than borrowed, and a `SyntaxNode` is cheap to clone. The alternative made
+    /// every caller hold a `Vec` of roots alive beside a `Vec` of borrows of it, which is a
+    /// lifetime dance for no benefit at a seam whose whole job is to be easy to hand things to.
+    pub root: SyntaxNode,
+    /// Whether these declarations are the ones that will run.
+    pub fidelity: LibraryFidelity,
+}
+
+impl LibraryFile {
+    /// Parse `sources` into library units, numbering them from the start of the
+    /// [`library`](FileId::library) space.
+    ///
+    /// The one-line form of what every host does by hand when it already has the text somewhere
+    /// else. Order is the caller's, and it is preserved: the [`FileId`]s follow it.
+    pub async fn parse(sources: &[(&str, LibraryFidelity)]) -> Vec<Self> {
+        let mut files = Vec::with_capacity(sources.len());
+        for (index, (text, fidelity)) in sources.iter().enumerate() {
+            files.push(Self {
+                file: FileId::library(u32::try_from(index).unwrap_or(u32::MAX)),
+                root: jals_syntax::Parse::parse(text).await.syntax(),
+                fidelity: *fidelity,
+            });
+        }
+        files
+    }
+
+    /// The same, for units described as `(text, is_the_code_that_will_run)`.
+    ///
+    /// The `bool` is not a shortcut past naming the states. It is what a *package* can say: a
+    /// package crate publishes Java and knows whether this build compiles it, and it deliberately
+    /// does not depend on the analysis crate that owns [`LibraryFidelity`] — a package author's
+    /// dependency list is the one thing that seam is sized by. This is where the two vocabularies
+    /// meet, and it is the only place they do.
+    pub async fn parse_tiers(sources: &[(&str, bool)]) -> Vec<Self> {
+        let tiers: Vec<(&str, LibraryFidelity)> = sources
+            .iter()
+            .map(|(text, running)| {
+                (
+                    *text,
+                    if *running {
+                        LibraryFidelity::Complete
+                    } else {
+                        LibraryFidelity::Signatures
+                    },
+                )
+            })
+            .collect();
+        Self::parse(&tiers).await
+    }
+}
+
 /// Fluent builder for a [`ProjectIndex`], created by [`ProjectIndex::builder`].
 ///
-/// Each `with_*` turns on one orthogonal input — the embedded `java.lang` stubs, the classpath
+/// Each `with_*` turns on one orthogonal input — a Java library the host resolved, the classpath
 /// `.class` facts, a source-location overlay, and `git`/`path` source dependencies — and
 /// [`build`](Self::build) folds every configured one in. Omit what you don't need; a project type
-/// still wins a fully-qualified-name clash over a library/stub type. Pure and `wasm32`-compatible.
+/// still wins a fully-qualified-name clash over a library type. Pure and `wasm32`-compatible.
 pub struct ProjectIndexBuilder<'a> {
     files: &'a [(FileId, SyntaxNode)],
     source_files: &'a [(FileId, SyntaxNode)],
-    native_files: &'a [(FileId, SyntaxNode)],
-    stdlib: bool,
+    library_files: &'a [LibraryFile],
     classpath: Option<&'a LoweredClasspath>,
     sources: Option<&'a SourceLocations>,
     disabled: &'a [(FileId, CfgMap)],
 }
 
 impl<'a> ProjectIndexBuilder<'a> {
-    /// Also index the embedded `java.lang` stubs as
-    /// [`Stdlib`](ItemOrigin::Stdlib)-origin types. With them, a reference to a core JDK type
-    /// (`String`, `Object`, …) resolves to a real [`Item`] with members and supertypes, so inference
-    /// and hover see through it instead of stopping at an external name. Still pure and
-    /// `wasm32`-compatible: the stub text is a compile-time constant parsed in memory.
-    #[must_use]
-    pub const fn with_stdlib(mut self) -> Self {
-        self.stdlib = true;
-        self
-    }
-
     /// Fold in the type, member, and generic signatures decoded from the project's classpath
     /// `.class` files as [`Classpath`](ItemOrigin::Classpath)-origin types. With them, a reference to
     /// an external library type resolves to a real [`Item`] with members and supertypes, so inference
     /// sees through it — `List<String>.get(0)` infers `String` through a loaded `java/util/List`.
     /// Lower the raw `.class` files once with [`ProjectIndex::lower_classpath`] and reuse the result
-    /// across rebuilds. Does **not** imply [`with_stdlib`](Self::with_stdlib) — opt into both.
+    /// across rebuilds. Does **not** imply [`with_library`](Self::with_library) — opt into both.
     #[must_use]
     pub const fn with_classpath(mut self, classpath: &'a LoweredClasspath) -> Self {
         self.classpath = Some(classpath);
@@ -861,20 +1032,26 @@ impl<'a> ProjectIndexBuilder<'a> {
         self
     }
 
-    /// Index `native_files` — the Java a selected **native package** publishes — as
-    /// [`Native`](ItemOrigin::Native)-origin types.
+    /// Index `library_files` — the Java the packages this project resolved publish, the platform
+    /// library among them — as [`Library`](ItemOrigin::Library)-origin types, each at the
+    /// [`LibraryFidelity`] its [`LibraryFile`] states.
     ///
-    /// Ranked directly after the project's own sources and its `git`/`path` library sources, and
-    /// ahead of the classpath and the stubs: a native package's Java is compiled into the same
-    /// artifact the project is, so where it and a stub declare one name, the one with a body is
-    /// the one the program will run.
+    /// Fidelity decides both how the file is read and where it ranks.
+    /// [`Complete`](LibraryFidelity::Complete) sits directly after the project's own sources and
+    /// its `git`/`path` library sources and **ahead of the classpath**, because that Java is
+    /// compiled into the same artifact the project is: where it and a record of the same name
+    /// disagree, the one with a body is the one that will run.
+    /// [`Signatures`](LibraryFidelity::Signatures) sits **last**, behind the classpath, because a
+    /// real `.class` is the complete declared member set of a class and a record is deliberately
+    /// partial.
     ///
     /// The host parses the text and assigns the [`FileId`]s, exactly as it does for
     /// [`with_source_deps`](Self::with_source_deps) — a package's Java is a compile-time constant
-    /// in the *host's* binary, so this crate has nothing to read it from.
+    /// in the *host's* binary, or a tree it holds in memory, so this crate has nothing to read it
+    /// from.
     #[must_use]
-    pub const fn with_native_packages(mut self, native_files: &'a [(FileId, SyntaxNode)]) -> Self {
-        self.native_files = native_files;
+    pub const fn with_library(mut self, library_files: &'a [LibraryFile]) -> Self {
+        self.library_files = library_files;
         self
     }
 
@@ -897,8 +1074,7 @@ impl<'a> ProjectIndexBuilder<'a> {
         ProjectIndex::build_inner(
             self.files,
             self.source_files,
-            self.native_files,
-            self.stdlib,
+            self.library_files,
             classes,
             sources,
             self.disabled,
@@ -915,19 +1091,23 @@ impl ProjectIndex {
     /// Each file contributes its package, its type-name imports, and every type declaration it
     /// holds (top-level and nested). When two files declare the same fully-qualified name, the
     /// first one indexed wins, and the indexing order is the priority order stated on
-    /// [`assemble`](Self::assemble). With no options the JDK / classpath is *not* indexed — opt in with
-    /// [`with_stdlib`](ProjectIndexBuilder::with_stdlib),
+    /// [`assemble`](Self::assemble). With no options **no** Java library is indexed at all — not
+    /// even `java.lang` — so a bare index leaves `String` an external name. Opt in with
+    /// [`with_library`](ProjectIndexBuilder::with_library),
     /// [`with_classpath`](ProjectIndexBuilder::with_classpath),
     /// [`with_source_locations`](ProjectIndexBuilder::with_source_locations), and
     /// [`with_source_deps`](ProjectIndexBuilder::with_source_deps), each turning on one orthogonal
     /// input.
+    ///
+    /// That this crate embeds no library of its own is the point. A `java.lang` written here would
+    /// be a second copy of one a package already publishes, and the two would drift — which is
+    /// exactly what a hard-coded name list beside a set of hand-written stubs did.
     #[must_use]
     pub const fn builder(files: &[(FileId, SyntaxNode)]) -> ProjectIndexBuilder<'_> {
         ProjectIndexBuilder {
             files,
             source_files: &[],
-            native_files: &[],
-            stdlib: false,
+            library_files: &[],
             classpath: None,
             sources: None,
             disabled: &[],
@@ -973,8 +1153,7 @@ impl ProjectIndex {
     async fn build_inner(
         files: &[(FileId, SyntaxNode)],
         source_files: &[(FileId, SyntaxNode)],
-        native_files: &[(FileId, SyntaxNode)],
-        stdlib: bool,
+        library_files: &[LibraryFile],
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
         disabled: &[(FileId, CfgMap)],
@@ -995,20 +1174,22 @@ impl ProjectIndex {
         for (file, root) in source_files {
             source.push((*file, Self::extract_file(root).await));
         }
-        let mut native: Vec<(FileId, FileFacts)> = Vec::with_capacity(native_files.len());
-        for (file, root) in native_files {
-            native.push((*file, Self::extract_file(root).await));
+        // One loop for both tiers: the fidelity decides how the file is read, and it travels with
+        // the facts so `assemble_inner` can rank on the same value rather than on which list a
+        // caller happened to put the file in.
+        let mut library: Vec<(FileId, LibraryFidelity, FileFacts)> =
+            Vec::with_capacity(library_files.len());
+        for unit in library_files {
+            library.push((
+                unit.file,
+                unit.fidelity,
+                Self::extract_library_file(&unit.root, unit.fidelity).await,
+            ));
         }
-        let stub: Vec<(FileId, FileFacts)> = if stdlib {
-            Self::stub_facts().await
-        } else {
-            Vec::new()
-        };
         Self::assemble_inner(
             &Self::borrow_facts(&project),
             &Self::borrow_facts(&source),
-            &Self::borrow_facts(&native),
-            &Self::borrow_facts(&stub),
+            &Self::borrow_library_facts(&library),
             classes,
             sources,
         )
@@ -1023,16 +1204,20 @@ impl ProjectIndex {
         Self::extract_file_with_cfg(root, &CfgMap::default()).await
     }
 
-    /// Extract a **stub** file's facts: the same walk, minus every member a declaration only
-    /// *implies*.
+    /// Extract a **library** file's facts at the fidelity its host stated.
     ///
-    /// A stub is a signature record and is deliberately partial ([`crate::stdlib`]), so a
-    /// constructor it does not list is one nobody wrote down — not one the class does not have.
-    /// Reading the absence the way [`extract_file`](Self::extract_file) does gives
-    /// `java.lang.Integer` a no-argument constructor the JDK does not declare, which is a member
-    /// every consumer would then be free to call.
-    async fn extract_stub_file(root: &SyntaxNode) -> FileFacts {
-        Self::extract(root, &CfgMap::default(), Declarations::SignaturesOnly).await
+    /// The fidelity is the whole difference. At [`Complete`](LibraryFidelity::Complete) this is
+    /// [`extract_file`](Self::extract_file): the Java is compiled into the artifact, so what the
+    /// language implies but no line writes is a member the program really has. At
+    /// [`Signatures`](LibraryFidelity::Signatures) every implied member is dropped, because a
+    /// constructor a record does not list is one nobody wrote down rather than one the class does
+    /// not have — reading that absence the other way gives `java.lang.Integer` a no-argument
+    /// constructor the JDK does not declare, which every consumer is then free to call.
+    ///
+    /// Public because a host that caches facts per file (the LSP) extracts them itself and hands
+    /// them to [`assemble`](Self::assemble); it must reach the same answer this does.
+    pub async fn extract_library_file(root: &SyntaxNode, fidelity: LibraryFidelity) -> FileFacts {
+        Self::extract(root, &CfgMap::default(), fidelity.declarations()).await
     }
 
     /// Like [`extract_file`](Self::extract_file), but skipping every `cfg`-disabled host in
@@ -1127,50 +1312,33 @@ impl ProjectIndex {
         }
     }
 
-    /// The embedded `java.lang` stub facts, each under a reserved high [`FileId`] (counting down from
-    /// `u32::MAX`, disjoint from the host's low ids). The stubs never change, so a host that
-    /// re-indexes on every edit extracts these once and reuses them across every
-    /// [`assemble`](Self::assemble).
-    pub async fn stub_facts() -> Vec<(FileId, FileFacts)> {
-        let sources = crate::stdlib::Stdlib::stub_sources();
-        let mut facts = Vec::with_capacity(sources.len());
-        for (i, src) in sources.iter().enumerate() {
-            let root = jals_syntax::Parse::parse(src).await.syntax();
-            facts.push((
-                FileId(u32::MAX - i as u32),
-                Self::extract_stub_file(&root).await,
-            ));
-        }
-        facts
-    }
-
-    /// Assemble an index from pre-extracted per-file [`FileFacts`], folding in the classpath facts and
-    /// the source-location overlay — the non-CST-walking half of indexing. `project` (host-editable
-    /// sources), `source` (`git`/`path` library sources), `native` (a selected native package's
-    /// Java), `classes` (the classpath), and `stub` (from [`stub_facts`](Self::stub_facts)) are
-    /// indexed in that priority order, so on a fully-qualified-name clash a project type wins over a
-    /// library type wins over a native package's type wins over a classpath type
-    /// wins over a stub — the stub last because it is signature-only and deliberately partial. Cheap
-    /// relative to extraction (allocations, hashing, and supertype resolution only), so re-running it
-    /// on every edit — reusing cached facts for the unchanged files — is the incremental path, bit-for
-    /// -bit identical to a from-scratch [`builder`](Self::builder) build over the same inputs. Pure and
-    /// `wasm32`-compatible.
+    /// Assemble an index from pre-extracted per-file [`FileFacts`], folding in the classpath facts
+    /// and the source-location overlay — the non-CST-walking half of indexing.
+    ///
+    /// `project` (host-editable sources), `source` (`git`/`path` library sources), `library` (the
+    /// Java the resolved packages publish, each carrying its [`LibraryFidelity`]) and `classes`
+    /// (the classpath) are folded in at the priority the module's own ranking states: a project
+    /// type beats a library-source type beats a [`Complete`](LibraryFidelity::Complete) package
+    /// type beats a classpath type beats a [`Signatures`](LibraryFidelity::Signatures) record.
+    ///
+    /// Cheap relative to extraction (allocations, hashing, and supertype resolution only), so
+    /// re-running it on every edit — reusing cached facts for the unchanged files — is the
+    /// incremental path, bit-for-bit identical to a from-scratch [`builder`](Self::builder) build
+    /// over the same inputs. Pure and `wasm32`-compatible.
     pub async fn assemble(
         project: &[(FileId, &FileFacts)],
         source: &[(FileId, &FileFacts)],
-        native: &[(FileId, &FileFacts)],
-        stub: &[(FileId, &FileFacts)],
+        library: &[(FileId, LibraryFidelity, &FileFacts)],
         classpath: &LoweredClasspath,
         sources: &SourceLocations,
     ) -> Self {
-        Self::assemble_inner(project, source, native, stub, &classpath.classes, sources).await
+        Self::assemble_inner(project, source, library, &classpath.classes, sources).await
     }
 
     async fn assemble_inner(
         project: &[(FileId, &FileFacts)],
         source: &[(FileId, &FileFacts)],
-        native: &[(FileId, &FileFacts)],
-        stub: &[(FileId, &FileFacts)],
+        library: &[(FileId, LibraryFidelity, &FileFacts)],
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
     ) -> Self {
@@ -1184,14 +1352,19 @@ impl ProjectIndex {
             decl_to_member: HashMap::new(),
         };
 
-        // Every source compilation unit to index, in priority order: the host's project files first,
-        // then the `git`/`path` library sources, then a selected native package's Java — so on a
-        // fully-qualified-name clash a project type wins over a library type wins over a package's
-        // (`by_fqn` keeps the first insert). A package sits ahead of the classpath and the stubs
-        // because its Java is compiled into the same artifact the project is: where it and a stub
-        // declare one name, the one with a body is the one the program will run. Every pass below walks this
-        // list and then `stubs`; the *first* pass interleaves the classpath between them, which is
-        // what puts a real `.class` ahead of a stub of the same name.
+        // Every source compilation unit to index, in priority order: the host's project files
+        // first, then the `git`/`path` library sources, then the package Java that is *compiled
+        // into this artifact* — so on a fully-qualified-name clash a project type wins over a
+        // library type wins over a package's (`by_fqn` keeps the first insert). That last group
+        // sits ahead of the classpath because its Java is compiled into the same artifact the
+        // project is: where it and a record of one name disagree, the one with a body is the one
+        // that will run.
+        //
+        // Every pass below walks this list and then `records`; the *first* pass interleaves the
+        // classpath between them, which is what puts a real `.class` ahead of a signature record of
+        // the same name. Both halves are split out of one `library` list by fidelity rather than
+        // taken as two parameters, so a caller cannot rank a file by choosing which argument to
+        // pass it in.
         let units: Vec<(FileId, &FileFacts, ItemOrigin)> = project
             .iter()
             .map(|(file, facts)| (*file, *facts, ItemOrigin::Project))
@@ -1201,14 +1374,18 @@ impl ProjectIndex {
                     .map(|(file, facts)| (*file, *facts, ItemOrigin::Source)),
             )
             .chain(
-                native
+                library
                     .iter()
-                    .map(|(file, facts)| (*file, *facts, ItemOrigin::Native)),
+                    .filter(|(_, fidelity, _)| matches!(fidelity, LibraryFidelity::Complete))
+                    .map(|(file, fidelity, facts)| {
+                        (*file, *facts, ItemOrigin::Library(*fidelity))
+                    }),
             )
             .collect();
-        let stubs: Vec<(FileId, &FileFacts, ItemOrigin)> = stub
+        let records: Vec<(FileId, &FileFacts, ItemOrigin)> = library
             .iter()
-            .map(|(file, facts)| (*file, *facts, ItemOrigin::Stdlib))
+            .filter(|(_, fidelity, _)| matches!(fidelity, LibraryFidelity::Signatures))
+            .map(|(file, fidelity, facts)| (*file, *facts, ItemOrigin::Library(*fidelity)))
             .collect();
 
         // First pass: package, imports, and type declarations.
@@ -1216,18 +1393,17 @@ impl ProjectIndex {
             index.register_file_types(file, facts, origin).await;
         }
         // Classpath `.class` files (already lowered to self-contained data) registered like source
-        // types. Their reserved `FileId`s sit just below the stub block so they never collide.
+        // types, under the reserved block just below the library space.
         //
-        // Registered *before* the stubs, and that order is the whole priority rule between them: a
-        // stub is signature-only and deliberately partial (`crate::stdlib`), a classpath type is the
-        // complete declared member set of a real class, and `ItemOrigin::Classpath` already says so.
-        // With the stubs first, indexing a real JDK left `java.lang.System` resolving to a stub that
-        // does not declare `lineSeparator`, and `println(Object)` binding to `println(String)`.
-        let classfile_block_start = u32::MAX - stub.len() as u32 - 1;
+        // Registered *before* the signature records, and that order is the whole priority rule
+        // between them: a record is deliberately partial, a classpath type is the complete declared
+        // member set of a real class, and `ItemOrigin` already says which is which. With the
+        // records first, indexing a real JDK left `java.lang.System` resolving to one that does not
+        // declare `lineSeparator`, and `println(Object)` binding to `println(String)`.
         let classfiles: Vec<(FileId, &crate::classpath::ClassfileClass)> = classes
             .iter()
             .enumerate()
-            .map(|(j, class)| (FileId(classfile_block_start - j as u32), class))
+            .map(|(j, class)| (FileId::classfile(j as u32), class))
             .collect();
         let mut yielder = Yielder::new();
         let mut classfile_owners: Vec<ItemId> = Vec::with_capacity(classfiles.len());
@@ -1235,7 +1411,7 @@ impl ProjectIndex {
             yielder.tick().await;
             classfile_owners.push(index.collect_classfile_type(file, class, sources));
         }
-        for &(file, facts, origin) in &stubs {
+        for &(file, facts, origin) in &records {
             index.register_file_types(file, facts, origin).await;
         }
         // Index each type's declaration site, so a same-file type reference (which resolves
@@ -1253,7 +1429,7 @@ impl ProjectIndex {
         // Second pass: members and project-internal inheritance. It runs after every type is indexed
         // so a supertype declared later (or in another file / stub) still resolves. Order is
         // immaterial here — unlike the first pass, this one resolves against a complete `by_fqn`.
-        for &(file, facts, _) in units.iter().chain(&stubs) {
+        for &(file, facts, _) in units.iter().chain(&records) {
             index.register_file_members(file, facts).await;
         }
         // The same second pass for classpath types, now that every type (project, stub, classpath) is
@@ -1636,17 +1812,22 @@ impl ProjectIndex {
             };
         }
 
-        // 5. Implicit `java.lang` import: an unqualified name is brought into every compilation unit
-        //    from `java.lang`. When the stubs are indexed (via `with_stdlib`) it binds to one;
-        //    when they are not, `java.lang.*` is absent from `by_fqn` and this falls through to the
-        //    external handling below — identical to the pre-stub behaviour.
+        // 5. Implicit `java.lang` import: an unqualified name is brought into every compilation
+        //    unit from `java.lang`. It binds to whichever origin won the name — the platform
+        //    library a host resolved, a real `.class` on the classpath, or the project's own type.
+        //
+        //    There is deliberately no name list behind this. One used to stand here for an index
+        //    built with no library at all, and being a *second* answer to "what is in `java.lang`"
+        //    it drifted from the first: it listed `Thread`, `Runtime` and `Cloneable`, which no
+        //    stub declared, so the same source reported differently depending on how the index was
+        //    built. A host supplies the library or it does not; there is no third answer.
         if let Some(&id) = self.by_fqn.get(&format!("java.lang.{name}")) {
             return TypeResolution::Project(id);
         }
 
-        // 5. Reachable from outside the index: an (unstubbed) implicit `java.lang` type, or any
-        //    on-demand import that could supply an unindexed type. Either way, no diagnostic.
-        if Self::is_java_lang(name) || !meta.on_demand.is_empty() {
+        // 6. Reachable from outside the index: any on-demand import could supply a type this index
+        //    never saw, so a name under one earns no diagnostic.
+        if !meta.on_demand.is_empty() {
             return TypeResolution::External;
         }
 
@@ -1747,10 +1928,10 @@ impl ProjectIndex {
                     // A classpath type navigates into its library source when that source is indexed;
                     // otherwise it has no host-openable location.
                     ItemOrigin::Classpath => item.source_location.clone(),
-                    // A stub and a native package's Java have no real source at all: one describes
-                    // a JDK nobody here has, the other is a constant in the binary that shipped
-                    // the package. Neither is a file a host can open.
-                    ItemOrigin::Stdlib | ItemOrigin::Native => None,
+                    // A library has no real source at all, at either fidelity: the text is a
+                    // constant in the binary that shipped the package, or a tree the host holds in
+                    // memory. Neither is a file a host can open.
+                    ItemOrigin::Library(_) => None,
                 }
             }
             TypeResolution::External | TypeResolution::Unresolved => None,
@@ -2187,7 +2368,7 @@ impl ProjectIndex {
             |current, &via_implicit| {
                 let item = &self.items[current.0 as usize];
                 (!via_implicit
-                    && (item.origin == ItemOrigin::Stdlib || item.has_external_supertype))
+                    && (item.origin.is_signature_record() || item.has_external_supertype))
                     .then_some(())
             },
             |_, &via_implicit, sup| via_implicit || sup.implicit,
@@ -2679,6 +2860,15 @@ impl ProjectIndex {
     /// assembly path an incremental host drives from its cached facts.
     fn borrow_facts(facts: &[(FileId, FileFacts)]) -> Vec<(FileId, &FileFacts)> {
         facts.iter().map(|(file, facts)| (*file, facts)).collect()
+    }
+
+    fn borrow_library_facts(
+        facts: &[(FileId, LibraryFidelity, FileFacts)],
+    ) -> Vec<(FileId, LibraryFidelity, &FileFacts)> {
+        facts
+            .iter()
+            .map(|(file, fidelity, facts)| (*file, *fidelity, facts))
+            .collect()
     }
 }
 
@@ -3444,79 +3634,6 @@ impl ProjectIndex {
         ];
         OBJECT_METHODS.contains(&name)
     }
-
-    /// Whether `name` is a commonly-used implicit `java.lang` type (imported into every file). Kept
-    /// small and conservative: it only needs to cover the names that would otherwise produce false
-    /// "cannot resolve" diagnostics in files with no imports.
-    ///
-    /// This is the fallback for an index built without [`with_stdlib`](ProjectIndexBuilder::with_stdlib);
-    /// with the stubs indexed, step 5 above binds the name to a real [`Item`] and never reaches here.
-    /// A name listed here resolves as [`External`](TypeResolution::External), so the list can only
-    /// ever *suppress* a diagnostic — an entry that is wrong costs a missed report, never a false
-    /// one. Which is why it should not lag [`crate::stdlib`]: every type the stubs declare belongs
-    /// here too, or the same source reports differently depending on how the index was built.
-    fn is_java_lang(name: &str) -> bool {
-        const JAVA_LANG: &[&str] = &[
-            "Object",
-            "String",
-            "CharSequence",
-            "StringBuilder",
-            "StringBuffer",
-            "Number",
-            "Byte",
-            "Short",
-            "Integer",
-            "Long",
-            "Float",
-            "Double",
-            "Boolean",
-            "Character",
-            "Void",
-            "Math",
-            "System",
-            "Runtime",
-            "Process",
-            "Thread",
-            "Runnable",
-            "Iterable",
-            "Comparable",
-            "Cloneable",
-            "AutoCloseable",
-            "Class",
-            "Enum",
-            "Record",
-            "Throwable",
-            "Error",
-            "Exception",
-            "RuntimeException",
-            "IllegalArgumentException",
-            "NumberFormatException",
-            "IllegalStateException",
-            "NullPointerException",
-            "IndexOutOfBoundsException",
-            "ArrayIndexOutOfBoundsException",
-            "StringIndexOutOfBoundsException",
-            "UnsupportedOperationException",
-            "ClassCastException",
-            "ArithmeticException",
-            "NegativeArraySizeException",
-            "InterruptedException",
-            "CloneNotSupportedException",
-            "AssertionError",
-            "ReflectiveOperationException",
-            "ClassNotFoundException",
-            "IllegalAccessException",
-            "InstantiationException",
-            "NoSuchFieldException",
-            "NoSuchMethodException",
-            "Override",
-            "Deprecated",
-            "SuppressWarnings",
-            "FunctionalInterface",
-            "SafeVarargs",
-        ];
-        JAVA_LANG.contains(&name)
-    }
 }
 
 /// Tests for how the index is **built**.
@@ -3541,13 +3658,25 @@ mod tests {
         block_on_inline(ProjectIndex::extract_file(root))
     }
 
-    /// One file, indexed with the embedded stdlib stubs folded in, so `java.lang.Object` is an
-    /// *indexed* type and the implicit edge has something to point at.
+    /// The smallest library that makes the implicit supertype edge have something to point at.
+    ///
+    /// Written here rather than reached for out of `jals-platform`, and deliberately: these tests
+    /// are about how the index *constructs* an edge, not about what the platform declares. Taking
+    /// the real one would make every assertion below depend on a file in another crate that nobody
+    /// editing it would think to re-run these against.
+    fn object_library() -> Vec<LibraryFile> {
+        block_on_inline(LibraryFile::parse(&[(
+            "package java.lang; public class Object { public String toString(); }",
+            LibraryFidelity::Signatures,
+        )]))
+    }
+
+    /// One file, indexed with that library folded in, so `java.lang.Object` is an *indexed* type.
     fn build_with_stubs(src: &str) -> ProjectIndex {
         let root = parse_root(src);
         block_on_inline(
             ProjectIndex::builder(&[(FileId(0), root)])
-                .with_stdlib()
+                .with_library(&object_library())
                 .build(),
         )
     }
@@ -3576,15 +3705,24 @@ mod tests {
         let a = "package p; class Base { int f() { return 0; } }";
         let b = "package p; class Sub extends Base { String g(int x) { return null; } }";
         let files = [(FileId(0), parse_root(a)), (FileId(1), parse_root(b))];
-        let built = block_on_inline(ProjectIndex::builder(&files).with_stdlib().build());
+        let library = object_library();
+        let built = block_on_inline(ProjectIndex::builder(&files).with_library(&library).build());
 
         let facts: Vec<(FileId, FileFacts)> = files.iter().map(|(f, r)| (*f, extract(r))).collect();
-        let stub = block_on_inline(ProjectIndex::stub_facts());
+        let library_facts: Vec<(FileId, LibraryFidelity, FileFacts)> = library
+            .iter()
+            .map(|unit| {
+                (
+                    unit.file,
+                    unit.fidelity,
+                    block_on_inline(ProjectIndex::extract_library_file(&unit.root, unit.fidelity)),
+                )
+            })
+            .collect();
         let assembled = block_on_inline(ProjectIndex::assemble(
             &ProjectIndex::borrow_facts(&facts),
             &[],
-            &[],
-            &ProjectIndex::borrow_facts(&stub),
+            &ProjectIndex::borrow_library_facts(&library_facts),
             &block_on_inline(ProjectIndex::lower_classpath(&[])),
             &SourceLocations::default(),
         ));
@@ -3641,14 +3779,12 @@ mod tests {
         let files = [(FileId(0), parse_root(a)), (FileId(1), parse_root(b))];
         let mut facts: Vec<(FileId, FileFacts)> =
             files.iter().map(|(f, r)| (*f, extract(r))).collect();
-        let stub = block_on_inline(ProjectIndex::stub_facts());
         let empty_cp = block_on_inline(ProjectIndex::lower_classpath(&[]));
         let assemble = |facts: &[(FileId, FileFacts)]| {
             block_on_inline(ProjectIndex::assemble(
                 &ProjectIndex::borrow_facts(facts),
                 &[],
                 &[],
-                &ProjectIndex::borrow_facts(&stub),
                 &empty_cp,
                 &SourceLocations::default(),
             ))

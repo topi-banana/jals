@@ -85,6 +85,35 @@ pub enum WasmError {
     TooLarge,
 }
 
+impl WasmError {
+    /// This refusal, said to be about one member's **declared signature**.
+    ///
+    /// A type with no representation is reported by its own name, which is enough when a reader
+    /// wrote it. It is not enough for a *library* input, where every body is lowered rather than
+    /// only the reachable ones: "`?` has no wasm representation" over fifty files names nothing at
+    /// all, and the answer is always the same question — which declaration.
+    /// This refusal, said to be about one expression — the innermost that has not already named
+    /// one, so a nested failure reports the operand rather than the whole statement.
+    pub(crate) fn in_expression(self, node: &SyntaxNode) -> Self {
+        match self {
+            Self::NoRepresentation(what) if !what.contains(" in `") => {
+                Self::NoRepresentation(alloc::format!("{what}, in `{}`", node.text()))
+            }
+            other => other,
+        }
+    }
+
+    pub(crate) fn in_signature(self, member: MemberId, index: &ProjectIndex) -> Self {
+        match self {
+            Self::NoRepresentation(ty) => Self::NoRepresentation(alloc::format!(
+                "{ty}, in the signature of `{}`",
+                CompileWasm::member_path(member, index)
+            )),
+            other => other,
+        }
+    }
+}
+
 impl core::fmt::Display for WasmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -952,13 +981,13 @@ impl CompileWasm {
                 }
                 for ty in index.resolved_param_tys(member) {
                     layout.declare_array(&ty, module)?;
-                    params.push(layout.val_type(&ty)?);
+                    params.push(layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?);
                 }
                 let returned = index.resolved_member_ty(member);
                 layout.declare_array(&returned, module)?;
                 let results = match returned {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty)?],
+                    ty => alloc::vec![layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?],
                 };
                 let descriptor = Descriptor::method_descriptor(member, index, false)
                     .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
@@ -1014,11 +1043,11 @@ impl CompileWasm {
                 };
                 let mut params = alloc::vec![layout.class_ref(item)?];
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty)?);
+                    params.push(layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?);
                 }
                 let results = match index.resolved_member_ty(member) {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty)?],
+                    ty => alloc::vec![layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?],
                 };
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
@@ -1113,7 +1142,7 @@ impl CompileWasm {
                     params.push(layout.class_ref(enclosing)?);
                 }
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty)?);
+                    params.push(layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?);
                 }
                 // The captures come after every declared parameter, so a declared one keeps its slot.
                 let captured = is_constructor
@@ -1128,7 +1157,7 @@ impl CompileWasm {
                 } else {
                     match index.resolved_member_ty(member) {
                         Ty::Void => Vec::new(),
-                        ty => alloc::vec![layout.val_type(&ty)?],
+                        ty => alloc::vec![layout.val_type(&ty).map_err(|error| error.in_signature(member, index))?],
                     }
                 };
 
@@ -1387,7 +1416,9 @@ impl Layout {
         let mut fields = Vec::with_capacity(slots.len());
         for slot in &slots {
             let ty = match slot {
-                Slot::Declared(member) => self.val_type(&index.resolved_member_ty(*member))?,
+                Slot::Declared(member) => self
+                    .val_type(&index.resolved_member_ty(*member))
+                    .map_err(|error| error.in_signature(*member, index))?,
                 Slot::Enclosing(enclosing) => self.class_ref(*enclosing)?,
                 Slot::Capture(ty) => self.val_type(ty)?,
             };
@@ -1711,6 +1742,14 @@ impl Layout {
             // a field of type `T` is one field whatever a use instantiates it at, and typing it at
             // the bound would make two instantiations two different structs.
             Ty::TypeVar { .. } => ValType::Ref(RefType::nullable(HeapType::Any)),
+            // `Unknown` is not "a library type this backend cannot spell" — it is inference
+            // having failed, which is a different problem with a different fix, and reporting it
+            // as the other one sends a reader looking for a dependency in a file that has none.
+            Ty::Unknown => {
+                return Err(WasmError::NoRepresentation(
+                    "a type inference could not determine".to_owned(),
+                ));
+            }
             other => return Err(WasmError::NoRepresentation(other.to_string())),
         })
     }
@@ -3549,6 +3588,11 @@ impl Lowering<'_> {
 
     /// Emit `expr`. Returns its type, or `None` when it left nothing on the stack.
     fn expr(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
+        self.expr_inner(expr, insn)
+            .map_err(|error| error.in_expression(expr.syntax()))
+    }
+
+    fn expr_inner(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
         match expr {
             ast::Expr::Literal(literal) => self.literal(literal, insn).map(Some),
             ast::Expr::Paren(paren) => {
@@ -4207,13 +4251,21 @@ impl Lowering<'_> {
     }
 
     /// The numeric type `node`'s recorded type is.
+    ///
+    /// Both refusals name the operand, which is the difference between a message a reader can act
+    /// on and one that only says a compile stopped. "An arithmetic operand of this type" was true
+    /// and useless: the whole question is *which* operand, and on a library input — where every
+    /// body is lowered rather than only the reachable ones — there are tens of thousands of them.
     fn num_of(&self, node: &SyntaxNode) -> Result<Numeric> {
         let ty = self
             .input
             .type_of_expr(Facts::span(node))
-            .ok_or(WasmError::Unsupported("a value with no inferred type"))?;
+            .ok_or_else(|| WasmError::Unresolved(node.text().to_string()))?;
         let Ty::Primitive(primitive) = ty else {
-            return Err(WasmError::Unsupported("an arithmetic operand of this type"));
+            return Err(WasmError::NoRepresentation(alloc::format!(
+                "{ty} (the type of `{}`, an arithmetic operand)",
+                node.text()
+            )));
         };
         // A `boolean` is not a numeric type (JLS §4.2), so the shared rule refuses it. On *this*
         // target it shares `int`'s representation, and the only operators it reaches are the bitwise

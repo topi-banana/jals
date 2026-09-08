@@ -5,6 +5,17 @@ use jals_classfile::ClassFile;
 use jals_hir::{FileAnalysis, FileId, MismatchKind, ProjectIndex, TypeMismatch};
 use jals_syntax::SyntaxNode;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Mismatches found without a project index (reference types stay external / lenient).
 fn free(src: &str) -> Vec<TypeMismatch> {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
@@ -33,12 +44,12 @@ fn indexed(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
 /// Mismatches found in `sources[file]` with the embedded stubs indexed as well.
 ///
 /// The sibling of [`indexed`] that the *product* actually resembles: every host builds its index
-/// with `ProjectIndex::builder(..).with_stdlib()`, so a guard written through [`indexed`] alone is
+/// with `ProjectIndex::builder(..).with_library(&platform())`, so a guard written through [`indexed`] alone is
 /// blind to anything the stubs change — which is how a `java.lang.Object` reachable from every type
 /// could silence [`ProjectIndex::method_set_complete`] for the whole workspace without a red test.
 fn indexed_with_stdlib(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
     let nodes = parsed(sources);
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_stdlib().build());
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_library(&platform()).build());
     mismatches_of(&nodes, &index, file)
 }
 
@@ -398,7 +409,7 @@ fn object_method_names_are_not_reported() {
 
 /// The guard on [`ProjectIndex::method_set_complete`] surviving an indexed `java.lang.Object`.
 ///
-/// Every class implicitly extends `Object`, and the stubs are `ItemOrigin::Stdlib` — whose whole
+/// Every class implicitly extends `Object`, and the stubs are `ItemOrigin::Library(LibraryFidelity::Signatures)` — whose whole
 /// purpose in that predicate is to make an overload set *incomplete*. Attaching the implicit edge
 /// without exempting it therefore makes the walk reach a stub from **every** type, `check_call`
 /// concludes nothing anywhere, and `type-mismatch` goes silent across the workspace with no other

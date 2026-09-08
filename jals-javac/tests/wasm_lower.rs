@@ -25,6 +25,17 @@ use jals_javac::wasm::{CompileWasm, ExportKind, Instr, Module, WasmOptions};
 use jals_syntax::SyntaxNode;
 use std::fmt::Write as _;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Compile every source as one module — which is what "the whole project" means for a target with
 /// no dynamic loading and no classpath — and stop at the module rather than at its bytes.
 fn module_of(sources: &[&str]) -> Module {
@@ -52,7 +63,7 @@ fn module_of_parts(sources: &[&str], libraries: &[&str], options: WasmOptions) -
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_library(&platform()).build());
 
     let analyses: Vec<FileAnalysis> = roots
         .iter()
@@ -561,7 +572,7 @@ public class Arg {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -705,7 +716,7 @@ public class Missing {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -777,7 +788,7 @@ public class S {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -785,11 +796,16 @@ public class S {
     let typed = jals_exec::block_on_inline(semantics.typed());
     let error = CompileWasm::module(&[typed], &[], &index, WasmOptions { assertions: true })
         .expect_err("the condition is compiled now, and it names a library type");
+    let message = error.to_string();
+    // The type, and the expression it came from. The second half is what makes the report usable
+    // on a library input, where every body is lowered rather than only the reachable ones.
     assert!(
-        error
-            .to_string()
-            .contains("`String` has no wasm representation"),
+        message.contains("`String") && message.contains("has no wasm representation"),
         "the report names what it could not lower: {error}"
+    );
+    assert!(
+        message.contains(r#""x""#),
+        "the report names the expression it came from: {error}"
     );
 }
 

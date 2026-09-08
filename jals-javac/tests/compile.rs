@@ -10,6 +10,17 @@ use std::process::{Command, Stdio};
 use jals_hir::{FileAnalysis, FileId, ProjectIndex};
 use jals_javac::lower::{Compile, CompiledClass, LowerError};
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Java 25, matching the class files the rest of the workspace pins its fixtures to.
 const MAJOR_JAVA_25: u16 = 69;
 
@@ -35,7 +46,7 @@ fn compile(source: &str) -> Result<Vec<CompiledClass>, LowerError> {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root)])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let semantics = analysis.in_project(&index, FileId(0));
@@ -59,7 +70,7 @@ fn compile_across(sources: &[&str]) -> Result<Vec<CompiledClass>, LowerError> {
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_library(&platform()).build());
     let last = FileId(u32::try_from(sources.len() - 1).expect("file id"));
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&roots[sources.len() - 1].1));
     let semantics = analysis.in_project(&index, last);

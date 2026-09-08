@@ -1,7 +1,7 @@
 //! `jals` command-line interface.
 
 mod migrate;
-mod natives;
+mod packages;
 mod report;
 mod session;
 mod shell;
@@ -957,7 +957,7 @@ impl BuildArgs {
             jals_classpath::NetworkPolicy::when_offline(self.offline),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
-        let (sources, tree, inputs, _) = App::prepare_compile_inputs(
+        let (sources, tree, inputs, _, declared) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             &features,
@@ -980,7 +980,7 @@ impl BuildArgs {
             tree,
             &inputs,
             Lowering::Build,
-            natives::Natives::select(session.shell(), &manifest)?,
+            packages::Packages::resolve(session.shell(), &manifest, Some(declared))?,
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
@@ -1121,7 +1121,7 @@ impl RunArgs {
             jals_classpath::NetworkPolicy::when_offline(self.offline),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
-        let (sources, tree, inputs, _) = App::prepare_compile_inputs(
+        let (sources, tree, inputs, _, declared) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             &features,
@@ -1151,7 +1151,7 @@ impl RunArgs {
         // One selection for the whole command: the same packages are compiled into the module and
         // linked when it is instantiated, so resolving twice would build a second console buffer
         // for the half that runs.
-        let natives = natives::Natives::select(session.shell(), &manifest)?;
+        let natives = packages::Packages::resolve(session.shell(), &manifest, Some(declared))?;
         // The compile step goes through the same `[build] backend` selection `jals build` uses, so a
         // manifest asking for the in-process compiler gets it here too. The run step is selected
         // independently from `[toolchain] runtime`: `"builtin"` is the in-process dummy, anything
@@ -1247,7 +1247,7 @@ impl RunArgs {
         &self,
         session: &Session,
         outcome: &jals_build::BackendOutcome,
-        natives: &jals_native::NativePackageSet,
+        natives: &jals_native::PackageSelection,
         progress: &jals_progress::Progress,
     ) -> Result<ExitCode> {
         let module = outcome
@@ -1366,7 +1366,7 @@ impl TestArgs {
             jals_classpath::NetworkPolicy::when_offline(self.offline),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
-        let (sources, tree, inputs, discovered_tests) = App::prepare_compile_inputs(
+        let (sources, tree, inputs, discovered_tests, declared) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             &features,
@@ -1378,7 +1378,7 @@ impl TestArgs {
         .await?;
         // One selection for the whole command, for the reason `jals run` resolves one: the module
         // the backend compiles and the module the launcher instantiates are the same module.
-        let natives = natives::Natives::select(session.shell(), &manifest)?;
+        let natives = packages::Packages::resolve(session.shell(), &manifest, Some(declared))?;
         let plan = CompilePlan::prepare(
             &manifest,
             &root,
@@ -1897,21 +1897,17 @@ impl LintProject {
     /// best-effort about every other input it cannot resolve (an unbuilt dependency, a missing
     /// classpath entry), and refusing to lint a file because one package name is misspelled would
     /// be the one input that stops the command outright.
-    fn native_layout_sources(
+    fn layout_packages(
         shell: &std::sync::Arc<Shell>,
         manifest: &Manifest,
-    ) -> Vec<jals_editor::PackageSource> {
-        match natives::Natives::select(shell, manifest) {
-            Ok(selection) => selection
-                .sources()
-                .map(|(_, source)| jals_editor::PackageSource {
-                    path: source.path.to_owned(),
-                    text: source.text.to_owned(),
-                })
-                .collect(),
+        declared: Option<jals_native::SourceResolver>,
+        layout: jals_editor::ProjectLayout,
+    ) -> jals_editor::ProjectLayout {
+        match packages::Packages::resolve(shell, manifest, declared) {
+            Ok(selection) => layout.with_packages(&selection, manifest.links_packages()),
             Err(error) => {
                 shell.warn(format_args!("{error:#}"));
-                Vec::new()
+                layout
             }
         }
     }
@@ -1924,13 +1920,13 @@ impl LintProject {
     ) -> Result<Self> {
         let shell = session.shell();
         let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
-            return Self::detached(start_dir, exec).await;
+            return Self::detached(start_dir, exec, shell).await;
         };
         let manifest = match Manifest::from_file(&manifest_path).await {
             Ok(manifest) => manifest,
             Err(error) => {
                 shell.warn(format_args!("project analysis inputs unavailable: {error}"));
-                return Self::detached(start_dir, exec).await;
+                return Self::detached(start_dir, exec, shell).await;
             }
         };
         // `Path::new("jals.toml").parent()` is `Some("")`, not `None`, so the fallback below only
@@ -1964,7 +1960,7 @@ impl LintProject {
                 shell.warn(format_args!(
                     "project analysis inputs unavailable: {error:#}"
                 ));
-                return Self::detached(start_dir, exec).await;
+                return Self::detached(start_dir, exec, shell).await;
             }
         };
         // The project's analysis inputs, best-effort: the classpath `.class` from `[build]
@@ -2029,21 +2025,24 @@ impl LintProject {
                     // `attributes` feature off, `cfg` filtering stops and every `#[cfg(...)]` in
                     // the project is reported by the `attribute` rule, which is an `error` by
                     // default. The LSP's own fallback keeps both for the same reason.
-                    layout: jals_editor::ProjectLayout {
-                        feature_set: manifest.feature_set(),
-                        build_features: features.into_features(),
-                        native_sources: Self::native_layout_sources(shell, &manifest),
-                        ..jals_editor::ProjectLayout::new(source_roots)
-                    },
+                    layout: Self::layout_packages(
+                        shell,
+                        &manifest,
+                        None,
+                        jals_editor::ProjectLayout {
+                            feature_set: manifest.feature_set(),
+                            build_features: features.into_features(),
+                            ..jals_editor::ProjectLayout::new(source_roots)
+                        },
+                    ),
                 });
             }
         };
 
-        let mut layout = jals_editor::ProjectLayout {
+        let indexed = jals_editor::ProjectLayout {
             // Resolved once by the assembly, so no host re-lowers `[build] source-dirs` itself.
             source_roots: inputs.source_roots,
             feature_set: inputs.feature_set,
-            native_sources: Self::native_layout_sources(shell, &manifest),
             // What each project file's `#[cfg(feature = "…")]` evaluates against, read only when
             // `feature_set` enables the `attributes` dialect — so an attribute-free project's lint
             // output is independent of `--features`.
@@ -2052,6 +2051,14 @@ impl LintProject {
         }
         .with_classpath(&inputs.classpath_classes)
         .await;
+        // `jals lint` keeps its aggregate past the graph phase — the one command that does — so it
+        // reads the project.s own `[packages]` here rather than being handed a resolver.
+        let (declared, package_warnings) =
+            jals_editor::packages::ProjectPackages::resolver(&storage, &manifest.packages);
+        for warning in package_warnings {
+            shell.warn(format_args!("{warning}"));
+        }
+        let mut layout = Self::layout_packages(shell, &manifest, Some(declared), indexed);
         layout.source_dep_sources =
             Self::mount_source_deps(&mut storage, &inputs.source_dep_files).await;
         Ok(Self {
@@ -2067,14 +2074,24 @@ impl LintProject {
     /// An empty scope list is what makes the snapshot empty, so nothing is read from disk. Every
     /// reported file is then mounted, which makes the index exactly the files the caller named —
     /// what a run outside a project always had.
-    async fn detached(anchor: &Path, exec: &Exec) -> Result<Self> {
+    async fn detached(anchor: &Path, exec: &Exec, shell: &std::sync::Arc<Shell>) -> Result<Self> {
         let storage = NativeStorage::for_project_scoped(anchor, [], exec.clone())
             .await
             .with_context(|| format!("opening {} for analysis", anchor.display()))?;
         Ok(Self {
             root: anchor.to_path_buf(),
             storage,
-            layout: jals_editor::ProjectLayout::default(),
+            // The platform, even here. A file linted outside any project still says `String`, and
+            // without the packages this index has no `java.lang` at all — not the type, not the
+            // implicit `Object` supertype edge — so every reference into the standard library
+            // reports as an unresolved name. There is no manifest, so the defaults answer: the
+            // default platform, and no linking.
+            layout: Self::layout_packages(
+                shell,
+                &Manifest::default(),
+                None,
+                jals_editor::ProjectLayout::default(),
+            ),
         })
     }
 
@@ -2303,7 +2320,7 @@ impl CompilePlan {
         tree: Vec<jals_build::BackendSource>,
         inputs: &HostProjectInputs,
         lowering: Lowering,
-        natives: jals_native::NativePackageSet,
+        natives: jals_native::PackageSelection,
         exec: &Exec,
         progress: jals_progress::Progress,
     ) -> Result<Self> {
@@ -2610,6 +2627,12 @@ impl App {
         Vec<jals_build::BackendSource>,
         HostProjectInputs,
         Vec<jals_frontend::TestEntry>,
+        // The `[packages]` route, read out of the aggregate this opens.
+        //
+        // Read here rather than by the caller because this is where the storage is: the aggregate
+        // is opened for the dependency artifacts and dropped again once they are materialized, and
+        // a caller that wanted to read a declared package.s Java would have to reopen it.
+        jals_native::SourceResolver,
     )> {
         let exec = session.exec();
         let environment = Self::build_script_environment(manifest, features);
@@ -2652,6 +2675,14 @@ impl App {
             session,
         )
         .await?;
+        // The project.s own packages, read while the aggregate is still open. A warning rather than
+        // a failure at this layer: what an unreadable package *means* is the command.s policy, and
+        // the name then fails to resolve where every unknown name does, with what is offered.
+        let (declared, package_warnings) =
+            jals_editor::packages::ProjectPackages::resolver(&storage, &manifest.packages);
+        for warning in package_warnings {
+            session.shell().warn(format_args!("{warning}"));
+        }
         inputs.deduplicate(manifest, root, &sources);
         // Deduplication compares against the *authored* paths, so it must happen before lowering
         // replaces them with staged ones.
@@ -2685,7 +2716,7 @@ impl App {
         // rewriting frontend that relies on implicit resolution would have to stage under the
         // original source-dir prefix instead.
         manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
-        Ok((staged, tree, inputs, tests))
+        Ok((staged, tree, inputs, tests, declared))
     }
 
     /// Construct the explicit environment visible to both root and dependency build scripts.

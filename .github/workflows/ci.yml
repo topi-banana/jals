@@ -25,7 +25,8 @@ env:
   WASM_PACKAGES: >-
     --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir
     --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage
-    --package jals-config --package jals-native --package jals-progress --package jinja
+    --package jals-config --package jals-native --package jals-platform
+    --package jals-progress --package jinja
   # jals-classpath's HTTP/archive adapters are behind features; `--no-default-features` builds its
   # `no_std + alloc` storage-driven core. jals-build's host half (`SubprocessToolchain`, JDK
   # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core is built
@@ -55,7 +56,8 @@ env:
   WASM_TEST_PACKAGES: >-
     --package jals-syntax --package jals-hir --package jals-lint --package jals-fmt
     --package jals-config --package jals-decompile --package jals-editor --package jals-frontend
-    --package jals-javac --package jals-classfile --package jals-native --package jals-progress
+    --package jals-javac --package jals-classfile --package jals-native --package jals-platform
+    --package jals-progress
     --package jinja
 
 concurrency:
@@ -373,7 +375,7 @@ jobs:
       # boundary: that crate's surface is minijinja's, not one consumer's, and hawk.toml says why.
       - name: Run the closed-world visibility gate
         shell: bash
-        run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja --exclude-crate jals_native -D warnings
+        run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja --exclude-crate jals_native --exclude-crate jals_platform -D warnings
 
   typos:
     name: typos
@@ -487,6 +489,11 @@ jobs:
       # jals-frontend has no features at all, so a plain check *is* the portability check:
       # there is no configuration in which it stops being `no_std + alloc`.
       - run: cargo check -p jals-frontend
+      # The package seam and the library it ships. Featureless and dependency-light by charter — a
+      # package author.s crate depends on `jals-native` and on nothing else — so a plain check is
+      # the whole portability statement for both.
+      - run: cargo check -p jals-native
+      - run: cargo check -p jals-platform
       - run: cargo check -p jals-project --all-features
       - run: cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
       # The `wasm-run` half of the same statement, and the one the browser rests on: the engine
@@ -499,6 +506,8 @@ jobs:
       - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-frontend --target wasm32-unknown-unknown
+      - run: cargo check -p jals-native --target wasm32-unknown-unknown
+      - run: cargo check -p jals-platform --target wasm32-unknown-unknown
       - run: cargo build -p jals-playground --target wasm32-unknown-unknown
       - run: cargo tree -e features -p jals-classpath --no-default-features
       - run: cargo tree -e features -p jals-build --no-default-features
@@ -557,7 +566,7 @@ jobs:
             run: true
             invoke: --invoke greetingLength
           # The seam the cell above is the "before" of: the same greeting, printed, because a
-          # native package supplies the three host functions its Java calls. `invoke` is again what
+          # platform package supplies the host functions its Java calls. `invoke` is again what
           # makes it an assertion — the export runs the package's own Java, which calls the
           # imports, which reach Rust. A module whose imports did not link would fail here and
           # nowhere else, since linking happens at instantiation and nothing before it looks.

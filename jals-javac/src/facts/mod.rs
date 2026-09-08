@@ -1080,7 +1080,7 @@ mod tests {
             let analysis = block_on_inline(jals_hir::FileAnalysis::of(&$root));
             let index = block_on_inline(
                 jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), $root.clone())])
-                    .with_stdlib()
+                    .with_library(&crate::test_support::TestPlatform::records())
                     .build(),
             );
             let semantics = analysis.in_project(&index, jals_hir::FileId(0));

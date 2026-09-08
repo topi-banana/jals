@@ -95,7 +95,7 @@ mod tests {
         let analysis = block_on_inline(FileAnalysis::of(&root));
         let index = block_on_inline(
             ProjectIndex::builder(&[(FileId(0), root.clone())])
-                .with_stdlib()
+                .with_library(&crate::test_support::TestPlatform::records())
                 .build(),
         );
         let semantics = analysis.in_project(&index, FileId(0));

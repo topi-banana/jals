@@ -120,14 +120,17 @@ fn main() -> ExitCode {
     }
 }
 
-/// The index the file is bound against: the host JDK's own signatures, or the embedded stubs.
+/// The index the file is bound against: the host JDK.s own signatures, or the platform library.
 fn build_index(
     roots: &[(FileId, SyntaxNode)],
     classpath: Option<&LoweredClasspath>,
 ) -> ProjectIndex {
     let builder = ProjectIndex::builder(roots);
+    let platform = jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ));
     jals_exec::block_on_inline(match classpath {
         Some(classpath) => builder.with_classpath(classpath).build(),
-        None => builder.with_stdlib().build(),
+        None => builder.with_library(&platform).build(),
     })
 }

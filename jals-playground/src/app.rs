@@ -414,7 +414,7 @@ pub struct App {
     /// Built once for the tab rather than per run: the console is host state a package captured,
     /// so a fresh registry per run would hand every run a different buffer and the one that was
     /// written to would be thrown away.
-    natives: crate::natives::Natives,
+    packages: crate::packages::Packages,
     /// Which tab the right pane shows.
     result_tab: PaneTab,
     /// The latest build-script/classpath status line shown in the [`Header`], if any.
@@ -513,7 +513,7 @@ impl App {
             syntax_dump: None,
             compile_output: None,
             compile_artifact: None,
-            natives: crate::natives::Natives::new(),
+            packages: crate::packages::Packages::new(),
             compile_runnable: false,
             run_command: String::new(),
             run_output: None,
@@ -1566,6 +1566,24 @@ impl Component for App {
                             let link = ctx.link().clone();
                             let build_generation = Rc::clone(&self.build_generation);
                             let features_mirror = Rc::clone(&self.features);
+                            // Lowered on *this* task, where the packages live: a selection holds
+                            // `Rc`s of its host state, so it cannot cross into the future below.
+                            // What crosses is the plain text the index reads, which is why the
+                            // lowering hands back `PackageSource` values rather than a selection.
+                            //
+                            // A manifest that does not parse leaves the packages as they were: the
+                            // graph phase already reported the parse failure, and dropping
+                            // `java.lang` out of the index on top of it would turn one diagnostic
+                            // into one per line.
+                            let packages = ConfigParseError::parse_manifest(&self.manifest_src)
+                                .ok()
+                                .and_then(|manifest| {
+                                    let selection = self.packages.select(&manifest).ok()?;
+                                    Some(jals_editor::ProjectLayout::package_sources_of(
+                                        &selection,
+                                        manifest.links_packages(),
+                                    ))
+                                });
                             spawn_local(async move {
                                 if build_generation.get() != generation {
                                     return;
@@ -1588,6 +1606,7 @@ impl Component for App {
                                     resolution.artifacts,
                                     resolution.sources.library,
                                     resolution.sources.source_deps,
+                                    packages,
                                 )
                                 .await;
                                 // Re-analyse with the external types now in the index;
@@ -1641,7 +1660,7 @@ impl Component for App {
                 // Resolved on this task, where the registry lives: a selection holds `Rc`s of the
                 // packages' host state, so it cannot cross into the compile future's own scope
                 // and back — it is built here and moved in.
-                let natives = match self.natives.select(&manifest) {
+                let natives = match self.packages.select(&manifest) {
                     Ok(natives) => natives,
                     Err(error) => {
                         self.compile_output = Some(format!("{MANIFEST_PATH}: {error}"));
@@ -1743,15 +1762,15 @@ impl Component for App {
                 // what was asked, not an error about the playground.
                 let selection = ConfigParseError::parse_manifest(&self.manifest_src)
                     .map_err(|error| format!("{MANIFEST_PATH}: {}", error.message))
-                    .and_then(|manifest| self.natives.select(&manifest));
+                    .and_then(|manifest| self.packages.select(&manifest));
                 self.run_output = Some(match selection {
                     Ok(natives) => match Execute::run(bytes, &self.run_command, &natives) {
                         // Whatever the module wrote through a native package comes first: it is
                         // the program's own output, and the report below is this host describing
                         // the call. Drained rather than read, so the next run reports only its own.
-                        Ok(report) => Self::joined(self.natives.take_console(), report),
+                        Ok(report) => Self::joined(self.packages.take_console(), report),
                         Err(error) => {
-                            Self::joined(self.natives.take_console(), format!("error: {error}"))
+                            Self::joined(self.packages.take_console(), format!("error: {error}"))
                         }
                     },
                     Err(error) => format!("error: {error}"),

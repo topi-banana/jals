@@ -128,13 +128,19 @@ fn qualified_reference_resolves_to_project() {
     );
 }
 
+/// With **no library indexed**, a `java.lang` name is nameable from nowhere.
+///
+/// This test used to assert `external`, because a hard-coded name list answered for these two
+/// without anything being indexed. That list was a second specification of what `java.lang`
+/// contains, and it had drifted from the first. What answers now is the platform package a host
+/// resolves, and a host that resolves none has no standard library — which is what this pins.
 #[test]
-fn java_lang_name_is_external_not_unresolved() {
+fn a_java_lang_name_needs_a_library_like_any_other() {
     check(
         &["package a; class Bar { String s; Object o; }"],
         expect![[r"
-            file0: String -> external
-            file0: Object -> external
+            file0: String -> unresolved
+            file0: Object -> unresolved
         "]],
     );
 }
@@ -203,11 +209,17 @@ fn definition_at_jumps_across_files() {
 
 #[test]
 fn unresolved_types_reports_only_genuine_unknowns() {
-    // `Nope` is nameable from nowhere; `String` is java.lang (external); `Helper` resolves
-    // file-locally. Only `Nope` is reported.
+    // `Nope` is nameable from nowhere; `String` is the platform.s; `Helper` resolves file-locally.
+    // Only `Nope` is reported.
     let srcs = ["package a; class Bar { Nope n; String s; Helper h; } class Helper { }"];
     let nodes = nodes(&srcs);
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+    // The platform, as every host resolves one: without it `String` is unresolved too, and this
+    // test would be asserting that a correct program has two errors in it.
+    let platform = jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ));
+    let index =
+        jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_library(&platform).build());
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[0].1));
 
     let found =
