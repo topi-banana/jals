@@ -1722,7 +1722,7 @@ pub struct Build {
     /// The **platform** library is not named here — see [`platform`](Self::platform). It is not a
     /// third-party package a project opts into; it is what `java.lang` *is* on this target, and a
     /// project that forgot to list it would be one whose every `String` stopped resolving.
-    pub native_packages: Vec<String>,
+    native_packages: Vec<String>,
     /// Which **platform library** this project's Java is written against.
     ///
     /// The name of the package supplying `java.lang` and `java.io`, or [`Platform::None`].
@@ -1742,7 +1742,7 @@ pub struct Build {
     /// backend produces, and a real configuration rather than a degraded one. It removes the
     /// platform from *both* answers, because a project that will not link `java.lang` should not be
     /// offered completions for it either.
-    pub platform: Platform,
+    platform: Platform,
     /// Optional post-compile step: **reobfuscate** the compiled classes and package them as a
     /// distributable jar.
     ///
@@ -2117,6 +2117,13 @@ pub struct ProjectPackage {
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectPackageKind {
     /// Real Java, compiled into the artifact wherever this build links packages.
+    ///
+    /// "Wherever this build links packages" is the whole condition, and under every other backend
+    /// this choice is **inert**: nothing consults
+    /// [`link_sources`](https://docs.rs/jals-native), so both kinds are indexed as records of
+    /// something the build obtains by another route — for a project package that route is the
+    /// classpath, and a type missing from it is a located `cannot find symbol` from the compiler
+    /// rather than anything this layer could have said.
     #[default]
     Implementation,
     /// Declarations only: indexed so the types are nameable, never compiled.
@@ -2146,14 +2153,14 @@ pub enum Platform {
 
 impl Platform {
     /// The name `[build] platform = "none"` spells.
-    pub const NONE: &'static str = "none";
+    const NONE: &'static str = "none";
 
     /// The platform `jals` ships, and every project's default.
-    pub const DEFAULT: &'static str = "java.base";
+    const DEFAULT: &'static str = "java.base";
 
     /// The package name to resolve, or `None`.
     #[must_use]
-    pub const fn name(&self) -> Option<&str> {
+    const fn name(&self) -> Option<&str> {
         match self {
             Self::Named(name) => Some(name.as_str()),
             Self::None => None,
@@ -2777,6 +2784,13 @@ impl Manifest {
         // is not — the set is a property of the binary that holds the registry, so an unknown name
         // is reported there, with the names it does offer.
         let mut seen = BTreeSet::new();
+        // The platform's own name joins the set first, so `platform = "x"` beside
+        // `native-packages = ["x"]` is the duplicate it is. The resolver chain deduplicates a name
+        // asked for twice and would never report it, and `[packages]` is already checked against
+        // both of these — a rule two of the three tables follow is a rule.
+        if let Some(platform) = self.build.platform.name() {
+            seen.insert(platform);
+        }
         for name in &self.build.native_packages {
             if name.is_empty() {
                 return Err(ValidationError::InvalidNativePackage { name: name.clone() });
@@ -2797,7 +2811,7 @@ impl Manifest {
             if name.is_empty() {
                 return Err(ValidationError::InvalidProjectPackage { name: name.clone() });
             }
-            if seen.contains(name.as_str()) || self.build.platform.name() == Some(name.as_str()) {
+            if seen.contains(name.as_str()) {
                 return Err(ValidationError::DuplicateProjectPackage { name: name.clone() });
             }
             let package = &self.packages[name];
@@ -2806,8 +2820,17 @@ impl Manifest {
             }
             // A directory that is also a source root would have its files compiled twice and
             // indexed under two origins, with the second insert silently losing.
+            //
+            // Both source-root tables, because `[test] source-dirs` *adds to* `[build]
+            // source-dirs` rather than replacing it: a package rooted in one of those is the same
+            // collision, reachable only from `jals test`, which is the worst place to find it.
             let root = package.java.trim_end_matches('/');
-            if self.build.source_dirs.iter().any(|dir| {
+            let roots = self
+                .build
+                .source_dirs
+                .iter()
+                .chain(self.test.source_dirs.iter());
+            if roots.into_iter().any(|dir| {
                 let dir = dir.trim_end_matches('/');
                 dir == root
                     || root.starts_with(&alloc::format!("{dir}/"))
@@ -6193,6 +6216,67 @@ mod tests {
                 name: "jals.io".to_owned(),
             })
         );
+    }
+
+    /// `[test] source-dirs` is a source root too, and a declared package may not overlap one.
+    ///
+    /// It *adds to* `[build] source-dirs` rather than replacing it — the same rule
+    /// [`Test::source_dirs`] states — so a package rooted in one is the identical double-compile
+    /// and double-index, reachable only from `jals test`. Checking one table and not the other left
+    /// the collision to be found by the command least likely to be run first.
+    #[test]
+    fn validate_rejects_a_project_package_inside_a_test_source_root() {
+        let declared = |java: &str| ProjectPackage {
+            java: java.to_owned(),
+            kind: ProjectPackageKind::Implementation,
+        };
+        for java in ["src/test/java", "src/test/java/acme"] {
+            let mut m = Manifest::default();
+            m.build.source_dirs = alloc::vec!["src/main/java".to_owned()];
+            m.test.source_dirs = alloc::vec!["src/test/java".to_owned()];
+            m.packages.insert("acme.util".to_owned(), declared(java));
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::ProjectPackageInSourceRoot {
+                    name: "acme.util".to_owned(),
+                    java: java.to_owned(),
+                }),
+                "`{java}` overlaps the test source roots"
+            );
+        }
+
+        // A directory under neither table is still fine.
+        let mut fine = Manifest::default();
+        fine.build.source_dirs = alloc::vec!["src/main/java".to_owned()];
+        fine.test.source_dirs = alloc::vec!["src/test/java".to_owned()];
+        fine.packages
+            .insert("acme.util".to_owned(), declared("platform/java"));
+        assert_eq!(fine.validate(), Ok(()));
+    }
+
+    /// The platform's name is a name this manifest uses, so `native-packages` may not restate it.
+    ///
+    /// The resolver chain deduplicates a name asked for twice and would never report it, and
+    /// `[packages]` is already checked against both other tables — a rule two of the three followed
+    /// was a rule with a hole in it rather than a rule.
+    #[test]
+    fn validate_rejects_a_native_package_that_restates_the_platform() {
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        m.build.native_packages = alloc::vec![Platform::DEFAULT.to_owned()];
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::DuplicateNativePackage {
+                name: Platform::DEFAULT.to_owned(),
+            })
+        );
+
+        // `platform = "none"` names nothing, so nothing collides with it.
+        let mut opted_out = Manifest::default();
+        opted_out.build.backend = BackendKind::JalsWasm {};
+        opted_out.build.platform = Platform::None;
+        opted_out.build.native_packages = alloc::vec!["jals.io".to_owned()];
+        assert_eq!(opted_out.validate(), Ok(()));
     }
 
     /// A declared package's directory may not overlap a source root.
