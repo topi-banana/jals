@@ -28,6 +28,9 @@ public final class Double extends Number implements Comparable<Double> {
     public static final double NEGATIVE_INFINITY = -1.0 / 0.0;
 
     /** The canonical not-a-number value. */
+    // `NaN`, `out` and `err` are names the JDK fixed; a program spells them as written or
+    // it does not compile against a real one.
+    @SuppressWarnings("naming-convention")
     public static final double NaN = 0.0 / 0.0;
 
     /** How many bits a {@code double} occupies. */
@@ -51,6 +54,9 @@ public final class Double extends Number implements Comparable<Double> {
     }
 
     /** A wrapper holding {@code value}. */
+    // `valueOf` is where the allocation is: this class *is* the wrapper, so the constructor it
+    // would be told to call instead is this method.
+    @SuppressWarnings("boxed-primitive-constructor")
     public static Double valueOf(double value) {
         return new Double(value);
     }
@@ -84,8 +90,17 @@ public final class Double extends Number implements Comparable<Double> {
     /** Render {@code value} into {@code out}; how many characters were written. */
     private static native int toChars(double value, char[] out);
 
-    /** The {@code double} that {@code count} characters of {@code text} at {@code offset} spell. */
-    private static native double parseChars(char[] text, int offset, int count);
+    /**
+     * Decode {@code count} characters of {@code text} at {@code offset} into {@code out[0]}.
+     *
+     * <p>Returns whether they spelled a {@code double}, rather than refusing when they did not. A
+     * binding that refuses becomes a <em>trap</em>, and a trap is not a Java exception: it stops
+     * the module, and no {@code catch} in the program it stopped ever runs. The one thing
+     * {@link #parseDouble} owes its caller is a catchable {@link NumberFormatException}, so the
+     * failure has to cross the boundary as a value — through the same out-array shape
+     * {@link #toChars} uses, and for the same reason.
+     */
+    private static native boolean parseChars(char[] text, int offset, int count, double[] out);
 
     /** {@code value} in Java's decimal layout. */
     public static String toString(double value) {
@@ -108,7 +123,11 @@ public final class Double extends Number implements Comparable<Double> {
             throw new NumberFormatException(text);
         }
         char[] chars = trimmed.toCharArray();
-        return parseChars(chars, 0, chars.length);
+        double[] out = new double[1];
+        if (!parseChars(chars, 0, chars.length, out)) {
+            throw new NumberFormatException(text);
+        }
+        return out[0];
     }
 
     /** Whether {@code value} is not a number. */

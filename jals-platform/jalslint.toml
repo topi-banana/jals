@@ -1,0 +1,23 @@
+# What a *standard library implementation* is allowed to be, said once.
+#
+# Everything else in this file's absence is the default: the platform's Java is held to the same
+# rules a project's is, because it is read by the same index and compiled by the same backend. Only
+# the one rule that cannot conclude anything here is turned down, and it is turned down rather than
+# worked around because the reason is structural.
+
+[correctness.nullness-mismatch]
+# This package has no nullness vocabulary and cannot acquire one.
+#
+# An annotation is a *type*, and the only types nameable here are the ones a real JDK also
+# supplies: a `java.lang.Nullable` would resolve in analysis and fail to compile under `javac`,
+# which is exactly the analysis/build disagreement the package seam exists to prevent, and shipping
+# `org.jspecify.*` out of `java.base` is the same hole one package over.
+#
+# So silence here is not a claim, and `default = "non-null"` — which reads it as one — would report
+# `Throwable`'s own `message` and `cause` fields, both of which are optional and always were. The
+# third state is for exactly this: nothing is claimed, so nothing is concluded.
+#
+# A *project* linking this platform keeps the strict default and sees the strict reading, which is
+# the honest consequence of `LibraryFidelity::Complete` and is documented in `Throwable`'s own class
+# comment. This key is about the platform's own sources, not about what a consumer sees.
+default = "unspecified"

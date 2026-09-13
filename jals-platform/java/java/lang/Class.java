@@ -8,6 +8,10 @@ package java.lang;
  * {@code newInstance}, no member enumeration: reflection needs metadata the backend does not emit
  * and a loader the target does not have.
  */
+// `T` is this type's API and not a binding: `Foo.class` has type `Class<Foo>`, and dropping the
+// parameter would make every such expression raw. Nothing here can *use* it, because there is no
+// reflection member to return one.
+@SuppressWarnings("unused-variables")
 public final class Class<T> {
 
     private final String name;

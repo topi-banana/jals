@@ -11,6 +11,14 @@ package java.lang;
  *
  * <p>Every constant here is a {@code char[]} wrapped once in a {@code static} field. That is not a
  * style: the backend refuses a string literal, so it is the only way this target spells one.
+ *
+ * <p>A message and a cause are both optional, and this package has no way to <em>say</em> so: a
+ * nullness annotation is a type, and the only types nameable here are the ones a real JDK also
+ * supplies — inventing one would make a project's analysis and its {@code javac} build disagree
+ * about a name. So under a build that links this Java, a linter reading silence as a claim reports
+ * {@code new RuntimeException(null)}. That is the strict reading working rather than a defect in
+ * it, and it is why this project's own {@code jalslint.toml} says {@code default = "unspecified"};
+ * a project that passes {@code null} to a platform method narrows the rule the same way.
  */
 public class Throwable {
 

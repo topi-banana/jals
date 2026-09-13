@@ -9,18 +9,32 @@ use std::rc::Rc;
 use jals_native::{Args, NativeError, NativeHost, NativeValue, RefSlot, Results, SourceKind};
 use jals_platform::{CapturedHost, JavaBase, PlatformHost, SilentHost, Stream};
 
-/// A host that answers over one `i32` array, so a binding can be driven with no engine at all.
+/// A host that answers over two arrays, so a binding can be driven with no engine at all.
+///
+/// Two, because a binding that produces something wider than one wasm result writes it into an
+/// array the *module* allocated — `toChars` into a `char[]`, `parseChars` into a `double[1]`. The
+/// second slot is that out-array, and it holds [`NativeValue`]s rather than `i32`s so a decoded
+/// `double` reaches a test as the `double` it is.
 struct FakeHost {
     array: std::cell::RefCell<Vec<i32>>,
+    out: std::cell::RefCell<Vec<NativeValue>>,
 }
 
 impl FakeHost {
     const ARRAY: RefSlot = RefSlot::new(0);
+    /// The one-element out-array a `parseChars` writes its result into.
+    const OUT: RefSlot = RefSlot::new(1);
 
     fn with(values: &[i32]) -> Self {
         Self {
             array: std::cell::RefCell::new(values.to_vec()),
+            out: std::cell::RefCell::new(vec![NativeValue::Null]),
         }
+    }
+
+    /// What the out-array holds.
+    fn decoded(&self) -> NativeValue {
+        self.out.borrow()[0]
     }
 
     fn text(&self) -> String {
@@ -37,14 +51,24 @@ impl FakeHost {
 
 impl NativeHost for FakeHost {
     fn array_len(&mut self, slot: RefSlot) -> Result<u32, NativeError> {
-        if slot != Self::ARRAY {
-            return Err(NativeError::NotAnArray);
-        }
-        Ok(u32::try_from(self.array.borrow().len()).expect("a small fixture"))
+        let len = match slot {
+            Self::ARRAY => self.array.borrow().len(),
+            Self::OUT => self.out.borrow().len(),
+            _ => return Err(NativeError::NotAnArray),
+        };
+        Ok(u32::try_from(len).expect("a small fixture"))
     }
 
     fn array_get(&mut self, slot: RefSlot, index: u32) -> Result<NativeValue, NativeError> {
         let len = self.array_len(slot)?;
+        if slot == Self::OUT {
+            return self
+                .out
+                .borrow()
+                .get(index as usize)
+                .copied()
+                .ok_or(NativeError::OutOfBounds { index, len });
+        }
         self.array
             .borrow()
             .get(index as usize)
@@ -59,6 +83,14 @@ impl NativeHost for FakeHost {
         value: NativeValue,
     ) -> Result<(), NativeError> {
         let len = self.array_len(slot)?;
+        if slot == Self::OUT {
+            *self
+                .out
+                .borrow_mut()
+                .get_mut(index as usize)
+                .ok_or(NativeError::OutOfBounds { index, len })? = value;
+            return Ok(());
+        }
         let value = value
             .as_i32()
             .ok_or_else(|| NativeError::argument(0, "an i32", value))?;
@@ -115,11 +147,11 @@ fn the_platform_binds_exactly_the_twelve_operations_java_cannot_express() {
         ("java/lang/Double", "doubleToRawLongBits(D)J"),
         ("java/lang/Double", "longBitsToDouble(J)D"),
         ("java/lang/Double", "toChars(D[C)I"),
-        ("java/lang/Double", "parseChars([CII)D"),
+        ("java/lang/Double", "parseChars([CII[D)Z"),
         ("java/lang/Float", "floatToRawIntBits(F)I"),
         ("java/lang/Float", "intBitsToFloat(I)F"),
         ("java/lang/Float", "toChars(F[C)I"),
-        ("java/lang/Float", "parseChars([CII)F"),
+        ("java/lang/Float", "parseChars([CII[F)Z"),
     ]
     .into_iter()
     .map(|(owner, signature)| (owner.to_owned(), signature.to_owned()))
@@ -322,40 +354,69 @@ fn the_floating_point_seam_round_trips_at_each_width() {
     assert_eq!(results[0], NativeValue::I32(3));
 }
 
-/// A parse reads the text out of the module's array, and refuses what Java refuses.
+/// A parse reads the text out of the module's array and reports its verdict as a **value**.
+///
+/// The verdict is the point. A binding that refused would become a trap, and a trap stops the
+/// module — so `Double.parseDouble("12x")` would be unrecoverable where `Integer.parseInt("12x")`,
+/// which is ordinary Java, throws a `NumberFormatException` a program can catch. Two spellings of
+/// the same operation must not answer differently, so the failure crosses as `false` and the Java
+/// half raises the exception.
 #[test]
-fn a_parse_reads_the_modules_array_and_refuses_what_java_refuses() {
+fn a_parse_answers_with_a_verdict_rather_than_refusing() {
     let mut results = [NativeValue::Null];
     let digits: Vec<i32> = "1.5".encode_utf16().map(i32::from).collect();
     let mut host = FakeHost::with(&digits);
     call(
-        "parseChars([CII)D",
+        "parseChars([CII[D)Z",
         &mut host,
         &[
             NativeValue::Ref(FakeHost::ARRAY),
             NativeValue::I32(0),
             NativeValue::I32(3),
+            NativeValue::Ref(FakeHost::OUT),
         ],
         &mut results,
     )
     .expect("a parse");
-    assert_eq!(results[0], NativeValue::F64(1.5));
+    assert_eq!(results[0], NativeValue::I32(1));
+    assert_eq!(host.decoded(), NativeValue::F64(1.5));
 
     let bad: Vec<i32> = "12x".encode_utf16().map(i32::from).collect();
     let mut host = FakeHost::with(&bad);
-    assert!(
-        call(
-            "parseChars([CII)D",
-            &mut host,
-            &[
-                NativeValue::Ref(FakeHost::ARRAY),
-                NativeValue::I32(0),
-                NativeValue::I32(3),
-            ],
-            &mut results,
-        )
-        .is_err()
-    );
+    call(
+        "parseChars([CII[D)Z",
+        &mut host,
+        &[
+            NativeValue::Ref(FakeHost::ARRAY),
+            NativeValue::I32(0),
+            NativeValue::I32(3),
+            NativeValue::Ref(FakeHost::OUT),
+        ],
+        &mut results,
+    )
+    .expect("a refusal is not an error");
+    assert_eq!(results[0], NativeValue::I32(0));
+    // Untouched, so a Java half that ignored the verdict would read `null` rather than a number it
+    // could mistake for an answer.
+    assert_eq!(host.decoded(), NativeValue::Null);
+
+    // The `float` half answers the same way, at `float` width.
+    let digits: Vec<i32> = "0.1".encode_utf16().map(i32::from).collect();
+    let mut host = FakeHost::with(&digits);
+    call(
+        "parseChars([CII[F)Z",
+        &mut host,
+        &[
+            NativeValue::Ref(FakeHost::ARRAY),
+            NativeValue::I32(0),
+            NativeValue::I32(3),
+            NativeValue::Ref(FakeHost::OUT),
+        ],
+        &mut results,
+    )
+    .expect("a parse");
+    assert_eq!(results[0], NativeValue::I32(1));
+    assert_eq!(host.decoded(), NativeValue::F32(0.1));
 }
 
 /// The clock is the host's, and a host with none is a real host.

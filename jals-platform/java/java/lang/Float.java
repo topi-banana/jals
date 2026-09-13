@@ -23,6 +23,9 @@ public final class Float extends Number implements Comparable<Float> {
     public static final float NEGATIVE_INFINITY = -1.0f / 0.0f;
 
     /** The canonical not-a-number value. */
+    // `NaN`, `out` and `err` are names the JDK fixed; a program spells them as written or
+    // it does not compile against a real one.
+    @SuppressWarnings("naming-convention")
     public static final float NaN = 0.0f / 0.0f;
 
     /** How many bits a {@code float} occupies. */
@@ -41,6 +44,9 @@ public final class Float extends Number implements Comparable<Float> {
     }
 
     /** A wrapper holding {@code value}. */
+    // `valueOf` is where the allocation is: this class *is* the wrapper, so the constructor it
+    // would be told to call instead is this method.
+    @SuppressWarnings("boxed-primitive-constructor")
     public static Float valueOf(float value) {
         return new Float(value);
     }
@@ -74,8 +80,14 @@ public final class Float extends Number implements Comparable<Float> {
     /** Render {@code value} into {@code out}; how many characters were written. */
     private static native int toChars(float value, char[] out);
 
-    /** The {@code float} that {@code count} characters of {@code text} at {@code offset} spell. */
-    private static native float parseChars(char[] text, int offset, int count);
+    /**
+     * Decode {@code count} characters of {@code text} at {@code offset} into {@code out[0]}.
+     *
+     * <p>Returns whether they spelled a {@code float}. See {@link Double#parseChars} for why a
+     * failure crosses as a value: a binding that refuses becomes a trap, and a trap is not
+     * something {@link #parseFloat}'s caller can catch.
+     */
+    private static native boolean parseChars(char[] text, int offset, int count, float[] out);
 
     /** {@code value} in Java's decimal layout, at {@code float} width. */
     public static String toString(float value) {
@@ -98,7 +110,11 @@ public final class Float extends Number implements Comparable<Float> {
             throw new NumberFormatException(text);
         }
         char[] chars = trimmed.toCharArray();
-        return parseChars(chars, 0, chars.length);
+        float[] out = new float[1];
+        if (!parseChars(chars, 0, chars.length, out)) {
+            throw new NumberFormatException(text);
+        }
+        return out[0];
     }
 
     /** Whether {@code value} is not a number. */

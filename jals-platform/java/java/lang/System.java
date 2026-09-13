@@ -26,16 +26,17 @@ public final class System {
     private static final char[] LINE_SEPARATOR_CHARS = {'\n'};
 
     private static final String LINE_SEPARATOR =
-            new String(LINE_SEPARATOR_CHARS, 0, LINE_SEPARATOR_CHARS.length);
+        new String(LINE_SEPARATOR_CHARS, 0, LINE_SEPARATOR_CHARS.length);
 
     /** The standard output stream. */
+    @SuppressWarnings("naming-convention")
     public static final PrintStream out = new PrintStream(OUT_STREAM);
 
     /** The standard error stream. */
+    @SuppressWarnings("naming-convention")
     public static final PrintStream err = new PrintStream(ERR_STREAM);
 
-    private System() {
-    }
+    private System() {}
 
     /** Milliseconds since the Unix epoch, as the host reads its clock. */
     public static native long currentTimeMillis();
@@ -131,10 +132,12 @@ public final class System {
      * and no supertype this package can name to join them.
      */
     private static void checkCopy(
-            int sourceLength, int from, int targetLength, int to, int length) {
-        if (length < 0 || from < 0 || to < 0
-                || from + length > sourceLength
-                || to + length > targetLength) {
+        int sourceLength, int from, int targetLength, int to, int length) {
+        if (length < 0
+            || from < 0
+            || to < 0
+            || from + length > sourceLength
+            || to + length > targetLength) {
             throw new ArrayIndexOutOfBoundsException();
         }
     }

@@ -31,6 +31,9 @@ public final class Long extends Number implements Comparable<Long> {
     }
 
     /** A wrapper holding {@code value}. */
+    // `valueOf` is where the allocation is: this class *is* the wrapper, so the constructor it
+    // would be told to call instead is this method.
+    @SuppressWarnings("boxed-primitive-constructor")
     public static Long valueOf(long value) {
         return new Long(value);
     }

@@ -28,6 +28,9 @@ public final class Integer extends Number implements Comparable<Integer> {
     }
 
     /** A wrapper holding {@code value}. */
+    // `valueOf` is where the allocation is: this class *is* the wrapper, so the constructor it
+    // would be told to call instead is this method.
+    @SuppressWarnings("boxed-primitive-constructor")
     public static Integer valueOf(int value) {
         return new Integer(value);
     }

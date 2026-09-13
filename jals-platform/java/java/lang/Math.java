@@ -33,8 +33,7 @@ public final class Math {
     /** {@code 2^54}, which lifts a subnormal into the normal range before reduction. */
     private static final double SUBNORMAL_LIFT = 1.8014398509481984E16;
 
-    private Math() {
-    }
+    private Math() {}
 
     /** The absolute value of {@code value}. */
     public static int abs(int value) {
@@ -110,32 +109,75 @@ public final class Math {
         return value > 0.0 ? 1.0 : -1.0;
     }
 
-    /** The largest integral value not above {@code value}. */
+    /**
+     * The largest integral value not above {@code value}.
+     *
+     * <p>{@code ±0.0} is returned as written, sign and all. The {@code long} round trip below
+     * cannot carry a sign onto a zero — {@code (double) (long) -0.0} is {@code 0.0} — and
+     * {@code floor(-0.0)} is {@code -0.0}, so the zero is answered before the round trip rather than
+     * repaired after it.
+     */
     public static double floor(double value) {
         if (Double.isNaN(value) || Double.isInfinite(value) || abs(value) >= INTEGRAL_ABOVE) {
+            return value;
+        }
+        if (value == 0.0) {
             return value;
         }
         double truncated = (double) (long) value;
         return truncated > value ? truncated - 1.0 : truncated;
     }
 
-    /** The smallest integral value not below {@code value}. */
+    /**
+     * The smallest integral value not below {@code value}.
+     *
+     * <p>Two zeroes, not one. {@code ceil} of anything in {@code (-1.0, 0.0)} is {@code -0.0} and
+     * not {@code 0.0}: the answer is a zero the argument's own sign reaches, which is why the
+     * negative branch is spelled rather than left to the round trip, which loses it.
+     */
     public static double ceil(double value) {
         if (Double.isNaN(value) || Double.isInfinite(value) || abs(value) >= INTEGRAL_ABOVE) {
             return value;
         }
+        if (value == 0.0) {
+            return value;
+        }
         double truncated = (double) (long) value;
-        return truncated < value ? truncated + 1.0 : truncated;
+        double raised = truncated < value ? truncated + 1.0 : truncated;
+        return raised == 0.0 && value < 0.0 ? -0.0 : raised;
     }
 
-    /** {@code value} rounded to the nearest {@code long}, halves rounding up. */
+    /**
+     * {@code value} rounded to the nearest {@code long}, halves rounding towards positive infinity.
+     *
+     * <p>Deliberately <em>not</em> {@code (long) floor(value + 0.5)}. That expression rounds twice
+     * — once in the addition and once in the floor — and the first rounding can carry a
+     * value across the halfway point that was below it: {@code 0.49999999999999994 + 0.5} is
+     * exactly {@code 1.0}, so the naive form answers {@code 1} where the nearest {@code long} is
+     * {@code 0}. It is the bug the JDK carried until Java 7 (JDK-6430675). Comparing the fraction
+     * against a half instead adds nothing, so nothing rounds but the floor.
+     */
     public static long round(double value) {
-        return (long) floor(value + 0.5);
+        if (Double.isNaN(value)) {
+            return 0L;
+        }
+        double floor = floor(value);
+        return (long) (value - floor >= 0.5 ? floor + 1.0 : floor);
     }
 
-    /** {@code value} rounded to the nearest {@code int}, halves rounding up. */
+    /**
+     * {@code value} rounded to the nearest {@code int}, halves rounding towards positive infinity.
+     *
+     * <p>Widened first, which is exact, and then rounded once — see {@link #round(double)} for
+     * why the halfway comparison is not an addition.
+     */
     public static int round(float value) {
-        return (int) floor((double) value + 0.5);
+        if (Float.isNaN(value)) {
+            return 0;
+        }
+        double widened = (double) value;
+        double floor = floor(widened);
+        return (int) (widened - floor >= 0.5 ? floor + 1.0 : floor);
     }
 
     /** The remainder of {@code left / right} with the sign of {@code right}. */

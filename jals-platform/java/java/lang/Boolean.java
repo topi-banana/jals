@@ -12,9 +12,13 @@ public final class Boolean implements Comparable<Boolean> {
     private static final String FALSE_STRING = new String(FALSE_TEXT, 0, FALSE_TEXT.length);
 
     /** The wrapper holding {@code true}. */
+    // The cached pair `valueOf` hands out. Allocating here is what makes it a cache; there is
+    // no earlier `valueOf` for these two to call.
+    @SuppressWarnings("boxed-primitive-constructor")
     public static final Boolean TRUE = new Boolean(true);
 
     /** The wrapper holding {@code false}. */
+    @SuppressWarnings("boxed-primitive-constructor")
     public static final Boolean FALSE = new Boolean(false);
 
     private final boolean value;

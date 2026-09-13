@@ -7,5 +7,4 @@ package java.lang;
  * {@code @SuppressWarnings} silences is `jals-lint`'s question, and it reads the name off the
  * syntax rather than the resolved type.
  */
-public @interface FunctionalInterface {
-}
+public @interface FunctionalInterface {}

@@ -271,4 +271,34 @@ mod running {
         );
         assert_eq!(out, "java.lang.NumberFormatException: 12x\n");
     }
+
+    /// The same, for the one parse whose work happens **in Rust**.
+    ///
+    /// `Integer.parseInt` is ordinary Java and throws; `Double.parseDouble` reaches a binding, and
+    /// a binding that refused would trap — which is not an exception at all. A trap stops the
+    /// module, so the `catch` below would never run and the two spellings of "this is not a
+    /// number" would answer differently. The verdict crosses the boundary as a value precisely so
+    /// this test can exist.
+    #[test]
+    fn a_parse_that_fails_in_the_host_still_throws_into_the_projects_catch() {
+        let (out, _) = run(
+            "public final class Main {\n\
+             private static final char[] BAD = {'1', '2', 'x'};\n\
+             private static final char[] GOOD = {'2', '.', '5'};\n\
+             public static void run() {\n\
+             try {\n\
+             Double.parseDouble(new String(BAD));\n\
+             System.out.println(0.0);\n\
+             } catch (NumberFormatException failure) {\n\
+             System.out.println(failure.toString());\n\
+             }\n\
+             System.out.println(Double.parseDouble(new String(GOOD)));\n\
+             }\n\
+             }",
+            "run",
+        );
+        // The second line is what says the module was still running: a trap would have taken the
+        // whole run with it, and an empty `catch` would have printed `0.0` instead.
+        assert_eq!(out, "java.lang.NumberFormatException: 12x\n2.5\n");
+    }
 }

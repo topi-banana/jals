@@ -27,6 +27,9 @@ public final class Byte extends Number implements Comparable<Byte> {
     }
 
     /** A wrapper holding {@code value}. */
+    // `valueOf` is where the allocation is: this class *is* the wrapper, so the constructor it
+    // would be told to call instead is this method.
+    @SuppressWarnings("boxed-primitive-constructor")
     public static Byte valueOf(byte value) {
         return new Byte(value);
     }

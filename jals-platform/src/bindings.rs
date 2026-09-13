@@ -12,6 +12,14 @@
 //! | 4 | `Double`/`Float` bit casts, both directions | a reinterpretation is not an arithmetic operation |
 //! | 4 | `Double`/`Float` render and parse | the shortest round-tripping decimal is a hard problem `core` already solves |
 //!
+//! # A failure that has to be catchable crosses as a value
+//!
+//! `parseChars` answers `boolean` and writes its result into an out-array, rather than refusing.
+//! A [`NativeError`] becomes a **trap**, which stops the module — so a binding that refused would
+//! make `Double.parseDouble("12x")` unrecoverable where `Integer.parseInt("12x")`, which is
+//! ordinary Java, throws a `NumberFormatException` the program can catch. The two must answer the
+//! same way, so the one that crosses the boundary reports its failure as data.
+//!
 //! The count is stated in this crate's prose, and `tests/bindings.rs` asserts it against
 //! [`JavaPackage::binding_count`](jals_native::JavaPackage::binding_count). A number in a document
 //! that nothing checks is a number that will be wrong.
@@ -201,26 +209,56 @@ impl Bindings {
 
         package.bind(
             "java/lang/Double",
-            "parseChars([CII)D",
+            "parseChars([CII[D)Z",
             |host, args, mut out| {
                 let text = Self::argument_text(host, &args)?;
-                let value = Decimal::parse(&text)
-                    .ok_or_else(|| NativeError::Message(alloc::format!("not a double: {text}")))?;
-                out.set(0, NativeValue::F64(value));
+                let slot = args.reference(3)?;
+                let Some(value) = Decimal::parse(&text) else {
+                    out.set(0, NativeValue::I32(0));
+                    return Ok(());
+                };
+                Self::write_one(host, slot, NativeValue::F64(value))?;
+                out.set(0, NativeValue::I32(1));
                 Ok(())
             },
         );
         package.bind(
             "java/lang/Float",
-            "parseChars([CII)F",
+            "parseChars([CII[F)Z",
             |host, args, mut out| {
                 let text = Self::argument_text(host, &args)?;
-                let value = Decimal::parse_f32(&text)
-                    .ok_or_else(|| NativeError::Message(alloc::format!("not a float: {text}")))?;
-                out.set(0, NativeValue::F32(value));
+                let slot = args.reference(3)?;
+                let Some(value) = Decimal::parse_f32(&text) else {
+                    out.set(0, NativeValue::I32(0));
+                    return Ok(());
+                };
+                Self::write_one(host, slot, NativeValue::F32(value))?;
+                out.set(0, NativeValue::I32(1));
                 Ok(())
             },
         );
+    }
+
+    /// Write one decoded value into element zero of the array the module allocated.
+    ///
+    /// The counterpart of [`write_rendering`](Self::write_rendering) for a value that is not text,
+    /// and it exists for the same reason: a binding cannot allocate a Java object, so anything it
+    /// produces beyond a single wasm result goes into an array the caller made. An array too short
+    /// to hold one element is a refusal — the Java side allocates exactly one, so reaching this is
+    /// a package whose two halves disagree, not input a program chose.
+    fn write_one(
+        host: &mut dyn NativeHost,
+        slot: jals_native::RefSlot,
+        value: NativeValue,
+    ) -> Result<(), NativeError> {
+        let capacity = host.array_len(slot)?;
+        if capacity == 0 {
+            return Err(NativeError::OutOfBounds {
+                index: 0,
+                len: capacity,
+            });
+        }
+        host.array_set(slot, 0, value)
     }
 
     /// The `(offset, count)` window a `char[]` argument names, refused if it leaves the array.

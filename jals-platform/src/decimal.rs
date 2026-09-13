@@ -7,9 +7,14 @@
 //! `core`'s own formatter already solves it correctly. Writing a second one here would be a second
 //! implementation of a hard thing, held to a correctness bar this crate cannot check.
 //!
-//! So the digits come from `core`, through `{:e}`, and only the **layout** is ours. Java and Rust
-//! disagree about where a decimal point goes and about what an exponent looks like, and that
-//! disagreement is a rendering convention rather than a numeric fact:
+//! So the digits come from `core`, through `{:e}`, and only the **layout** is ours — plus one
+//! digit-count rule, because Java's is not quite "the shortest that round-trips": where a single
+//! digit suffices it takes the closer of the one- and two-digit answers, which is why
+//! `Double.MIN_VALUE` prints as `4.9E-324` and not `5.0E-324`. See
+//! [`two_digits_wanted`](Decimal::two_digits_wanted).
+//!
+//! Java and Rust also disagree about where a decimal point goes and about what an exponent looks
+//! like, and that disagreement is a rendering convention rather than a numeric fact:
 //!
 //! | value | Rust `{}` | Java |
 //! | --- | --- | --- |
@@ -17,6 +22,22 @@
 //! | `0.0001` | `0.0001` | `1.0E-4` |
 //! | `1e7` | `10000000` | `1.0E7` |
 //! | `f64::INFINITY` | `inf` | `Infinity` |
+//!
+//! One divergence is left and is `core`'s to own. When two decimals of the shortest length are
+//! **equidistant** from the value, Java takes the one whose last digit is even and `core` does
+//! not, so `1.0594382859262542E15` comes out as `...543`. A differential run over 34 029 bit
+//! patterns against Temurin 25 puts it at 6 — every other rendering agrees exactly. Closing it
+//! means deciding a tie in the algorithm this module delegates rather than laying out its answer,
+//! which is the line drawn above.
+//!
+//! # What is not accepted, deliberately
+//!
+//! `Double.parseDouble` takes a **hexadecimal** floating-point literal (`0x1.8p1` is `3.0`), and
+//! this does not: the string comes back as a `NumberFormatException`. Supporting it means a
+//! correctly-rounded hex-to-binary conversion written by hand, and the input form cannot reach
+//! here from Java on this target anyway — the backend refuses a string literal, so every argument
+//! to `parseDouble` is a `char[]` a program assembled itself. A refusal is the honest answer until
+//! that changes; a hand-rolled converter nothing differentially tests would not be.
 //!
 //! # Why a `float` is not rendered as a `double`
 //!
@@ -51,7 +72,7 @@ impl Decimal {
                 "0.0"
             });
         }
-        Self::lay_out(&format!("{:e}", value.abs()), value.is_sign_negative())
+        Self::lay_out(&Self::scientific_f64(value.abs()), value.is_sign_negative())
     }
 
     /// `value` as `Float.toString` renders it — formatted at `f32` width; see the module docs.
@@ -69,7 +90,64 @@ impl Decimal {
                 "0.0"
             });
         }
-        Self::lay_out(&format!("{:e}", value.abs()), value.is_sign_negative())
+        Self::lay_out(&Self::scientific_f32(value.abs()), value.is_sign_negative())
+    }
+
+    /// `core`'s scientific form for a `double`, lengthened to two digits where Java lengthens it.
+    ///
+    /// See [`two_digits_wanted`](Self::two_digits_wanted). `{:.1e}` is the closest two-significant-
+    /// digit decimal to the value, which is exactly the candidate Java's rule picks.
+    fn scientific_f64(magnitude: f64) -> String {
+        let shortest = format!("{magnitude:e}");
+        if Self::two_digits_wanted(&shortest) {
+            return Self::nearer(shortest, format!("{magnitude:.1e}"));
+        }
+        shortest
+    }
+
+    /// The same, at `f32` width — `{:.1e}` on the `f32` itself, never on a widened copy.
+    fn scientific_f32(magnitude: f32) -> String {
+        let shortest = format!("{magnitude:e}");
+        if Self::two_digits_wanted(&shortest) {
+            return Self::nearer(shortest, format!("{magnitude:.1e}"));
+        }
+        shortest
+    }
+
+    /// The one of the two candidates Java would have chosen.
+    ///
+    /// `lengthened` is the closest two-digit decimal, so it wins **unless it is the same number**
+    /// — a second digit of `0` means the one-digit decimal was already exact at that length, and
+    /// Java's choice is then the shorter one. The difference is visible: `0.001` renders as
+    /// `0.001` and not as `0.0010`, while `4.9E-324` keeps its second digit because `5E-324` is a
+    /// different, further decimal.
+    fn nearer(shortest: String, lengthened: String) -> String {
+        let mantissa = lengthened
+            .split_once('e')
+            .map_or(lengthened.as_str(), |(head, _)| head);
+        if mantissa.ends_with('0') {
+            return shortest;
+        }
+        lengthened
+    }
+
+    /// Whether `scientific` carries **one** significant digit, which is the only case where Java
+    /// prints more digits than the shortest round-tripping decimal has.
+    ///
+    /// `Double.toString`'s rule is not "the shortest decimal that round-trips". It is: take the
+    /// minimal length `p` over every decimal that rounds to the value; if `p >= 2` use the closest
+    /// decimal of that length, but **if `p == 1` use the closest decimal of length 1 *or* 2**. So a
+    /// one-digit answer is the one place the two formatters can disagree, and they do — at
+    /// `Double.MIN_VALUE` Rust says `5e-324` where Java says `4.9E-324`, because `4.9` is nearer
+    /// the stored value than `5` is and is admitted by that second clause.
+    ///
+    /// The test is on the *digit count*, not on the presence of a `.`: `core` writes a single
+    /// significant digit as a bare mantissa (`5e-324`, `1e23`) and everything longer with a point.
+    fn two_digits_wanted(scientific: &str) -> bool {
+        let mantissa = scientific
+            .split_once('e')
+            .map_or(scientific, |(head, _)| head);
+        mantissa.chars().filter(char::is_ascii_digit).count() == 1
     }
 
     /// Re-lay `core`'s scientific form (`d.dddde±ee`) into Java's.
@@ -176,6 +254,13 @@ mod tests {
             (f64::MAX, "1.7976931348623157E308"),
             (f64::MIN_POSITIVE, "2.2250738585072014E-308"),
             (1.0 / 3.0, "0.3333333333333333"),
+            // The one-digit rule. Rust's shortest round-tripping decimal is `5e-324`, `1e-323`,
+            // `1e23` and `2e23`; Java lengthens each to two digits and takes the nearer one.
+            (f64::from_bits(1), "4.9E-324"),
+            (1.0e-323, "9.9E-324"),
+            (1.0e23, "1.0E23"),
+            (2.0e23, "2.0E23"),
+            (3.0e-5, "3.0E-5"),
         ] {
             assert_eq!(Decimal::of_f64(value), expected, "rendering {value}");
         }
@@ -191,6 +276,24 @@ mod tests {
         assert_eq!(Decimal::of_f64(f64::from(0.1_f32)), "0.10000000149011612");
         assert_eq!(Decimal::of_f32(1.0_f32), "1.0");
         assert_eq!(Decimal::of_f32(f32::MAX), "3.4028235E38");
+        // `Float.MIN_VALUE`, the `float` half of the one-digit rule: Rust says `1e-45`.
+        assert_eq!(Decimal::of_f32(f32::from_bits(1)), "1.4E-45");
+    }
+
+    /// The rule the two widths share, stated on its own so a regression names itself.
+    ///
+    /// Every row was read off a real JDK (Temurin 25). The failure it guards is silent: each of
+    /// these round-trips through `Double.parseDouble` either way, so only a string comparison
+    /// against a JVM catches it.
+    #[test]
+    fn a_one_digit_value_is_lengthened_the_way_java_lengthens_it() {
+        assert!(Decimal::two_digits_wanted("5e-324"));
+        assert!(Decimal::two_digits_wanted("1e23"));
+        assert!(!Decimal::two_digits_wanted("1.5e23"));
+        assert!(!Decimal::two_digits_wanted("1.7976931348623157e308"));
+        // A plain-range value is lengthened too, and the layout still puts a digit on each side.
+        assert_eq!(Decimal::of_f64(100.0), "100.0");
+        assert_eq!(Decimal::of_f64(0.001), "0.001");
     }
 
     /// The Java half allocates a fixed-width array before it calls across, so a rendering that did
@@ -246,7 +349,9 @@ mod tests {
         assert_eq!(Decimal::parse("Infinity"), Some(f64::INFINITY));
         assert_eq!(Decimal::parse("-Infinity"), Some(f64::NEG_INFINITY));
         assert_eq!(Decimal::parse("+Infinity"), Some(f64::INFINITY));
-        for rejected in ["inf", "Inf", "INF", "infinity", "nan", "NAN", "-inf"] {
+        for rejected in [
+            "inf", "Inf", "INF", "infinity", "nan", "NAN", "-inf", "0x1.8p1",
+        ] {
             assert_eq!(Decimal::parse(rejected), None, "Java rejects `{rejected}`");
             assert_eq!(
                 Decimal::parse_f32(rejected),

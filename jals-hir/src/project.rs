@@ -188,6 +188,14 @@ pub enum LibraryFidelity {
     /// Read as [`Declarations::Complete`], so what the language implies but no line writes — an
     /// implicit constructor, a record's accessors — is recorded. Not demoted in checking, and its
     /// annotations are the author's own.
+    ///
+    /// "The author's own" includes *none*, and a consumer that reads silence as a claim has to
+    /// mean that. A library whose target has no annotation vocabulary to reach for — `jals-platform`
+    /// is one, since the only types it may name are the ones a real JDK also supplies — carries no
+    /// annotation anywhere, and `jals-lint`'s `nullness-mismatch` under `default = "non-null"` then
+    /// reports every `null` passed to it. That is the strict reading applied to a complete
+    /// declaration, which is what this tier means; the project narrows the rule, and nothing here
+    /// pretends the declaration is partial.
     Complete,
     /// The declarations are a *record* of a library this build does not compile, and the real
     /// implementation is a superset of them.
@@ -206,7 +214,7 @@ impl LibraryFidelity {
     /// extraction mode at the *call site* — which is what a separate `extract_file` /
     /// `extract_stub_file` selection was — is what let one route read a signature record as though
     /// its silences were facts.
-    pub(crate) const fn declarations(self) -> Declarations {
+    const fn declarations(self) -> Declarations {
         match self {
             Self::Complete => Declarations::Complete,
             Self::Signatures => Declarations::SignaturesOnly,

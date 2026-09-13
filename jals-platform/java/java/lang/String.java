@@ -233,8 +233,8 @@ public final class String implements CharSequence, Comparable<String> {
 
     @Override
     public int compareTo(String other) {
-        int shorter = this.value.length < other.value.length ? this.value.length
-                : other.value.length;
+        int shorter =
+            this.value.length < other.value.length ? this.value.length : other.value.length;
         for (int i = 0; i < shorter; i++) {
             if (this.value[i] != other.value[i]) {
                 return this.value[i] - other.value[i];
