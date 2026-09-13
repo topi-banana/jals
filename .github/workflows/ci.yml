@@ -810,6 +810,48 @@ jobs:
           jals fmt --check "${sources[@]}"
           jals lint ${{ matrix.example.features }} "${sources[@]}"
 
+  platform-java:
+    # The platform library's own Java, held to the two gates every example's Java is held to.
+    #
+    # `jals-platform/java` is the largest body of authored Java in this repository and, until this
+    # cell existed, nothing looked at it: `jals fmt --check` and `jals lint` run in CI only inside
+    # `examples/`, and this is not one. It is the corpus most worth checking — every project that
+    # links the platform reads these declarations, so a rule the platform itself trips is a rule
+    # this repository is not living by.
+    #
+    # No `jals build` step, and that is deliberate: `java/lang/Object.java` and `java/util/` are the
+    # signature tier (`xtask/src/platform.rs`), and a build compiles every source root it is given.
+    # Which files are compiled is `java_package!`'s two lists, which `cargo run -p xtask -- codegen
+    # --check` already gates; `jals-build/tests/platform.rs` is what compiles them.
+    #
+    # Tracked files only, for the reason the example cells give: `git ls-files` is what separates
+    # authored source from anything a run produced.
+    name: platform java
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Debug, unlike every other cell that builds this binary. The example and Minecraft cells go
+      # release because they decompress, remap and decompile a game jar; this one parses 66 small
+      # files twice, which is under a second unoptimized — so the cheaper build is the whole
+      # difference between adding a gate and adding a release build to every run.
+      - name: Build jals
+        run: cargo build --package jals-cli
+      - name: Put jals on PATH
+        run: echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+      - name: Check formatting and lint the platform's Java
+        working-directory: jals-platform
+        run: |
+          mapfile -t sources < <(git ls-files -- 'java/*.java')
+          if [ ${#sources[@]} -eq 0 ]; then
+            echo "jals-platform ships no tracked Java"
+            exit 1
+          fi
+          printf 'checking %s\n' "${sources[@]}"
+          jals fmt --check "${sources[@]}"
+          jals lint "${sources[@]}"
+
   mod-jar-setup:
     # The two things all 43 cells below need and neither should produce forty-three times: the list
     # of releases, and the `jals` that builds them.
