@@ -94,7 +94,7 @@ impl WasmError {
     /// all, and the answer is always the same question — which declaration.
     /// This refusal, said to be about one expression — the innermost that has not already named
     /// one, so a nested failure reports the operand rather than the whole statement.
-    pub(crate) fn in_expression(self, node: &SyntaxNode) -> Self {
+    fn in_expression(self, node: &SyntaxNode) -> Self {
         match self {
             Self::NoRepresentation(what) if !what.contains(" in `") => {
                 Self::NoRepresentation(alloc::format!("{what}, in `{}`", node.text()))
@@ -103,7 +103,7 @@ impl WasmError {
         }
     }
 
-    pub(crate) fn in_signature(self, member: MemberId, index: &ProjectIndex) -> Self {
+    fn in_signature(self, member: MemberId, index: &ProjectIndex) -> Self {
         match self {
             Self::NoRepresentation(ty) => Self::NoRepresentation(alloc::format!(
                 "{ty}, in the signature of `{}`",
