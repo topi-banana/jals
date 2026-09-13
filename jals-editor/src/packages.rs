@@ -29,9 +29,9 @@ use jals_storage::{CacheBackend, ProjectStorage, SourceBackend};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageWarning {
     /// The `[packages]` key.
-    pub name: String,
+    name: String,
     /// What was wrong, as a sentence fragment following the name.
-    pub problem: String,
+    problem: String,
 }
 
 impl core::fmt::Display for PackageWarning {

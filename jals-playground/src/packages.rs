@@ -52,12 +52,33 @@ impl Packages {
         if names.is_empty() {
             return Ok(PackageSelection::empty());
         }
-        let mut builtin = StaticResolver::new("built into this playground");
-        builtin.add(JavaBase::package(Rc::clone(&self.platform) as Rc<_>));
-        ResolverChain::new()
-            .push(Box::new(builtin))
+        self.chain()
             .select(&names)
             .map_err(|error| error.to_string())
+    }
+
+    /// The same selection for the **index**, keeping whatever resolved.
+    ///
+    /// A compile is all-or-nothing — it produces the wrong module otherwise, which is what
+    /// [`select`](Self::select) answers — but the editor beside it is not: a `[packages]` name this
+    /// tab does not offer should cost the project that package and nothing else. Resolving the
+    /// whole list or none of it meant one such name dropped the platform too, and the pane then
+    /// reported every `String` in the sample as an unresolved name with the Build button still
+    /// explaining why.
+    #[must_use]
+    pub fn index_sources(&self, manifest: &Manifest) -> PackageSelection {
+        let names = manifest.package_names();
+        if names.is_empty() {
+            return PackageSelection::empty();
+        }
+        self.chain().select_reporting(&names).0
+    }
+
+    /// The one route this tab offers: what it was built with.
+    fn chain(&self) -> ResolverChain {
+        let mut builtin = StaticResolver::new("built into this playground");
+        builtin.add(JavaBase::package(Rc::clone(&self.platform) as Rc<_>));
+        ResolverChain::new().push(Box::new(builtin))
     }
 
     /// Everything written to either stream since the last call, and empties both.

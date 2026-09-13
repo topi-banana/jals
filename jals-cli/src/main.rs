@@ -1893,23 +1893,20 @@ impl LintProject {
     /// index the package would report every such name as unresolved — an analysis reporting the
     /// absence of code the build compiles.
     ///
-    /// A failed selection is a *warning* here rather than the error `jals build` raises. Lint is
-    /// best-effort about every other input it cannot resolve (an unbuilt dependency, a missing
-    /// classpath entry), and refusing to lint a file because one package name is misspelled would
-    /// be the one input that stops the command outright.
+    /// A failed selection is a *warning* here rather than the error `jals build` raises, and it is
+    /// a warning **per name**. Lint is best-effort about every other input it cannot resolve (an
+    /// unbuilt dependency, a missing classpath entry), and refusing to lint a file because one
+    /// package name is misspelled would be the one input that stops the command outright — but so
+    /// would dropping the whole selection, which is what warning-and-discarding used to do: the
+    /// platform went with it, and every `String` in the project became an unresolved name.
     fn layout_packages(
         shell: &std::sync::Arc<Shell>,
         manifest: &Manifest,
         declared: Option<jals_native::SourceResolver>,
         layout: jals_editor::ProjectLayout,
     ) -> jals_editor::ProjectLayout {
-        match packages::Packages::resolve(shell, manifest, declared) {
-            Ok(selection) => layout.with_packages(&selection, manifest.links_packages()),
-            Err(error) => {
-                shell.warn(format_args!("{error:#}"));
-                layout
-            }
-        }
+        let selection = packages::Packages::resolve_reporting(shell, manifest, declared);
+        layout.with_packages(&selection, manifest.links_packages())
     }
 
     async fn open(

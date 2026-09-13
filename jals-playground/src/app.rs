@@ -1577,12 +1577,15 @@ impl Component for App {
                             // into one per line.
                             let packages = ConfigParseError::parse_manifest(&self.manifest_src)
                                 .ok()
-                                .and_then(|manifest| {
-                                    let selection = self.packages.select(&manifest).ok()?;
-                                    Some(jals_editor::ProjectLayout::package_sources_of(
+                                .map(|manifest| {
+                                    // Whatever resolved, rather than all-or-nothing: a name this
+                                    // tab does not offer is refused by the Build button, which has
+                                    // somewhere to say so, and costs the index that package alone.
+                                    let selection = self.packages.index_sources(&manifest);
+                                    jals_editor::ProjectLayout::package_sources_of(
                                         &selection,
                                         manifest.links_packages(),
-                                    ))
+                                    )
                                 });
                             spawn_local(async move {
                                 if build_generation.get() != generation {

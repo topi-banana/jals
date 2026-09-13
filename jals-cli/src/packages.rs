@@ -119,4 +119,29 @@ impl Packages {
             Err(error) => bail!("{error}"),
         }
     }
+
+    /// Every package this project resolves, warning about the ones it does not and keeping the
+    /// rest.
+    ///
+    /// `jals lint`'s answer to the same question, and the difference from [`resolve`](Self::resolve)
+    /// is the whole reason both exist. Lint is best-effort about every input it cannot resolve, and
+    /// an all-or-nothing selection made "best-effort" mean *nothing*: one misspelled `[packages]`
+    /// key dropped the platform selected beside it, so a typo in a third-party name turned into a
+    /// project with no `java.lang` and an unresolved-name diagnostic on every `String`. The name
+    /// that failed is the one that goes missing.
+    pub(crate) fn resolve_reporting(
+        shell: &Arc<Shell>,
+        manifest: &Manifest,
+        declared: Option<SourceResolver>,
+    ) -> PackageSelection {
+        let names = manifest.package_names();
+        if names.is_empty() {
+            return PackageSelection::empty();
+        }
+        let (selection, failures) = Self::chain(shell, declared).select_reporting(&names);
+        for failure in failures {
+            shell.warn(format_args!("{failure}"));
+        }
+        selection
+    }
 }

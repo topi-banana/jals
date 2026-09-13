@@ -204,20 +204,49 @@ impl ResolverChain {
         }
     }
 
-    /// Resolve every name in `names` into one selection.
+    /// Resolve every name in `names` into one selection, or fail at the first name that does not.
     ///
     /// Order follows `names` only as far as deduplicating it: the selection is sorted by package
     /// name, so two manifests that select the same packages produce one cache key and one module
     /// layout however each spelled the list.
+    ///
+    /// All-or-nothing, which is what a **build** wants: a build compiles against what it resolves,
+    /// so a selection missing one package produces the wrong artifact. A host that only *analyses*
+    /// wants [`select_reporting`](Self::select_reporting) instead — see there for why the
+    /// difference is load-bearing rather than a convenience.
     pub fn select(&self, names: &[String]) -> Result<PackageSelection, ResolveError> {
-        let mut selected: BTreeMap<String, Rc<JavaPackage>> = BTreeMap::new();
-        for name in names {
-            let package = self.resolve(name)?;
-            selected.insert(String::from(package.name()), package);
+        let (selection, mut failures) = self.select_reporting(names);
+        if failures.is_empty() {
+            return Ok(selection);
         }
-        Ok(PackageSelection {
-            packages: selected.into_values().collect(),
-        })
+        Err(failures.remove(0))
+    }
+
+    /// Resolve as many of `names` as this chain can, and say which it could not.
+    ///
+    /// What an **analysis** host takes. A language server, `jals lint` and the playground's editor
+    /// index all degrade on a package they cannot resolve, and degrading through
+    /// [`select`](Self::select) meant degrading to *nothing*: one misspelled `[packages]` key threw
+    /// away the platform selected beside it, so the answer to a typo in a third-party package name
+    /// was a project with no `java.lang` and every `String` reported unresolved. The name that
+    /// failed is the one that should go missing, and it is the only one that does here.
+    pub fn select_reporting(&self, names: &[String]) -> (PackageSelection, Vec<ResolveError>) {
+        let mut selected: BTreeMap<String, Rc<JavaPackage>> = BTreeMap::new();
+        let mut failures = Vec::new();
+        for name in names {
+            match self.resolve(name) {
+                Ok(package) => {
+                    selected.insert(String::from(package.name()), package);
+                }
+                Err(error) => failures.push(error),
+            }
+        }
+        (
+            PackageSelection {
+                packages: selected.into_values().collect(),
+            },
+            failures,
+        )
     }
 }
 

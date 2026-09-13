@@ -5,16 +5,18 @@
 //! a real host rather than a broken one: there is no stream for a write to reach and no run for a
 //! clock to time.
 //!
-//! # A failed resolution degrades rather than fails
+//! # A failed resolution degrades, one name at a time
 //!
-//! An unknown name yields no packages instead of an error, which is this host's policy and the
-//! opposite of `jals build`'s. Every other analysis input this server cannot resolve degrades the
-//! same way — an unbuilt dependency, a missing classpath entry — and a server that stopped indexing
-//! a project over one misspelled name would turn a typo into no diagnostics at all.
+//! An unknown name yields no *package of that name* instead of an error, which is this host's
+//! policy and the opposite of `jals build`'s. Every other analysis input this server cannot resolve
+//! degrades the same way — an unbuilt dependency, a missing classpath entry — and a server that
+//! stopped indexing a project over one misspelled name would turn a typo into no diagnostics at
+//! all.
 //!
-//! The cost is worth naming: with the platform unresolved, the index has no `java.lang` and every
-//! `String` reads as an unresolved name. That is a worse failure than a missing third-party
-//! package, and it is still better than none of the file being analysed.
+//! Per name, and that qualifier is the whole property. Degrading through an all-or-nothing
+//! selection meant a misspelled `[packages]` key took the platform down with it, so the index had
+//! no `java.lang` and every `String` in the project read as an unresolved name — a typo answered
+//! with a diagnostic on every line, which is the outcome this policy exists to avoid.
 
 use std::rc::Rc;
 
@@ -26,12 +28,12 @@ use jals_platform::{JavaBase, SilentHost};
 pub(crate) struct Packages;
 
 impl Packages {
-    /// This project.s packages as index inputs, degrading to none on a failure.
+    /// This project's packages as index inputs, dropping only the names that did not resolve.
     pub(crate) fn layout_sources<S: jals_storage::SourceBackend, C: jals_storage::CacheBackend>(
         manifest: &Manifest,
         storage: &jals_storage::ProjectStorage<S, C>,
     ) -> Vec<jals_editor::PackageSource> {
-        let selection = Self::resolve(manifest, storage).unwrap_or_default();
+        let selection = Self::resolve(manifest, storage);
         jals_editor::ProjectLayout::package_sources_of(&selection, manifest.links_packages())
     }
 
@@ -44,10 +46,10 @@ impl Packages {
     fn resolve<S: jals_storage::SourceBackend, C: jals_storage::CacheBackend>(
         manifest: &Manifest,
         storage: &jals_storage::ProjectStorage<S, C>,
-    ) -> Option<PackageSelection> {
+    ) -> PackageSelection {
         let names = manifest.package_names();
         if names.is_empty() {
-            return Some(PackageSelection::empty());
+            return PackageSelection::empty();
         }
         let mut builtin = StaticResolver::new("built into `jals`");
         builtin.add(JavaBase::package(Rc::new(SilentHost)));
@@ -59,6 +61,9 @@ impl Packages {
         } else {
             chain.push(Box::new(declared))
         };
-        chain.select(&names).ok()
+        // The failures are discarded and the successes kept: this server has no channel to report
+        // a manifest problem on, and the name that failed is already absent from the index, which
+        // is what a reference into it reports.
+        chain.select_reporting(&names).0
     }
 }
