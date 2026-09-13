@@ -10,6 +10,12 @@ package java.lang;
  */
 public final class Character implements Comparable<Character> {
 
+    /** {@code "char"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'c', 'h', 'a', 'r'};
+
+    /** The {@code Class} standing for the primitive type {@code char}. */
+    public static final Class<Character> TYPE = new Class<Character>(new String(PRIMITIVE_NAME));
+
     /** The smallest radix the digit conversions accept. */
     public static final int MIN_RADIX = 2;
 

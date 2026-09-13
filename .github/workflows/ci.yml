@@ -833,7 +833,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Debug, unlike every other cell that builds this binary. The example and Minecraft cells go
-      # release because they decompress, remap and decompile a game jar; this one parses 66 small
+      # release because they decompress, remap and decompile a game jar; this one parses 69 small
       # files twice, which is under a second unoptimized — so the cheaper build is the whole
       # difference between adding a gate and adding a release build to every run.
       - name: Build jals

@@ -46,12 +46,17 @@ impl Platform {
     ///   members the *compiler* synthesises per declaration — a constant.s `ordinal()`, a record.s
     ///   accessors. There is no single body either could carry that would produce them, so they
     ///   are declared for analysis and never lowered.
+    /// - `java/lang/Thread.java` and `java/lang/Runtime.java` describe a host a module does not
+    ///   have — a second thread, a process to halt. They are the record a `javac` build's analysis
+    ///   resolves those names through, and no body here could do what they promise.
     const SIGNATURE_ONLY: &'static [&'static str] = &[
         "java/util/",
         "java/lang/Object.java",
         "java/lang/Iterable.java",
         "java/lang/Enum.java",
         "java/lang/Record.java",
+        "java/lang/Runtime.java",
+        "java/lang/Thread.java",
     ];
 
     /// Render the list and write it; with `check`, render to memory and fail if the committed file

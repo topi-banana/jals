@@ -10,6 +10,12 @@ package java.lang;
  */
 public final class Float extends Number implements Comparable<Float> {
 
+    /** {@code "float"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'f', 'l', 'o', 'a', 't'};
+
+    /** The {@code Class} standing for the primitive type {@code float}. */
+    public static final Class<Float> TYPE = new Class<Float>(new String(PRIMITIVE_NAME));
+
     /** The largest finite {@code float}. */
     public static final float MAX_VALUE = 3.4028235E38f;
 

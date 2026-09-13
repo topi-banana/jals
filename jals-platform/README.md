@@ -79,6 +79,9 @@ Each because of what the target is, and each stated in the class that would have
 - **Full Unicode case mapping.** `Character` and `String` map ASCII and say so, rather than shipping
   a half-Unicode answer that looks general.
 - **`System.exit`.** A wasm module does not *run*: it is called, and it returns.
+- **`Thread` and `Runtime` are declarations only.** A module has one thread, which it does not own,
+  and no process to halt. They are here so a `javac` build's analysis resolves the JDK types a
+  project names.
 - **Stack traces.** There is no walkable frame list, which is why `Throwable` renders through
   `typeName()` — a method every subclass overrides — instead of `getClass().getName()`.
 

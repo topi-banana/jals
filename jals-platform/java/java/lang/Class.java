@@ -16,7 +16,9 @@ public final class Class<T> {
 
     private final String name;
 
-    private Class(String name) {
+    // Package-private rather than private: each wrapper's `TYPE` is built here, since that field is
+    // the JDK's answer to `int.class` and a JVM lowering reads it by name.
+    Class(String name) {
         this.name = name;
     }
 

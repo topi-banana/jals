@@ -3,6 +3,12 @@ package java.lang;
 /** The {@code boolean} wrapper. */
 public final class Boolean implements Comparable<Boolean> {
 
+    /** {@code "boolean"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'b', 'o', 'o', 'l', 'e', 'a', 'n'};
+
+    /** The {@code Class} standing for the primitive type {@code boolean}. */
+    public static final Class<Boolean> TYPE = new Class<Boolean>(new String(PRIMITIVE_NAME));
+
     private static final char[] TRUE_TEXT = {'t', 'r', 'u', 'e'};
 
     private static final char[] FALSE_TEXT = {'f', 'a', 'l', 's', 'e'};

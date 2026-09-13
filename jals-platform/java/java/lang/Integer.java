@@ -9,6 +9,12 @@ package java.lang;
  */
 public final class Integer extends Number implements Comparable<Integer> {
 
+    /** {@code "int"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'i', 'n', 't'};
+
+    /** The {@code Class} standing for the primitive type {@code int}. */
+    public static final Class<Integer> TYPE = new Class<Integer>(new String(PRIMITIVE_NAME));
+
     /** The most negative {@code int}. */
     public static final int MIN_VALUE = -2147483648;
 

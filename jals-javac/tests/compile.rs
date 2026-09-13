@@ -200,14 +200,16 @@ public class Counter {
 /// a class file that loads and then misbehaves.
 #[test]
 fn an_unsupported_construct_is_reported() {
-    let source = r"
+    let source = r#"
 public class Unsupported {
     public static void main(String[] args) {
-        Runnable r = () -> {};
+        Object text = "a";
+        text += "b";
     }
 }
-";
-    let error = compile(source).expect_err("a lambda is not lowered yet");
+"#;
+    let error =
+        compile(source).expect_err("a concatenating `+=` on an `Object` is not lowered yet");
     assert!(
         matches!(error, LowerError::Unsupported(_)),
         "expected an Unsupported error, got {error}"
@@ -5422,14 +5424,14 @@ public class Hid {
 ///
 /// Every other unresolved type is a value the caller wrote and the descriptor has to spell, so
 /// refusing is right there. A bound is a fact about the *index*, and the index is routinely partial:
-/// `Runnable`, `Cloneable`, `Comparator`, and every `java.util.function` type are absent from the
-/// embedded stubs, which is the only configuration this crate's own tests and the playground index.
-/// Refusing therefore made `<T extends Runnable>` uncompilable outright — including the class-level
+/// `Cloneable`, `Comparator`, and every `java.util.function` type are absent from the platform's
+/// record, which is the only configuration this crate's own tests and the playground index.
+/// Refusing therefore made `<T extends Cloneable>` uncompilable outright — including the class-level
 /// form, which compiled before any bound was read at all.
 #[test]
 fn a_bound_the_index_cannot_name_erases_to_object() {
     let method = descriptors(
-        "public class D { static <T extends Runnable> T r(T a) { return a; } }",
+        "public class D { static <T extends Cloneable> T r(T a) { return a; } }",
         "D",
     );
     assert!(
@@ -5437,7 +5439,7 @@ fn a_bound_the_index_cannot_name_erases_to_object() {
         "got {method:?}"
     );
     let class_level = descriptors(
-        "public class F<T extends Runnable> { T held; T get() { return held; } }",
+        "public class F<T extends Cloneable> { T held; T get() { return held; } }",
         "F",
     );
     assert!(

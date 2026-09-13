@@ -8,6 +8,12 @@ package java.lang;
  */
 public final class Short extends Number implements Comparable<Short> {
 
+    /** {@code "short"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'s', 'h', 'o', 'r', 't'};
+
+    /** The {@code Class} standing for the primitive type {@code short}. */
+    public static final Class<Short> TYPE = new Class<Short>(new String(PRIMITIVE_NAME));
+
     /** The most negative {@code short}. */
     public static final short MIN_VALUE = -32768;
 

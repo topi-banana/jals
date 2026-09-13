@@ -2873,7 +2873,7 @@ fn a_failed_in_process_compile_does_not_reach_the_run_step() {
     std::fs::write(
         &source,
         "package com.example;\n\
-         public class Main { public static void main(String[] a) { Runnable r = () -> {}; } }\n",
+         public class Main { public static void main(String[] a) { Object t = \"a\"; t += \"b\"; } }\n",
     )
     .unwrap();
 

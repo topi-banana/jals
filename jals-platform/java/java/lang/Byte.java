@@ -8,6 +8,12 @@ package java.lang;
  */
 public final class Byte extends Number implements Comparable<Byte> {
 
+    /** {@code "byte"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'b', 'y', 't', 'e'};
+
+    /** The {@code Class} standing for the primitive type {@code byte}. */
+    public static final Class<Byte> TYPE = new Class<Byte>(new String(PRIMITIVE_NAME));
+
     /** The most negative {@code byte}. */
     public static final byte MIN_VALUE = -128;
 

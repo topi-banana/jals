@@ -15,6 +15,12 @@ package java.lang;
  */
 public final class Double extends Number implements Comparable<Double> {
 
+    /** {@code "double"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'d', 'o', 'u', 'b', 'l', 'e'};
+
+    /** The {@code Class} standing for the primitive type {@code double}. */
+    public static final Class<Double> TYPE = new Class<Double>(new String(PRIMITIVE_NAME));
+
     /** The largest finite {@code double}. */
     public static final double MAX_VALUE = 1.7976931348623157E308;
 

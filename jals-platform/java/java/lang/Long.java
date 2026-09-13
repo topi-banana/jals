@@ -9,6 +9,12 @@ package java.lang;
  */
 public final class Long extends Number implements Comparable<Long> {
 
+    /** {@code "long"}, as a {@code char[]}. */
+    private static final char[] PRIMITIVE_NAME = {'l', 'o', 'n', 'g'};
+
+    /** The {@code Class} standing for the primitive type {@code long}. */
+    public static final Class<Long> TYPE = new Class<Long>(new String(PRIMITIVE_NAME));
+
     /** The most negative {@code long}. */
     public static final long MIN_VALUE = -9223372036854775808L;
 
