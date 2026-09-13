@@ -85,6 +85,35 @@ pub enum WasmError {
     TooLarge,
 }
 
+impl WasmError {
+    /// This refusal, said to be about one member's **declared signature**.
+    ///
+    /// A type with no representation is reported by its own name, which is enough when a reader
+    /// wrote it. It is not enough for a *library* input, where every body is lowered rather than
+    /// only the reachable ones: "`?` has no wasm representation" over fifty files names nothing at
+    /// all, and the answer is always the same question — which declaration.
+    /// This refusal, said to be about one expression — the innermost that has not already named
+    /// one, so a nested failure reports the operand rather than the whole statement.
+    pub(crate) fn in_expression(self, node: &SyntaxNode) -> Self {
+        match self {
+            Self::NoRepresentation(what) if !what.contains(" in `") => {
+                Self::NoRepresentation(alloc::format!("{what}, in `{}`", node.text()))
+            }
+            other => other,
+        }
+    }
+
+    pub(crate) fn in_signature(self, member: MemberId, index: &ProjectIndex) -> Self {
+        match self {
+            Self::NoRepresentation(ty) => Self::NoRepresentation(alloc::format!(
+                "{ty}, in the signature of `{}`",
+                CompileWasm::member_path(member, index)
+            )),
+            other => other,
+        }
+    }
+}
+
 impl core::fmt::Display for WasmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -952,13 +981,21 @@ impl CompileWasm {
                 }
                 for ty in index.resolved_param_tys(member) {
                     layout.declare_array(&ty, module)?;
-                    params.push(layout.val_type(&ty)?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 let returned = index.resolved_member_ty(member);
                 layout.declare_array(&returned, module)?;
                 let results = match returned {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty)?],
+                    ty => alloc::vec![
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?
+                    ],
                 };
                 let descriptor = Descriptor::method_descriptor(member, index, false)
                     .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
@@ -1014,11 +1051,19 @@ impl CompileWasm {
                 };
                 let mut params = alloc::vec![layout.class_ref(item)?];
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty)?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 let results = match index.resolved_member_ty(member) {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty)?],
+                    ty => alloc::vec![
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?
+                    ],
                 };
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
@@ -1113,7 +1158,11 @@ impl CompileWasm {
                     params.push(layout.class_ref(enclosing)?);
                 }
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty)?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 // The captures come after every declared parameter, so a declared one keeps its slot.
                 let captured = is_constructor
@@ -1128,7 +1177,11 @@ impl CompileWasm {
                 } else {
                     match index.resolved_member_ty(member) {
                         Ty::Void => Vec::new(),
-                        ty => alloc::vec![layout.val_type(&ty)?],
+                        ty => alloc::vec![
+                            layout
+                                .val_type(&ty)
+                                .map_err(|error| error.in_signature(member, index))?
+                        ],
                     }
                 };
 
@@ -1387,7 +1440,9 @@ impl Layout {
         let mut fields = Vec::with_capacity(slots.len());
         for slot in &slots {
             let ty = match slot {
-                Slot::Declared(member) => self.val_type(&index.resolved_member_ty(*member))?,
+                Slot::Declared(member) => self
+                    .val_type(&index.resolved_member_ty(*member))
+                    .map_err(|error| error.in_signature(*member, index))?,
                 Slot::Enclosing(enclosing) => self.class_ref(*enclosing)?,
                 Slot::Capture(ty) => self.val_type(ty)?,
             };
@@ -1574,15 +1629,16 @@ impl Layout {
                 let Ok((value, _)) = Literal::integer(text) else {
                     return default();
                 };
-                #[allow(clippy::cast_precision_loss)]
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     ValType::F32 => insn.f32_const(value as f32),
                     ValType::F64 => insn.f64_const(value as f64),
-                    _ => match i32::try_from(value) {
-                        Ok(value) => insn.i32_const(value),
-                        Err(_) => return default(),
-                    },
+                    // The low 32 bits, for the reason the expression path takes them: an `int`
+                    // literal past `i32::MAX` spells a bit pattern. Falling back to the start
+                    // function instead only moved the same value to the same refusal one pass
+                    // later.
+                    _ => insn.i32_const(value as i32),
                 };
             }
             (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
@@ -1710,6 +1766,14 @@ impl Layout {
             // a field of type `T` is one field whatever a use instantiates it at, and typing it at
             // the bound would make two instantiations two different structs.
             Ty::TypeVar { .. } => ValType::Ref(RefType::nullable(HeapType::Any)),
+            // `Unknown` is not "a library type this backend cannot spell" — it is inference
+            // having failed, which is a different problem with a different fix, and reporting it
+            // as the other one sends a reader looking for a dependency in a file that has none.
+            Ty::Unknown => {
+                return Err(WasmError::NoRepresentation(
+                    "a type inference could not determine".to_owned(),
+                ));
+            }
             other => return Err(WasmError::NoRepresentation(other.to_string())),
         })
     }
@@ -3548,6 +3612,11 @@ impl Lowering<'_> {
 
     /// Emit `expr`. Returns its type, or `None` when it left nothing on the stack.
     fn expr(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
+        self.expr_inner(expr, insn)
+            .map_err(|error| error.in_expression(expr.syntax()))
+    }
+
+    fn expr_inner(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
         match expr {
             ast::Expr::Literal(literal) => self.literal(literal, insn).map(Some),
             ast::Expr::Paren(paren) => {
@@ -3757,12 +3826,22 @@ impl Lowering<'_> {
                 // about one of them. The width comes from the inferred type below, so the one the
                 // fact reads off the suffix is dropped.
                 let (value, _) = Literal::integer(text)?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "an `int` literal denotes its low 32 bits (JLS \u{a7}3.10.1) \u{2014} see below"
+                )]
                 match ty {
                     ValType::I64 => insn.i64_const(value),
-                    _ => insn
-                        .i32_const(i32::try_from(value).map_err(|_| {
-                            WasmError::Unsupported("an out-of-range `int` literal")
-                        })?),
+                    // The low 32 bits, not a range check. An `int` literal is legal up to
+                    // `0xFFFFFFFF` in a hexadecimal, octal or binary spelling, where it denotes the
+                    // *bit pattern* and not the number: `0xFFFFFFFF` is `-1`. Decimal has one such
+                    // spelling too, `2147483648`, which JLS \u{a7}3.10.1 admits only as the operand of a
+                    // unary minus \u{2014} and the negation that follows wraps it back to itself, which
+                    // is why `Integer.MIN_VALUE` is written that way and no other. Refusing the
+                    // value here rejected all four, and `i64` already reads its own out-of-range
+                    // spellings this way (`Literal::integer` falls back to `u64`), so this is the
+                    // one width that answered differently.
+                    _ => insn.i32_const(value as i32),
                 };
             }
             FLOAT_LITERAL => {
@@ -4196,13 +4275,21 @@ impl Lowering<'_> {
     }
 
     /// The numeric type `node`'s recorded type is.
+    ///
+    /// Both refusals name the operand, which is the difference between a message a reader can act
+    /// on and one that only says a compile stopped. "An arithmetic operand of this type" was true
+    /// and useless: the whole question is *which* operand, and on a library input — where every
+    /// body is lowered rather than only the reachable ones — there are tens of thousands of them.
     fn num_of(&self, node: &SyntaxNode) -> Result<Numeric> {
         let ty = self
             .input
             .type_of_expr(Facts::span(node))
-            .ok_or(WasmError::Unsupported("a value with no inferred type"))?;
+            .ok_or_else(|| WasmError::Unresolved(node.text().to_string()))?;
         let Ty::Primitive(primitive) = ty else {
-            return Err(WasmError::Unsupported("an arithmetic operand of this type"));
+            return Err(WasmError::NoRepresentation(alloc::format!(
+                "{ty} (the type of `{}`, an arithmetic operand)",
+                node.text()
+            )));
         };
         // A `boolean` is not a numeric type (JLS §4.2), so the shared rule refuses it. On *this*
         // target it shares `int`'s representation, and the only operators it reaches are the bitwise
@@ -4237,12 +4324,16 @@ impl Lowering<'_> {
         } else {
             (left, Some(right))
         };
-        self.expr(value, insn)?
+        let value_ty = self
+            .expr(value, insn)?
             .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
         match other {
             Some(other) => {
-                self.expr(other, insn)?
+                Self::narrow_to_eq(value_ty, insn);
+                let other_ty = self
+                    .expr(other, insn)?
                     .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
+                Self::narrow_to_eq(other_ty, insn);
                 insn.ref_eq();
             }
             None => {
@@ -4253,6 +4344,24 @@ impl Lowering<'_> {
             insn.i32_eqz();
         }
         Ok(ValType::I32)
+    }
+
+    /// Narrow an `anyref` operand to `eqref`, which is what `ref.eq` takes.
+    ///
+    /// `Object`, an interface, and a type variable are all held at the top of the reference
+    /// hierarchy, and `eqref` sits one step below it — so `a == b` over any of them pushed two
+    /// `anyref`s at an instruction that accepts neither, and the module failed validation with
+    /// "expected subtype of eqref". A `String.equals(Object other)` opening with `other == this`
+    /// is the everyday shape.
+    ///
+    /// The cast always succeeds: every reference this backend creates is a `struct.new` or an
+    /// `array.new`, and both are `eqref`. It is nullable because Java's `==` compares two nulls as
+    /// equal and `ref.eq` answers that correctly — a non-nullable cast would trap on the one
+    /// comparison that has a defined answer.
+    fn narrow_to_eq(ty: ValType, insn: &mut Insn) {
+        if ty == ValType::Ref(RefType::nullable(HeapType::Any)) {
+            insn.ref_cast(HeapType::Eq, true);
+        }
     }
 
     /// `e instanceof T`.
@@ -5103,12 +5212,17 @@ impl Lowering<'_> {
         // Most-derived first, so a subclass's override is tested before its superclass's: testing the
         // other way round would let the base class's `ref.test` succeed for every descendant and answer
         // with the wrong method.
-        found.sort_by(|&(a, _), &(b, _)| {
-            self.index
-                .is_subtype(a, b)
-                .cmp(&self.index.is_subtype(b, a))
-                .reverse()
-        });
+        //
+        // By **depth in the class chain**, and not by comparing the two entries with `is_subtype`.
+        // That comparator is not a total order — three classes where one extends another and the
+        // third is unrelated compare as `a < b`, `b == c`, `a == c` — so it is intransitive, and
+        // Rust's sort detects that and panics rather than producing a wrong order. It went
+        // unnoticed for as long as no dispatch had enough overriders to reach the check: a
+        // `java.lang` with twenty-four exception classes overriding one method is what found it.
+        // Depth is the property the ordering actually wants and is transitive by construction —
+        // a subclass's chain strictly contains its superclass's, so `depth(sub) > depth(super)`
+        // always — and it leaves unrelated classes in `structs` order, which is deterministic.
+        found.sort_by_key(|&(item, _)| core::cmp::Reverse(self.index.superclasses(item).count()));
         found
     }
 

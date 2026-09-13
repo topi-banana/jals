@@ -6,8 +6,19 @@
 //! below is about: the origin is its own, the declarations are complete rather than lenient, and a
 //! package outranks a stub of the same name because the one with a body is the one that will run.
 
-use jals_hir::{FileAnalysis, FileId, ItemOrigin, ProjectIndex, TypeResolution};
+use jals_hir::{FileAnalysis, FileId, ItemOrigin, LibraryFidelity, ProjectIndex, TypeResolution};
 use jals_syntax::SyntaxNode;
+
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
 
 /// The package's own Java, in the shape a host hands it over: parsed, under ids of the host's
 /// choosing.
@@ -24,14 +35,30 @@ fn parse(sources: &[&str], base: u32) -> Vec<(FileId, SyntaxNode)> {
         .collect()
 }
 
-/// One project file indexed against `packages`, with the stubs on as every host has them.
+/// One project file indexed against `packages` — the packages at **`Complete`** fidelity, the
+/// platform behind them as a record, exactly as a linking wasm build sees them.
+///
+/// One library slot, two tiers. A caller cannot rank a unit by choosing which argument to pass it
+/// in, which is what the two separate slots this replaced allowed.
 fn index_of(project: &str, packages: &[&str]) -> (ProjectIndex, SyntaxNode) {
     let project = parse(&[project], 0);
-    let native = parse(packages, 1000);
+    let mut library = jals_exec::block_on_inline(jals_hir::LibraryFile::parse(
+        &packages
+            .iter()
+            .map(|text| (*text, LibraryFidelity::Complete))
+            .collect::<Vec<_>>(),
+    ));
+    for (offset, unit) in platform().into_iter().enumerate() {
+        library.push(jals_hir::LibraryFile {
+            file: jals_hir::FileId::library(
+                u32::try_from(packages.len() + offset).expect("a small fixture"),
+            ),
+            ..unit
+        });
+    }
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&project)
-            .with_native_packages(&native)
-            .with_stdlib()
+            .with_library(&library)
             .build(),
     );
     (index, project[0].1.clone())
@@ -50,11 +77,14 @@ fn a_packages_type_is_indexed_under_its_own_origin() {
     let item = index
         .item_by_fqn("jals.io.Out")
         .expect("the package's class is indexed");
-    assert_eq!(index.item(item).origin, ItemOrigin::Native);
+    assert_eq!(
+        index.item(item).origin,
+        ItemOrigin::Library(LibraryFidelity::Complete)
+    );
     // Real source, written by the package's author — so silence about an annotation is a fact.
-    assert!(ItemOrigin::Native.carries_annotations());
+    assert!(ItemOrigin::Library(LibraryFidelity::Complete).carries_annotations());
     // Never a file the host owns: the text is a constant in the binary that shipped the package.
-    assert!(!ItemOrigin::Native.is_host_editable());
+    assert!(!ItemOrigin::Library(LibraryFidelity::Complete).is_host_editable());
 
     let members: Vec<&str> = index
         .own_members(item)
@@ -110,7 +140,10 @@ fn a_package_outranks_a_stub_of_the_same_name() {
     let item = index
         .item_by_fqn("java.io.PrintStream")
         .expect("indexed by both");
-    assert_eq!(index.item(item).origin, ItemOrigin::Native);
+    assert_eq!(
+        index.item(item).origin,
+        ItemOrigin::Library(LibraryFidelity::Complete)
+    );
 }
 
 /// A project type still outranks a package's, exactly as it outranks a library source's: the

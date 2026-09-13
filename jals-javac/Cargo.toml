@@ -14,6 +14,7 @@ jals-hir = { workspace = true }
 jals-syntax = { workspace = true }
 
 [dev-dependencies]
+jals-platform.workspace = true
 expect-test = "1.5"
 # `block_on_inline` to drive `ClassFile::read` when a test re-reads what it emitted.
 jals-exec = { workspace = true }

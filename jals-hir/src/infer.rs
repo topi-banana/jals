@@ -1642,7 +1642,40 @@ impl<'a> Inferer<'a> {
         if tys.iter().all(|ty| ty == first) {
             return first.clone();
         }
+        // `null` beside a reference type is that reference type (JLS §15.25's reference
+        // conditional: the null type is assignable to every reference type, so the lub of the two
+        // is the other one). No hierarchy walk is needed for it, which is why this case is
+        // answerable where a *mixed* reference join still is not.
+        //
+        // Leaving it unknown is not a neutral "no answer": a consumer that has to give the
+        // expression a representation has nothing to give it. `cause == null ? null :
+        // cause.toString()` — the everyday shape — stopped a compile with a message naming no type
+        // at all.
+        if let Some(reference) = Self::join_with_null(&tys) {
+            return reference;
+        }
         Self::join_numeric(&tys)
+    }
+
+    /// The one reference type among arms that are otherwise all `null`, if there is exactly one.
+    ///
+    /// `Some` only when every arm is `Ty::Null` or that one type: two *different* reference types
+    /// still need a least upper bound over the hierarchy, and `null` beside a primitive is not a
+    /// conditional Java admits at all.
+    fn join_with_null(tys: &[Ty]) -> Option<Ty> {
+        let mut reference: Option<&Ty> = None;
+        for ty in tys {
+            match ty {
+                Ty::Null => {}
+                Ty::Class(_) | Ty::Array(_) => match reference {
+                    Some(seen) if seen != ty => return None,
+                    Some(_) => {}
+                    None => reference = Some(ty),
+                },
+                _ => return None,
+            }
+        }
+        reference.cloned()
     }
 
     /// The binary numeric promotion of every arm, when they are all numeric and it lands on one of

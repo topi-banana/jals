@@ -6,6 +6,7 @@
 //!   `jals-syntax/java.ungram` (`--check` verifies the committed file instead).
 
 mod codegen;
+mod platform;
 
 use std::process::ExitCode;
 

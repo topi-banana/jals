@@ -7,13 +7,18 @@ what it emitted, through the `tinywasm` interpreter `jals-build` embeds behind i
 feature.
 
 It exists to show the two things that are *different* about this target, both of which are
-consequences of one fact: **the module is the whole world, and there is no `java.base` in it.**
+consequences of one fact: **the module is the whole world, and this project put no `java.base` in
+it.** That is `platform = "none"` in `jals.toml` — the smallest artifact this backend produces, and
+the third state `[build] platform` names. A wasm build links the platform by default;
+`examples/hello_world_native` is this same greeting with it, printed through a real
+`System.out.println`.
 
 ## There is no `String`, so there is no `println`
 
-A library type has no wasm representation, and inventing one is a separate decision from compiling
-— so `System.out.println("Hello, world!")` does not compile here, and no amount of manifest
-configuration makes it. The greeting is a `char[]`: a wasm array, allocated and owned by the host's
+With no platform linked, a library type has no wasm representation at all — it is not even a name
+that resolves — so `System.out.println("Hello, world!")` does not compile here. One line of manifest
+configuration *does* make it (`platform` defaults to the platform, and this project turns it off),
+which is the point: what follows is what that line buys, priced. The greeting is a `char[]`: a wasm array, allocated and owned by the host's
 garbage collector, holding the code units in order.
 
 The module can therefore *hold* the greeting but never *print* it. Turning code units back into
@@ -86,8 +91,8 @@ done | awk '{printf "%c", $1} END { print "" }'
 # → Hello, world!
 ```
 
-That indirection is the example's point rather than an inconvenience to route around: it is exactly
-what "no `java.base`" costs, made visible.
+That indirection is the example.s point rather than an inconvenience to route around: it is exactly
+what `platform = "none"` costs, made visible.
 
 ## What the two failure paths report
 

@@ -1,0 +1,17 @@
+[package]
+name = "jals-platform"
+version.workspace = true
+edition.workspace = true
+description = "The Java platform library `jals` ships: `java.lang` and `java.io` as a package, with the host functions the operations Java cannot express bind to"
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+
+# One dependency, and it is the vocabulary this crate is an instance of. Featureless for the reason
+# `jals-native` is: the Java is a compile-time constant and the bindings reach their host through a
+# trait, so there is no host half to gate and a plain `cargo check` is the portability check.
+[dependencies]
+jals-native = { workspace = true }
+
+[lints]
+workspace = true

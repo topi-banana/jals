@@ -327,7 +327,7 @@ mod tests {
         };
         let backend = JalsBackend::wasm(
             crate::Assertions::Enabled,
-            jals_native::NativePackageSet::empty(),
+            jals_native::PackageSelection::empty(),
         );
         let outcome =
             jals_exec::block_on_inline(backend.compile(&request)).expect("the backend ran");

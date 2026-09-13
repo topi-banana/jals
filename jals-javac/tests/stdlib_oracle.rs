@@ -23,6 +23,17 @@ use jals_classfile::{ClassFile, MethodDescriptor};
 use jals_hir::{DefKind, ItemOrigin, ProjectIndex};
 use jals_javac::desc::Descriptor;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// The running JDK's home directory and specification version, from the JVM itself.
 ///
 /// `$JAVA_HOME` is routinely unset even where a JDK is installed, so it is not consulted; asking
@@ -151,12 +162,13 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
         "found no java.lang/java.util/java.io signatures for release {release} in ct.sym"
     );
 
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&[]).with_stdlib().build());
+    let index =
+        jals_exec::block_on_inline(ProjectIndex::builder(&[]).with_library(&platform()).build());
     let mut checked = 0usize;
     let mut wrong = Vec::new();
 
     for (id, item) in index.items() {
-        if item.origin != ItemOrigin::Stdlib {
+        if !matches!(item.origin, ItemOrigin::Library(_)) {
             continue;
         }
         let internal = Descriptor::internal_name(item.fqn.as_str());

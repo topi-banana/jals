@@ -24,7 +24,10 @@ use core::ops::Range;
 
 use jals_config::FeatureSet;
 use jals_exec::Exec;
-use jals_hir::{FileAnalysis, FileFacts, FileId, LoweredClasspath, ProjectIndex, SourceLocations};
+use jals_hir::{
+    FileAnalysis, FileFacts, FileId, LibraryFidelity, LoweredClasspath, ProjectIndex,
+    SourceLocations,
+};
 use jals_storage::{CacheBackend, DirKey, FileKey, ProjectStorage, ProjectView, SourceBackend};
 use jals_syntax::Parse;
 use jals_syntax::cfg::CfgMap;
@@ -249,14 +252,19 @@ pub struct ProjectLayout {
     /// The `.java` of each `git`/`path` `[dependencies]` entry (virtual paths): index inputs
     /// (`Source`-origin types that resolve for analysis) *and* navigation targets.
     pub source_dep_sources: Vec<FileKey>,
-    /// The Java each selected **native package** publishes: index inputs
-    /// ([`Native`](jals_hir::ItemOrigin::Native)-origin types) and nothing else.
+    /// The Java the packages this project resolved publish — the platform library among them:
+    /// index inputs ([`Library`](jals_hir::ItemOrigin::Library)-origin types) and nothing else.
     ///
     /// Carried as text rather than as a [`FileKey`] because there is no file: a package's Java is a
-    /// compile-time constant in the binary that shipped it, which is also why nothing navigates
-    /// into one. Without them a project that selected a package sees every reference into it as an
-    /// unresolved name — the analysis would be reporting the absence of code the build compiles.
-    pub native_sources: Vec<PackageSource>,
+    /// compile-time constant in the binary that shipped it, or a tree the host holds in memory,
+    /// which is also why nothing navigates into one.
+    ///
+    /// **A host that supplies none of these has no `java.lang` at all** — no `String`, no `Object`,
+    /// no implicit supertype edge — so every reference into the standard library reads as an
+    /// unresolved name. There is no fallback behind this and deliberately so: a name list standing
+    /// in for a library nobody supplied is a second answer to what the library contains, and the
+    /// one that used to stand here drifted from the first. Resolve the platform and pass it.
+    pub package_sources: Vec<PackageSource>,
     /// The project's resolved language feature set (from `[package] features`); empty when the
     /// manifest declares none, disabling the feature-gated lint rules.
     pub feature_set: FeatureSet,
@@ -267,7 +275,7 @@ pub struct ProjectLayout {
     pub build_features: BTreeSet<String>,
 }
 
-/// One Java compilation unit a native package publishes, as the workspace receives it.
+/// One Java compilation unit a package publishes, as the workspace receives it.
 ///
 /// Deliberately not a [`FileKey`]: the text never came from storage and no host can open it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +284,14 @@ pub struct PackageSource {
     pub path: String,
     /// The Java itself.
     pub text: String,
+    /// Whether these declarations are the ones that will run — see [`jals_hir::LibraryFidelity`].
+    ///
+    /// The host states it because it is not a property of the text: the same `String.java` is
+    /// `Complete` for the build that compiles it into its own module and `Signatures` for the one
+    /// that will link a real JDK instead. Getting it wrong in the lenient direction costs a missed
+    /// report; in the strict direction it accuses a correct program of calling a method the
+    /// standard library really has.
+    pub fidelity: LibraryFidelity,
 }
 
 impl ProjectLayout {
@@ -285,6 +301,48 @@ impl ProjectLayout {
             source_roots,
             ..Self::default()
         }
+    }
+
+    /// Lower a resolved [`PackageSelection`] into this layout's
+    /// [`package_sources`](Self::package_sources), at the fidelity `links` decides.
+    ///
+    /// **The one place a selection becomes an index input**, which is the whole reason it is here
+    /// rather than in each host. Three hosts index packages — the CLI's `jals lint`, the language
+    /// server, the browser playground — and none of them depends on the other two, so a lowering
+    /// written per host is three copies of a rule where getting one wrong is silent: reading a
+    /// signature record as though it were the running code accuses a correct program of calling a
+    /// method the real JDK has.
+    ///
+    /// `links` is `jals_config::Manifest::links_packages` — whether this project's build compiles
+    /// that Java into its own artifact. It applies only to units that *have* bodies; a signature
+    /// unit is a record however the build is configured, because there is nothing to compile.
+    #[must_use]
+    pub fn with_packages(mut self, packages: &jals_native::PackageSelection, links: bool) -> Self {
+        self.package_sources = Self::package_sources_of(packages, links);
+        self
+    }
+
+    /// The same lowering, for a host that fills [`package_sources`](Self::package_sources) itself.
+    ///
+    /// The language server assembles its layout field by field out of a value it computed earlier,
+    /// so it cannot take the `self`-consuming form. It must not grow a second lowering for that:
+    /// this is the one, and both spellings go through it.
+    #[must_use]
+    pub fn package_sources_of(
+        packages: &jals_native::PackageSelection,
+        links: bool,
+    ) -> Vec<PackageSource> {
+        packages
+            .analysis_sources()
+            .map(|(_, source)| PackageSource {
+                path: source.path.clone().into_owned(),
+                text: source.text.clone().into_owned(),
+                fidelity: match source.kind {
+                    jals_native::SourceKind::Implementation if links => LibraryFidelity::Complete,
+                    _ => LibraryFidelity::Signatures,
+                },
+            })
+            .collect()
     }
 
     /// Lower `classes` into this layout's [`classpath`](Self::classpath).
@@ -322,7 +380,7 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
     by_path: BTreeMap<FileKey, FileId>,
     /// Extracted library *source* files (the `.java` of a `[dependencies]` `sources` jar), kept
     /// so a classpath type/member can be navigated into its real source. Addressed by a
-    /// [`Library`](WorkspaceFileId::Library) [`FileId`], disjoint from the project files' low
+    /// [`Library`](WorkspaceFileId::SourcesJar) [`FileId`], disjoint from the project files' low
     /// ids, so [`ws_file`](Workspace::ws_file) can route a go-to-definition target to the right
     /// vec. Never project inputs and never linted — they are navigation targets only.
     library_files: Vec<SourceFile>,
@@ -348,15 +406,15 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
     /// evaluates against when the `attributes` dialect feature is on (see
     /// [`SourceFile::cfg_map`]).
     build_features: BTreeSet<String>,
-    /// The embedded `java.lang` stub facts, extracted once at construction and reused on every
-    /// rebuild (they never change), so the stubs are never re-parsed per edit. Their reserved
-    /// [`FileId`]s are disjoint from the project / library id-spaces.
-    stub_facts: Vec<(FileId, FileFacts)>,
-    /// The facts of the Java each selected native package publishes, extracted once at
-    /// construction and reused on every rebuild — a package's text is a constant in the binary, so
-    /// like the stubs it is never re-parsed per edit. Only the *facts* are kept: there is no file
-    /// behind them, so nothing else in this type would ever have one to hand back.
-    native_facts: Vec<(FileId, FileFacts)>,
+    /// The facts of the Java the resolved packages publish, each with the fidelity its host
+    /// stated, extracted once at construction and reused on every rebuild — a package.s text is a
+    /// constant in the binary, or a tree the host holds, so it is never re-parsed per edit. Only
+    /// the *facts* are kept: there is no file behind them, so nothing else in this type would ever
+    /// have one to hand back.
+    ///
+    /// One list where there were two. A separate stub list beside a package list was two answers to
+    /// what `java.lang` contains, and which one a host reached decided which it got.
+    package_facts: Vec<(FileId, LibraryFidelity, FileFacts)>,
     index: ProjectIndex,
 }
 
@@ -391,15 +449,17 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         let source_dep_files =
             SourceFile::read_all(&exec, &view, &spec.source_dep_sources, ExtractFacts::Plain).await;
 
-        // A native package's Java, parsed and extracted once. Nothing is kept but the facts,
-        // because nothing else is answerable about it: it has no file to open and no overlay to
-        // edit.
-        let mut native_facts = Vec::with_capacity(spec.native_sources.len());
-        for (k, source) in spec.native_sources.iter().enumerate() {
+        // The packages' Java, parsed and extracted once, each at the fidelity its host stated —
+        // which is also what decides whether an implied member is recorded, so this cannot be a
+        // plain `extract_file`. Nothing is kept but the facts, because nothing else is answerable
+        // about it: no file to open and no overlay to edit.
+        let mut package_facts = Vec::with_capacity(spec.package_sources.len());
+        for (k, source) in spec.package_sources.iter().enumerate() {
             let root = jals_syntax::Parse::parse(&source.text).await.syntax();
-            native_facts.push((
-                WorkspaceFileId::of_index(WorkspaceFileId::Native, k),
-                ProjectIndex::extract_file(&root).await,
+            package_facts.push((
+                jals_hir::FileId::library(u32::try_from(k).unwrap_or(u32::MAX)),
+                source.fidelity,
+                ProjectIndex::extract_library_file(&root, source.fidelity).await,
             ));
         }
 
@@ -412,17 +472,15 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             by_path: BTreeMap::new(),
             library_files,
             source_dep_files,
-            // A placeholder, deliberately stub-free: `reload_project_files` below overwrites it
-            // through `rebuild_index` before anything can read it, and folding the stubs in here
-            // would parse them a second time for nothing (`stub_facts` already holds them).
+            // A placeholder, deliberately library-free: `reload_project_files` below overwrites it
+            // through `rebuild_index` before anything can read it, and folding the packages in here
+            // would parse them a second time for nothing (`package_facts` already holds them).
             index: ProjectIndex::builder(&[]).build().await,
             classpath: spec.classpath,
             source_locations,
             feature_set: spec.feature_set,
             build_features: spec.build_features,
-            // Extracted once; reused on every rebuild (the stubs never change).
-            stub_facts: ProjectIndex::stub_facts().await,
-            native_facts,
+            package_facts,
         };
         ws.reload_project_files().await;
         ws
@@ -517,21 +575,15 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
                 file.facts(&empty).await,
             ));
         }
-        let stub: Vec<(FileId, &FileFacts)> = self
-            .stub_facts
+        let packages: Vec<(FileId, LibraryFidelity, &FileFacts)> = self
+            .package_facts
             .iter()
-            .map(|(file, ff)| (*file, ff))
-            .collect();
-        let native: Vec<(FileId, &FileFacts)> = self
-            .native_facts
-            .iter()
-            .map(|(file, ff)| (*file, ff))
+            .map(|(file, fidelity, ff)| (*file, *fidelity, ff))
             .collect();
         self.index = ProjectIndex::assemble(
             &project,
             &source_deps,
-            &native,
-            &stub,
+            &packages,
             &self.classpath,
             &self.source_locations,
         )
@@ -560,18 +612,18 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     /// The workspace file a [`FileId`] addresses, routed by its id-space: a project file, a
     /// `git`/`path` library source ([`SourceDep`](WorkspaceFileId::SourceDep)), or a
-    /// `-sources.jar` overlay ([`Library`](WorkspaceFileId::Library)). `None` when the
+    /// `-sources.jar` overlay ([`Library`](WorkspaceFileId::SourcesJar)). `None` when the
     /// within-space index addresses no real file — e.g. a classpath member with no source, whose
     /// reserved id decodes into `SourceDep` far past any extracted file — so a go-to-definition
     /// target that points nowhere openable yields nothing instead of panicking.
     fn ws_file(&self, id: FileId) -> Option<&SourceFile> {
         match WorkspaceFileId::from_raw(id) {
             WorkspaceFileId::Project(i) => self.files.get(i as usize),
-            WorkspaceFileId::Library(i) => self.library_files.get(i as usize),
+            WorkspaceFileId::SourcesJar(i) => self.library_files.get(i as usize),
             WorkspaceFileId::SourceDep(i) => self.source_dep_files.get(i as usize),
             // A native package's Java is indexed and nothing more: its text is a constant in the
             // binary, so there is no file to hand back and no position in one to answer with.
-            WorkspaceFileId::Native(_) => None,
+            WorkspaceFileId::Reserved => None,
         }
     }
 
@@ -580,9 +632,9 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     fn project_file(&self, id: FileId) -> Option<&SourceFile> {
         match WorkspaceFileId::from_raw(id) {
             WorkspaceFileId::Project(i) => self.files.get(i as usize),
-            WorkspaceFileId::Library(_)
+            WorkspaceFileId::SourcesJar(_)
             | WorkspaceFileId::SourceDep(_)
-            | WorkspaceFileId::Native(_) => None,
+            | WorkspaceFileId::Reserved => None,
         }
     }
 
@@ -627,6 +679,28 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// dependencies asynchronously, after the workspace already exists).
     pub async fn set_classpath(&mut self, classpath: LoweredClasspath) {
         self.classpath = classpath;
+        self.rebuild_index().await;
+    }
+
+    /// Replace the packages this workspace indexes, re-extracting their facts.
+    ///
+    /// Exists for the same reason [`set_classpath`](Self::set_classpath) does: the browser builds
+    /// its workspace before it has read a manifest, so the platform it will index is not known at
+    /// construction. Every other host passes them in the [`ProjectLayout`] and never calls this.
+    ///
+    /// Re-extraction rather than a swap of already-extracted facts, because the fidelity decides
+    /// how a file is *read*: a unit that was a record and is now the running code contributes the
+    /// implied members it did not before.
+    pub async fn set_packages(&mut self, sources: Vec<PackageSource>) {
+        self.package_facts = Vec::with_capacity(sources.len());
+        for (k, source) in sources.iter().enumerate() {
+            let root = jals_syntax::Parse::parse(&source.text).await.syntax();
+            self.package_facts.push((
+                jals_hir::FileId::library(u32::try_from(k).unwrap_or(u32::MAX)),
+                source.fidelity,
+                ProjectIndex::extract_library_file(&root, source.fidelity).await,
+            ));
+        }
         self.rebuild_index().await;
     }
 
@@ -688,7 +762,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     }
 
     async fn library_source_locations(files: &[SourceFile]) -> SourceLocations {
-        let inputs = SourceFile::file_inputs(files, WorkspaceFileId::Library, |file| {
+        let inputs = SourceFile::file_inputs(files, WorkspaceFileId::SourcesJar, |file| {
             file.doc.parse.syntax()
         });
         ProjectIndex::index_source_locations(&inputs).await

@@ -319,16 +319,22 @@ impl BackendSelection {
         backend: BackendKind,
         release: Option<u32>,
         assertions: Assertions,
-        natives: jals_native::NativePackageSet,
+        packages: jals_native::PackageSelection,
     ) -> Self {
         match backend {
-            BackendKind::Jals {} => Self::Available(Box::new(crate::JalsBackend::new(release))),
+            // The class-file target takes the selection too, and reads it as a *record*: it
+            // compiles none of that Java, but without it there is no `java.lang.String` in the
+            // index and nothing to emit a `String` against.
+            BackendKind::Jals {} => {
+                Self::Available(Box::new(crate::JalsBackend::new(release, packages)))
+            }
             // wasm is a different *target*, not just a different tool: one module for the whole
             // project, and the host's collector rather than a JVM's. It is also the only backend
-            // that reads `assertions` and `natives`: the other two produce class files a JVM
-            // applies `-ea` to, and a class file has nowhere to put a host function.
+            // that *links* a package — the other two produce class files a JVM resolves
+            // `java.base` for, and a class file has nowhere to put a host function — and the only
+            // one that reads `assertions`, since a JVM applies `-ea` at start-up instead.
             BackendKind::JalsWasm {} => {
-                Self::Available(Box::new(crate::JalsBackend::wasm(assertions, natives)))
+                Self::Available(Box::new(crate::JalsBackend::wasm(assertions, packages)))
             }
             BackendKind::Javac {} => Self::Absent {
                 id: backend.tag_name(),
@@ -461,7 +467,7 @@ mod tests {
                 BackendKind::Jals {},
                 None,
                 Assertions::Disabled,
-                jals_native::NativePackageSet::empty(),
+                jals_native::PackageSelection::empty(),
             )),
             Some(BackendKind::Jals {}.tag_name())
         );
@@ -470,7 +476,7 @@ mod tests {
                 BackendKind::JalsWasm {},
                 None,
                 Assertions::Disabled,
-                jals_native::NativePackageSet::empty(),
+                jals_native::PackageSelection::empty(),
             )),
             Some(BackendKind::JalsWasm {}.tag_name())
         );
@@ -480,7 +486,7 @@ mod tests {
             BackendKind::Javac {},
             None,
             Assertions::Disabled,
-            jals_native::NativePackageSet::empty(),
+            jals_native::PackageSelection::empty(),
         ) {
             BackendSelection::Absent { id, reason } => {
                 assert_eq!(id, BackendKind::Javac {}.tag_name());
@@ -507,7 +513,7 @@ mod tests {
             BackendKind::Jals {},
             release,
             Assertions::Disabled,
-            jals_native::NativePackageSet::empty(),
+            jals_native::PackageSelection::empty(),
         ) {
             BackendSelection::Available(backend) => backend.config_digest(&request),
             BackendSelection::Absent { .. } => panic!("the jals backend is always available"),

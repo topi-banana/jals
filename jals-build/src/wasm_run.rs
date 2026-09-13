@@ -757,11 +757,12 @@ mod tests {
     /// The whole shape of a native package in eight lines, which is what makes it a fixture: the
     /// Java declares one `native` method, the Rust binds the two strings the compiler derives from
     /// that declaration, and nothing between the halves restates a type.
-    fn answering_package(answer: i32) -> jals_native::NativePackage {
-        let mut package = jals_native::NativePackage::new("test.host", 1);
+    fn answering_package(answer: i32) -> jals_native::JavaPackage {
+        let mut package = jals_native::JavaPackage::new("test.host", 1);
         package.source(
             "test/host/Host.java",
             "package test.host;\npublic final class Host { public static native int answer(); }\n",
+            jals_native::SourceKind::Implementation,
         );
         package.bind(
             "test/host/Host",
@@ -775,10 +776,11 @@ mod tests {
     }
 
     /// One selection holding [`answering_package`].
-    fn answering_selection(answer: i32) -> jals_native::NativePackageSet {
-        let mut registry = jals_native::NativeRegistry::new();
-        registry.add(answering_package(answer));
-        registry
+    fn answering_selection(answer: i32) -> jals_native::PackageSelection {
+        let mut resolver = jals_native::StaticResolver::new("test");
+        resolver.add(answering_package(answer));
+        jals_native::ResolverChain::new()
+            .push(Box::new(resolver))
             .select(&["test.host".to_owned()])
             .expect("just registered")
     }
@@ -789,11 +791,11 @@ mod tests {
     /// needs no external tool and no committed binary — which is also what lets it run in the CI
     /// cell that has neither a JVM nor a wasm engine on the host.
     fn module(text: &str) -> Vec<u8> {
-        module_with(text, jals_native::NativePackageSet::empty())
+        module_with(text, jals_native::PackageSelection::empty())
     }
 
     /// [`module`], with a native package selected.
-    fn module_with(text: &str, natives: jals_native::NativePackageSet) -> Vec<u8> {
+    fn module_with(text: &str, natives: jals_native::PackageSelection) -> Vec<u8> {
         let bytes = text.as_bytes().to_vec();
         let tree = [BackendSource {
             path: RelativePath::parse("Main.java").expect("a valid path"),
@@ -897,14 +899,19 @@ mod tests {
             answering_selection(1),
         );
 
-        let mut wrong = jals_native::NativeRegistry::new();
-        let mut package = jals_native::NativePackage::new("test.host", 1);
-        package.source("test/host/Host.java", "package test.host;\n");
+        let mut resolver = jals_native::StaticResolver::new("test");
+        let mut package = jals_native::JavaPackage::new("test.host", 1);
+        package.source(
+            "test/host/Host.java",
+            "package test.host;\n",
+            jals_native::SourceKind::Implementation,
+        );
         // `()J` where the declaration says `()I`: one character, and the whole difference between
         // a linked module and this.
         package.bind("test/host/Host", "answer()J", |_, _, _| Ok(()));
-        wrong.add(package);
-        let wrong = wrong
+        resolver.add(package);
+        let wrong = jals_native::ResolverChain::new()
+            .push(Box::new(resolver))
             .select(&["test.host".to_owned()])
             .expect("just registered")
             .bindings();
@@ -938,10 +945,11 @@ mod tests {
     /// written on top of.
     #[test]
     fn a_binding_reads_an_array_the_module_allocated() {
-        let mut package = jals_native::NativePackage::new("test.sum", 1);
+        let mut package = jals_native::JavaPackage::new("test.sum", 1);
         package.source(
             "test/sum/Sum.java",
             "package test.sum;\npublic final class Sum { public static native int of(int[] values); }\n",
+            jals_native::SourceKind::Implementation,
         );
         package.bind(
             "test/sum/Sum",
@@ -955,9 +963,10 @@ mod tests {
                 Ok(())
             },
         );
-        let mut registry = jals_native::NativeRegistry::new();
+        let mut registry = jals_native::StaticResolver::new("test");
         registry.add(package);
-        let selection = registry
+        let selection = jals_native::ResolverChain::new()
+            .push(Box::new(registry))
             .select(&["test.sum".to_owned()])
             .expect("just registered");
 
@@ -979,17 +988,19 @@ mod tests {
     /// cannot answer — never a silent zero.
     #[test]
     fn a_binding_that_refuses_traps_rather_than_answering() {
-        let mut package = jals_native::NativePackage::new("test.no", 1);
+        let mut package = jals_native::JavaPackage::new("test.no", 1);
         package.source(
             "test/no/No.java",
             "package test.no;\npublic final class No { public static native int answer(); }\n",
+            jals_native::SourceKind::Implementation,
         );
         package.bind("test/no/No", "answer()I", |_, _, _| {
             Err(jals_native::NativeError::Message("said no".to_owned()))
         });
-        let mut registry = jals_native::NativeRegistry::new();
+        let mut registry = jals_native::StaticResolver::new("test");
         registry.add(package);
-        let selection = registry
+        let selection = jals_native::ResolverChain::new()
+            .push(Box::new(registry))
             .select(&["test.no".to_owned()])
             .expect("just registered");
 

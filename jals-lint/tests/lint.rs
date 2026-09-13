@@ -7,6 +7,17 @@ use jals_config::lint::{
 use jals_config::{Feature, FeatureSet, LintLevel};
 use jals_lint::{LintOutput, LintRequest};
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Render the diagnostics of a default-config lint run as one line each:
 /// `rule:start..end: message`.
 fn render(out: &LintOutput) -> String {
@@ -1252,11 +1263,14 @@ fn nullness_in_project(sources: &[&str], stdlib: bool) -> String {
         .enumerate()
         .map(|(i, parse)| (jals_hir::FileId(u32::try_from(i).unwrap()), parse.syntax()))
         .collect();
-    let mut builder = jals_hir::ProjectIndex::builder(&nodes);
-    if stdlib {
-        builder = builder.with_stdlib();
-    }
-    let index = jals_exec::block_on_inline(builder.build());
+    // Bound before the builder borrows it: a `with_library` argument outlives the builder, and
+    // the empty case is a project with no `java.lang` at all rather than one with a partial one.
+    let library = if stdlib { platform() } else { Vec::new() };
+    let index = jals_exec::block_on_inline(
+        jals_hir::ProjectIndex::builder(&nodes)
+            .with_library(&library)
+            .build(),
+    );
     let analysis = jals_exec::block_on_inline(jals_hir::FileAnalysis::of(&nodes[0].1));
     let semantics = analysis.in_project(&index, jals_hir::FileId(0));
     let out = jals_exec::block_on_inline(LintOutput::lint(

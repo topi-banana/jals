@@ -65,6 +65,25 @@ pub const SAMPLE_FILES: &[(&str, &str)] = &[
 pub const MANIFEST_PATH: &str = "jals.toml";
 pub const BUILD_SCRIPT_PATH: &str = "build.rhai";
 
+/// One coherent browser-resolution result, as one value.
+///
+/// A struct rather than a parameter list because every field arrives from the same place and is
+/// installed in one uninterruptible pass — and because seven positional arguments of four different
+/// collection types is a call nobody can read at the site.
+pub struct ResolvedInputs {
+    pub classpath: LoweredClasspath,
+    pub feature_set: FeatureSet,
+    pub build_features: BTreeSet<String>,
+    pub artifacts: ArtifactCache<MemoryCache>,
+    pub library_sources: Vec<(FileKey, String)>,
+    pub source_dep_sources: Vec<(FileKey, String)>,
+    /// The packages to index, or `None` to keep the ones already there.
+    ///
+    /// `None` is a manifest that did not parse: the graph phase already reported that, and emptying
+    /// the index of `java.lang` on top of it would turn one diagnostic into one per line.
+    pub packages: Option<Vec<jals_editor::PackageSource>>,
+}
+
 /// The shared editor core driven through the [`MonacoHost`], plus the path of the active file.
 ///
 /// The core's [`MemoryStorage`] is the single source of truth for files, overlays, and artifacts —
@@ -111,7 +130,29 @@ impl Workspace {
         .await
         .expect("an in-memory snapshot is immediate and infallible");
         let source_root = DirKey::parse("com/example").expect("sample source root is valid");
-        let editor = Editor::load(storage, ProjectLayout::new(vec![source_root]), MonacoHost).await;
+        // The platform, before any manifest has been read.
+        //
+        // A tab opens on a seed project that says `String` and `System.out`, and there is no
+        // fallback behind the packages: an index with none has no `java.lang` at all. So the
+        // default answer is seeded here and `apply_project_inputs` replaces it once the manifest
+        // resolves — which is also the honest default, since `[build] platform` defaults to the
+        // platform and `[build] backend` to one that does not link it.
+        //
+        // Straight from `SOURCES` rather than through a resolver: this needs the Java and no host
+        // state, which is exactly the case that constant exists for.
+        let platform: Vec<jals_editor::PackageSource> = jals_platform::JavaBase::SOURCES
+            .iter()
+            .map(|source| jals_editor::PackageSource {
+                path: source.path.clone().into_owned(),
+                text: source.text.clone().into_owned(),
+                fidelity: jals_hir::LibraryFidelity::Signatures,
+            })
+            .collect();
+        let layout = ProjectLayout {
+            package_sources: platform,
+            ..ProjectLayout::new(vec![source_root])
+        };
+        let editor = Editor::load(storage, layout, MonacoHost).await;
         // The first (sorted) indexed file is active on load.
         let active = editor
             .workspace()
@@ -135,15 +176,16 @@ impl Workspace {
     /// Install one coherent browser-resolution result. Feature metadata and verified artifacts are
     /// visible before the async index rebuild starts; once mutation begins, the whole operation runs
     /// to completion under the playground workspace lock.
-    pub async fn apply_project_inputs(
-        &mut self,
-        classpath: LoweredClasspath,
-        feature_set: FeatureSet,
-        build_features: BTreeSet<String>,
-        artifacts: ArtifactCache<MemoryCache>,
-        library_sources: Vec<(FileKey, String)>,
-        source_dep_sources: Vec<(FileKey, String)>,
-    ) {
+    pub async fn apply_project_inputs(&mut self, inputs: ResolvedInputs) {
+        let ResolvedInputs {
+            classpath,
+            feature_set,
+            build_features,
+            artifacts,
+            library_sources,
+            source_dep_sources,
+            packages,
+        } = inputs;
         let workspace = self.editor.workspace_mut();
         // The combined setter resets the per-file `cfg` analysis when the selection changed
         // (and no-ops when it did not), before the dependency/classpath folds rebuild below.
@@ -153,6 +195,13 @@ impl Workspace {
             .set_dependency_source_texts(library_sources, source_dep_sources)
             .await;
         workspace.set_classpath(classpath).await;
+        // The same packages the compile links. Indexing them is what keeps the editor beside the
+        // Run pane from reporting `System.out` as an unresolved name in a program that builds.
+        // `None` is a manifest that did not parse, which leaves the previous selection in place
+        // rather than emptying the index of `java.lang` on top of the error already reported.
+        if let Some(packages) = packages {
+            workspace.set_packages(packages).await;
+        }
     }
 
     /// Stage the live manifest and Rhai buffers into this workspace's own aggregate, execute the
@@ -1147,17 +1196,18 @@ mod tests {
             let dependency =
                 FileKey::parse(".jals/source-dependency/dependencies/node/sources/Dependency.java")
                     .unwrap();
-            ws.apply_project_inputs(
-                LoweredClasspath::default(),
-                FeatureSet::default(),
-                BTreeSet::new(),
-                ArtifactCache::new(MemoryCache::default()),
-                Vec::new(),
-                vec![(
+            ws.apply_project_inputs(ResolvedInputs {
+                classpath: LoweredClasspath::default(),
+                feature_set: FeatureSet::default(),
+                build_features: BTreeSet::new(),
+                artifacts: ArtifactCache::new(MemoryCache::default()),
+                library_sources: Vec::new(),
+                source_dep_sources: vec![(
                     dependency.clone(),
                     "package com.example; class Dependency {}".to_string(),
                 )],
-            )
+                packages: None,
+            })
             .await;
 
             let source = ws.active_source();
@@ -1181,14 +1231,15 @@ mod tests {
             .expect("a later build script view excludes detached dependency sources");
             assert!(ws.storage_snapshot().view().file(&dependency).is_err());
 
-            ws.apply_project_inputs(
-                LoweredClasspath::default(),
-                FeatureSet::default(),
-                BTreeSet::new(),
-                ArtifactCache::new(MemoryCache::default()),
-                Vec::new(),
-                Vec::new(),
-            )
+            ws.apply_project_inputs(ResolvedInputs {
+                classpath: LoweredClasspath::default(),
+                feature_set: FeatureSet::default(),
+                build_features: BTreeSet::new(),
+                artifacts: ArtifactCache::new(MemoryCache::default()),
+                library_sources: Vec::new(),
+                source_dep_sources: Vec::new(),
+                packages: None,
+            })
             .await;
             assert!(ws.editor.workspace().view().file(&dependency).is_err());
             assert!(ws.goto_definition(line, col).await.is_none());
@@ -1212,14 +1263,18 @@ mod tests {
                 .unwrap();
             transaction.commit().await.unwrap();
 
-            ws.apply_project_inputs(
-                LoweredClasspath::default(),
-                FeatureSet::default(),
-                BTreeSet::new(),
-                ArtifactCache::new(MemoryCache::default()),
-                Vec::new(),
-                vec![(collision.clone(), "class DependencyOwned {}".to_string())],
-            )
+            ws.apply_project_inputs(ResolvedInputs {
+                classpath: LoweredClasspath::default(),
+                feature_set: FeatureSet::default(),
+                build_features: BTreeSet::new(),
+                artifacts: ArtifactCache::new(MemoryCache::default()),
+                library_sources: Vec::new(),
+                source_dep_sources: vec![(
+                    collision.clone(),
+                    "class DependencyOwned {}".to_string(),
+                )],
+                packages: None,
+            })
             .await;
 
             assert_eq!(

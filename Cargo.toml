@@ -18,6 +18,7 @@ members = [
   "jals-lint",
   "jals-lsp",
   "jals-native",
+  "jals-platform",
   "jals-playground",
   "jals-progress",
   "jals-project",
@@ -73,6 +74,7 @@ jals-lsp = { path = "jals-lsp" }
 # so a plain `cargo check` is this crate's portability check and a package author's crate needs
 # nothing else on its dependency line.
 jals-native = { path = "jals-native" }
+jals-platform = { path = "jals-platform" }
 jals-progress = { path = "jals-progress" }
 jals-project = { path = "jals-project", default-features = false }
 jals-syntax = { path = "jals-syntax" }

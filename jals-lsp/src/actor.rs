@@ -45,7 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::formatting::Formatting;
 use crate::host::LspHost;
-use crate::natives::Natives;
+use crate::packages::Packages;
 use crate::state::{DetachedWorkspaces, DocumentStore, OpenDocument, ProjectWorkspace, UriConfigs};
 
 /// The reply channel of one request command: the response payload, or a protocol error the
@@ -213,7 +213,7 @@ pub(crate) struct AssembledWorkspace {
     /// writes. Nothing here *runs* a module, so the package's Rust half is never called — the
     /// registry is built with a sink that discards, which is what "this host reads a package and
     /// never executes one" looks like.
-    native_sources: Vec<jals_editor::PackageSource>,
+    package_sources: Vec<jals_editor::PackageSource>,
     materialized: BTreeMap<FileKey, PathBuf>,
     watch_policy: ProjectWatchPolicy,
     /// The script `[build] script` names, kept apart from the diagnostics anchored to it.
@@ -1120,7 +1120,7 @@ impl Actor {
             build_features,
             library_sources,
             source_dep_sources,
-            native_sources,
+            package_sources,
             materialized,
             watch_policy,
             configured_script,
@@ -1152,7 +1152,7 @@ impl Actor {
             &classpath_classes,
             library_sources,
             source_dep_sources,
-            native_sources,
+            package_sources,
             materialized,
             feature_set,
             build_features,
@@ -2055,6 +2055,10 @@ impl AssembledWorkspace {
             build_script_watch,
             &watch_paths,
         );
+        // Read out of the aggregate this assembly already holds, so a project that declares its own
+        // Java gets it indexed like any other package. Before the move below, because the aggregate
+        // is what holds the Java.
+        let package_sources = Packages::layout_sources(effective_manifest, &storage);
         Self {
             storage,
             source_roots,
@@ -2064,7 +2068,7 @@ impl AssembledWorkspace {
             build_features,
             library_sources,
             source_dep_sources,
-            native_sources: Natives::layout_sources(effective_manifest),
+            package_sources,
             materialized,
             watch_policy,
             configured_script,

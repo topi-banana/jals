@@ -5,10 +5,21 @@ version = "0.1.0"
 # `jals-wasm` compiles every source in the project into ONE WebAssembly module
 # — wasm has no dynamic loading and no classpath, so there is nothing for a
 # per-type artifact to be loaded by. There is no `[run] main-class` here and
-# there cannot be one: `main` takes a `String[]`, and a wasm host has no
-# `java.base` to supply `String`. The entry point is an exported method, named
-# on the command line with `jals run --invoke <name>`.
+# there cannot be one: `main` takes a `String[]`, and this project has no
+# `String`. The entry point is an exported method, named on the command line
+# with `jals run --invoke <name>`.
+#
+# `platform = "none"` is what makes that true. A wasm build links `java.base` by
+# default, so a project gets a `String` and a `System.out` by writing nothing;
+# this one opts out, and what is left is the smallest artifact this backend
+# produces — primitives and arrays, and no import section at all. It is the
+# third state `[build] platform` names, and a real configuration rather than a
+# degraded one: it removes the platform from the *analysis* too, so an editor
+# does not offer completions for a library the build will not link.
+#
+# `examples/hello_world_native` is the same greeting with the default.
 [build]
 backend = { type = "jals-wasm" }
+platform = "none"
 source-dirs = ["src/main/java"]  # .java source roots
 classes-dir = "target/classes"   # where project.wasm lands (also what `jals clean` removes)
