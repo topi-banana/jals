@@ -2496,9 +2496,19 @@ fn the_jals_backend_compiles_without_a_jdk() {
 /// wasm has no dynamic loading and no classpath, so one module — not one artifact per type — is the
 /// unit. The assertion is that a real engine runs it: `wasmtime` validating and executing the
 /// module is the only statement about the encoding that cannot be argued with.
+///
+/// `platform = "none"`, unlike the `jals run --invoke` tests that share the fixture. A module that
+/// links the platform imports its `native` methods, and a bare engine has no host functions to
+/// satisfy them with — so it would refuse to instantiate before `roundTrip` ran. `Point` speaks
+/// only in primitives and its own fields, which is what that setting is for.
 #[test]
 fn the_wasm_backend_emits_one_module_for_the_project() {
     let dir = wasm_run_project();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals-wasm\" }\nplatform = \"none\"\n",
+    )
+    .unwrap();
 
     let output = jals()
         .args(["build", "--manifest-path"])
