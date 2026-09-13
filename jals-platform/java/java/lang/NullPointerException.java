@@ -24,14 +24,6 @@ public class NullPointerException extends RuntimeException {
         super(message);
     }
 
-    public NullPointerException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public NullPointerException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

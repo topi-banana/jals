@@ -24,14 +24,6 @@ public class NoSuchFieldException extends ReflectiveOperationException {
         super(message);
     }
 
-    public NoSuchFieldException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public NoSuchFieldException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

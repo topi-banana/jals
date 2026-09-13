@@ -118,13 +118,20 @@ public final class StringBuilder implements CharSequence {
         return this.value[index];
     }
 
-    /** Discard every character appended so far. */
-    public StringBuilder setLength(int length) {
-        if (length < 0 || length > this.count) {
+    /** Truncate to {@code length} characters, or pad up to it with the null character. */
+    public void setLength(int length) {
+        if (length < 0) {
             throw new StringIndexOutOfBoundsException();
         }
+        if (length > this.count) {
+            reserve(length - this.count);
+            // Written out rather than left to the allocation: a truncation keeps the characters it
+            // dropped in the buffer, and growing back over them must not bring them back.
+            for (int i = this.count; i < length; i++) {
+                this.value[i] = (char) 0;
+            }
+        }
         this.count = length;
-        return this;
     }
 
     /** This builder's characters, reversed in place. */

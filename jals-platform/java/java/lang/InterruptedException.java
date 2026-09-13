@@ -24,14 +24,6 @@ public class InterruptedException extends Exception {
         super(message);
     }
 
-    public InterruptedException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public InterruptedException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

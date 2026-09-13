@@ -24,14 +24,6 @@ public class NoSuchMethodException extends ReflectiveOperationException {
         super(message);
     }
 
-    public NoSuchMethodException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public NoSuchMethodException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

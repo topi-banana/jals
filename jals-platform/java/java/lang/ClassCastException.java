@@ -24,14 +24,6 @@ public class ClassCastException extends RuntimeException {
         super(message);
     }
 
-    public ClassCastException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public ClassCastException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

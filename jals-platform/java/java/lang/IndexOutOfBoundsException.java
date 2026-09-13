@@ -24,14 +24,6 @@ public class IndexOutOfBoundsException extends RuntimeException {
         super(message);
     }
 
-    public IndexOutOfBoundsException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public IndexOutOfBoundsException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

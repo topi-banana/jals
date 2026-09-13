@@ -24,14 +24,6 @@ public class NegativeArraySizeException extends RuntimeException {
         super(message);
     }
 
-    public NegativeArraySizeException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public NegativeArraySizeException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

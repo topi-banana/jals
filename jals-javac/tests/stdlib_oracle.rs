@@ -138,11 +138,33 @@ fn field_signatures(class: &ClassFile) -> BTreeSet<String> {
         .collect()
 }
 
-/// Every member of the embedded stubs must exist in the JDK with the identical descriptor.
+/// The public members the platform declares that the JDK does not, each because the wasm target
+/// leaves no JDK-shaped way to write it — as `(internal name, "name descriptor")`.
 ///
-/// The direction matters: the stubs are allowed to be a *subset* of the real API — that is the
-/// whole point of a stub — but every entry in that subset has to be real, because a compiler emits
-/// from it verbatim.
+/// A ledger, not an exemption: an entry here is a member a `jals`-backend JVM build can still
+/// select and a real JVM will refuse to link. So the test fails for an entry that stops being a
+/// divergence as well, and the list only shrinks by somebody deleting a line.
+const DIVERGENCES: &[(&str, &str)] = &[
+    // `System.out` and `System.err` are built in `java.lang`, and the JDK's route to a stream —
+    // `FileOutputStream` over a `FileDescriptor` — is a type hierarchy this platform does not have.
+    // A constructor taking the host's stream number is the only one a class in another package
+    // can reach.
+    ("java/io/PrintStream", "<init> (I)V"),
+    // The JDK's one `arraycopy(Object, int, Object, int, int)` tells arrays apart reflectively. An
+    // `Object` here is the engine's `anyref` with no such step, so the choice is made by overload
+    // selection at the call site instead (`System.java`'s class comment).
+    ("java/lang/System", "arraycopy ([CI[CII)V"),
+    ("java/lang/System", "arraycopy ([II[III)V"),
+    ("java/lang/System", "arraycopy ([JI[JII)V"),
+    ("java/lang/System", "arraycopy ([BI[BII)V"),
+    ("java/lang/System", "arraycopy ([DI[DII)V"),
+];
+
+/// Every public member of the platform's record must exist in the JDK with the identical
+/// descriptor, [`DIVERGENCES`] aside.
+///
+/// The direction matters: the record is allowed to be a *subset* of the real API, but every entry
+/// in that subset has to be real, because a compiler emits from it verbatim.
 #[test]
 fn every_stdlib_stub_member_exists_in_the_real_jdk() {
     // A missing JDK stands the test down. It says so: this is the *only* check that the embedded
@@ -166,6 +188,11 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
         jals_exec::block_on_inline(ProjectIndex::builder(&[]).with_library(&platform()).build());
     let mut checked = 0usize;
     let mut wrong = Vec::new();
+    // Every ledger entry starts unmatched; one the platform no longer declares is reported below.
+    let mut stale: BTreeSet<(String, String)> = DIVERGENCES
+        .iter()
+        .map(|&(internal, signature)| (internal.to_owned(), signature.to_owned()))
+        .collect();
 
     for (id, item) in index.items() {
         if !matches!(item.origin, ItemOrigin::Library(_)) {
@@ -184,6 +211,13 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
             // Inherited members are reachable from `members_of` but are declared elsewhere; only
             // this class's own declarations can be looked up in this class file.
             if member.owner != id {
+                continue;
+            }
+            // `ct.sym` records API, and this text is an implementation as well as a record: its
+            // private state and helpers are guaranteed absent there. `protected` has no bit of its
+            // own and so goes unchecked with package-private — the price of not reading modifiers
+            // back out of the syntax tree.
+            if !member.modifiers.is_public {
                 continue;
             }
             let (name, expected) = match member.kind {
@@ -213,11 +247,26 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
             let (declared, descriptor) = expected;
             checked += 1;
             let signature = format!("{name} {descriptor}");
-            if !declared.contains(&signature) {
-                wrong.push(format!("{internal}.{signature} is not declared by the JDK"));
+            let listed = DIVERGENCES.contains(&(internal.as_str(), signature.as_str()));
+            if listed {
+                stale.remove(&(internal.clone(), signature.clone()));
+            }
+            match (declared.contains(&signature), listed) {
+                (true, true) => wrong.push(format!(
+                    "{internal}.{signature} is listed in DIVERGENCES but the JDK declares it"
+                )),
+                (false, false) => {
+                    wrong.push(format!("{internal}.{signature} is not declared by the JDK"));
+                }
+                _ => {}
             }
         }
     }
+    wrong.extend(stale.into_iter().map(|(internal, signature)| {
+        format!(
+            "{internal}.{signature} is listed in DIVERGENCES but the platform does not declare it"
+        )
+    }));
 
     assert!(checked > 50, "only {checked} stub members were checked");
     assert!(

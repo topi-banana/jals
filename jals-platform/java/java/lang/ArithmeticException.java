@@ -24,14 +24,6 @@ public class ArithmeticException extends RuntimeException {
         super(message);
     }
 
-    public ArithmeticException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public ArithmeticException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

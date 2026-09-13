@@ -24,14 +24,6 @@ public class CloneNotSupportedException extends Exception {
         super(message);
     }
 
-    public CloneNotSupportedException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public CloneNotSupportedException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

@@ -25,14 +25,6 @@ public class StringIndexOutOfBoundsException extends IndexOutOfBoundsException {
         super(message);
     }
 
-    public StringIndexOutOfBoundsException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public StringIndexOutOfBoundsException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

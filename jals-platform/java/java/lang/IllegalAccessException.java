@@ -24,14 +24,6 @@ public class IllegalAccessException extends ReflectiveOperationException {
         super(message);
     }
 
-    public IllegalAccessException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public IllegalAccessException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

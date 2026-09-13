@@ -24,14 +24,6 @@ public class NumberFormatException extends IllegalArgumentException {
         super(message);
     }
 
-    public NumberFormatException(String message, Throwable cause) {
-        super(message, cause);
-    }
-
-    public NumberFormatException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

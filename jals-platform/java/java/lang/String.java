@@ -160,8 +160,8 @@ public final class String implements CharSequence, Comparable<String> {
     }
 
     /** Whether this string holds {@code needle} anywhere. */
-    public boolean contains(String needle) {
-        return indexOf(needle) >= 0;
+    public boolean contains(CharSequence needle) {
+        return indexOf(needle.toString()) >= 0;
     }
 
     /** The index at which {@code needle} first occurs, or {@code -1}. */

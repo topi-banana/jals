@@ -28,10 +28,6 @@ public class ClassNotFoundException extends ReflectiveOperationException {
         super(message, cause);
     }
 
-    public ClassNotFoundException(Throwable cause) {
-        super(cause);
-    }
-
     @Override
     protected String typeName() {
         return TYPE_NAME;

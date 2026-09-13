@@ -20,16 +20,19 @@ public class AssertionError extends Error {
         super();
     }
 
-    public AssertionError(String message) {
-        super(message);
+    /**
+     * An error whose message is {@code detailMessage} rendered as a string, and whose cause it is
+     * when it is a {@link Throwable} — the JDK's one constructor for both, so {@code assert x : e}
+     * and {@code new AssertionError("...")} select the same member here as against a real JDK.
+     */
+    public AssertionError(Object detailMessage) {
+        super(
+            String.valueOf(detailMessage),
+            detailMessage instanceof Throwable ? (Throwable) detailMessage : null);
     }
 
     public AssertionError(String message, Throwable cause) {
         super(message, cause);
-    }
-
-    public AssertionError(Throwable cause) {
-        super(cause);
     }
 
     @Override

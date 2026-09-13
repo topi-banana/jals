@@ -85,6 +85,18 @@ Each because of what the target is, and each stated in the class that would have
 - **Stack traces.** There is no walkable frame list, which is why `Throwable` renders through
   `typeName()` — a method every subclass overrides — instead of `getClass().getName()`.
 
+## Where the public API is not the JDK's
+
+Every `javac` build reads this Java as its record of the JDK, and a `jals`-backend build emits calls
+from it verbatim. So every **public** member has to be one the JDK declares with the same descriptor,
+and `jals-javac/tests/stdlib_oracle.rs` checks exactly that against `ct.sym`. Six members cannot be,
+and that test's `DIVERGENCES` ledger names them and says why: the `PrintStream(int)` constructor
+`System` builds its streams with, and the five typed `System.arraycopy` overloads. The ledger fails
+on an entry that stops diverging, so it can only shrink.
+
+Private and package-private members are this package's implementation and are not compared. Neither
+is `protected` — `typeName()` among them — because the index gives it no bit of its own.
+
 ## Constants are `char[]`
 
 Every constant string in this package is written as a `char[]` initialiser and wrapped once in a
