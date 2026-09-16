@@ -34,6 +34,9 @@ public final class Float extends Number implements Comparable<Float> {
     @SuppressWarnings("naming-convention")
     public static final float NaN = 0.0f / 0.0f;
 
+    /** The one bit pattern {@link #floatToIntBits} answers for every NaN. */
+    private static final int CANONICAL_NAN_BITS = 0x7fc00000;
+
     /** How many bits a {@code float} occupies. */
     public static final int SIZE = 32;
 
@@ -79,6 +82,17 @@ public final class Float extends Number implements Comparable<Float> {
 
     /** {@code value}'s IEEE 754 bits, not collapsing a signalling NaN. */
     public static native int floatToRawIntBits(float value);
+
+    /**
+     * {@code value}'s IEEE 754 bits, with every NaN collapsed to one pattern; see {@link
+     * Double#doubleToLongBits}.
+     */
+    public static int floatToIntBits(float value) {
+        if (isNaN(value)) {
+            return CANONICAL_NAN_BITS;
+        }
+        return floatToRawIntBits(value);
+    }
 
     /** The {@code float} whose IEEE 754 bits are {@code bits}. */
     public static native float intBitsToFloat(int bits);
@@ -146,12 +160,12 @@ public final class Float extends Number implements Comparable<Float> {
         if (left > right) {
             return 1;
         }
-        return Integer.compare(floatToRawIntBits(left), floatToRawIntBits(right));
+        return Integer.compare(floatToIntBits(left), floatToIntBits(right));
     }
 
     /** {@code value}'s hash, which is its bit pattern. */
     public static int hashCode(float value) {
-        return floatToRawIntBits(value);
+        return floatToIntBits(value);
     }
 
     /** The larger of two values, under {@link #compare}'s order. */

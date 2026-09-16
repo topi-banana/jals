@@ -39,6 +39,9 @@ public final class Double extends Number implements Comparable<Double> {
     @SuppressWarnings("naming-convention")
     public static final double NaN = 0.0 / 0.0;
 
+    /** The one bit pattern {@link #doubleToLongBits} answers for every NaN. */
+    private static final long CANONICAL_NAN_BITS = 0x7ff8000000000000L;
+
     /** How many bits a {@code double} occupies. */
     public static final int SIZE = 64;
 
@@ -89,6 +92,22 @@ public final class Double extends Number implements Comparable<Double> {
 
     /** {@code value}'s IEEE 754 bits, not collapsing a signalling NaN. */
     public static native long doubleToRawLongBits(double value);
+
+    /**
+     * {@code value}'s IEEE 754 bits, with every NaN collapsed to one pattern.
+     *
+     * <p>Java in this package rather than a thirteenth binding, because it is a {@code double}
+     * comparison and a constant — the kind of thing this package does in Java by rule. It is the
+     * form {@link #compare}, {@link #equals} and {@link #hashCode} are specified in terms of: a
+     * NaN carries a payload and a sign that arithmetic is free to choose, so reading the raw bits
+     * there makes two NaNs unequal and differently hashed for a reason no program wrote down.
+     */
+    public static long doubleToLongBits(double value) {
+        if (isNaN(value)) {
+            return CANONICAL_NAN_BITS;
+        }
+        return doubleToRawLongBits(value);
+    }
 
     /** The {@code double} whose IEEE 754 bits are {@code bits}. */
     public static native double longBitsToDouble(long bits);
@@ -165,14 +184,14 @@ public final class Double extends Number implements Comparable<Double> {
         if (left > right) {
             return 1;
         }
-        long leftBits = doubleToRawLongBits(left);
-        long rightBits = doubleToRawLongBits(right);
+        long leftBits = doubleToLongBits(left);
+        long rightBits = doubleToLongBits(right);
         return Long.compare(leftBits, rightBits);
     }
 
     /** {@code value}'s hash: its bit pattern's two halves folded together. */
     public static int hashCode(double value) {
-        return Long.hashCode(doubleToRawLongBits(value));
+        return Long.hashCode(doubleToLongBits(value));
     }
 
     /**
