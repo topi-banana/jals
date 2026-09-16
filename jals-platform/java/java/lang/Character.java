@@ -92,9 +92,21 @@ public final class Character implements Comparable<Character> {
         return c >= 'a' && c <= 'z';
     }
 
-    /** Whether {@code c} is a space, tab, newline, carriage return or form feed. */
+    /**
+     * Whether {@code c} is ASCII whitespace.
+     *
+     * <p>Every ASCII character the JDK calls whitespace, which is more than the five with escapes:
+     * the vertical tab and the four information separators are C0 controls the JDK admits, and
+     * leaving them out is a divergence the class's "ASCII only" caveat does not cover. The
+     * non-ASCII ones — {@code U+1680}, the {@code U+2000} block, {@code U+2028}/{@code U+2029},
+     * {@code U+205F}, {@code U+3000} — are what that caveat is about.
+     */
     public static boolean isWhitespace(char c) {
-        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') {
+            return true;
+        }
+        // The vertical tab, and the file, group, record and unit separators.
+        return c == '\u000B' || (c >= '\u001C' && c <= '\u001F');
     }
 
     /** {@code c} upper-cased if it is an ASCII lower-case letter, else {@code c}. */
@@ -132,10 +144,15 @@ public final class Character implements Comparable<Character> {
         return value;
     }
 
-    /** The character denoting {@code digit} in a radix that admits it, or {@code ' '}. */
+    /**
+     * The character denoting {@code digit} in a radix that admits it, or the null character.
+     *
+     * <p>Code point zero and not a space, which is what the JDK returns and what the idiom
+     * {@code forDigit(d, r) == 0} tests for. A space is a character a caller would write out.
+     */
     public static char forDigit(int digit, int radix) {
         if (radix < MIN_RADIX || radix > MAX_RADIX || digit < 0 || digit >= radix) {
-            return ' ';
+            return '\0';
         }
         if (digit < 10) {
             return (char) ('0' + digit);

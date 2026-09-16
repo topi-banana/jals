@@ -22,6 +22,12 @@ public final class String implements CharSequence, Comparable<String> {
 
     private static final String NULL = new String(NULL_TEXT, 0, NULL_TEXT.length);
 
+    /** The first code point that needs a surrogate pair. */
+    private static final int MIN_SUPPLEMENTARY = 0x10000;
+
+    /** The last code point Unicode defines. */
+    private static final int MAX_CODE_POINT = 0x10FFFF;
+
     private final char[] value;
 
     /** An empty string. */
@@ -36,7 +42,11 @@ public final class String implements CharSequence, Comparable<String> {
 
     /** A string holding a copy of {@code count} characters from {@code chars} at {@code offset}. */
     public String(char[] chars, int offset, int count) {
-        if (offset < 0 || count < 0 || offset + count > chars.length) {
+        // `count > length - offset` rather than `offset + count > length`, which is the JDK's own
+        // idiom: the sum overflows, and a call it wrapped past this check would be refused by the
+        // copy loop below with the wrong exception after allocating an array the caller never asked
+        // for. `offset` is known non-negative by the test before it, so the difference cannot.
+        if (offset < 0 || count < 0 || count > chars.length - offset) {
             throw new StringIndexOutOfBoundsException();
         }
         char[] copied = new char[count];
@@ -93,7 +103,10 @@ public final class String implements CharSequence, Comparable<String> {
 
     /** This string followed by {@code other}. */
     public String concat(String other) {
-        if (other == null || other.value.length == 0) {
+        // A `null` is dereferenced rather than treated as empty, which is what the JDK does: the
+        // early-out is for an *empty* string, and admitting `null` to it turns a caught mistake
+        // into a silently wrong answer.
+        if (other.value.length == 0) {
             return this;
         }
         char[] joined = new char[this.value.length + other.value.length];
@@ -106,11 +119,31 @@ public final class String implements CharSequence, Comparable<String> {
         return new String(joined, 0, joined.length);
     }
 
-    /** The index of the first {@code ch} at or after {@code from}, or {@code -1}. */
+    /**
+     * The index of the first {@code ch} at or after {@code from}, or {@code -1}.
+     *
+     * <p>{@code ch} is a <em>code point</em> and not a widened {@code char}, which is what the
+     * {@code int} parameter is for. Truncating it to sixteen bits matches both too much and too
+     * little: {@code 0x10061} would find an {@code 'a'} that is not there, and a supplementary
+     * code point — which this string holds as a surrogate pair — would never be found at all.
+     */
     public int indexOf(int ch, int from) {
         int start = from < 0 ? 0 : from;
-        for (int i = start; i < this.value.length; i++) {
-            if (this.value[i] == (char) ch) {
+        if (ch < 0 || ch > MAX_CODE_POINT) {
+            return -1;
+        }
+        if (ch < MIN_SUPPLEMENTARY) {
+            for (int i = start; i < this.value.length; i++) {
+                if (this.value[i] == (char) ch) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        char high = highSurrogate(ch);
+        char low = lowSurrogate(ch);
+        for (int i = start; i + 1 < this.value.length; i++) {
+            if (this.value[i] == high && this.value[i + 1] == low) {
                 return i;
             }
         }
@@ -122,14 +155,37 @@ public final class String implements CharSequence, Comparable<String> {
         return indexOf(ch, 0);
     }
 
-    /** The index of the last {@code ch}, or {@code -1}. */
+    /** The index of the last {@code ch}, or {@code -1}; a code point, as {@link #indexOf(int)}. */
     public int lastIndexOf(int ch) {
-        for (int i = this.value.length - 1; i >= 0; i--) {
-            if (this.value[i] == (char) ch) {
+        if (ch < 0 || ch > MAX_CODE_POINT) {
+            return -1;
+        }
+        if (ch < MIN_SUPPLEMENTARY) {
+            for (int i = this.value.length - 1; i >= 0; i--) {
+                if (this.value[i] == (char) ch) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        char high = highSurrogate(ch);
+        char low = lowSurrogate(ch);
+        for (int i = this.value.length - 2; i >= 0; i--) {
+            if (this.value[i] == high && this.value[i + 1] == low) {
                 return i;
             }
         }
         return -1;
+    }
+
+    /** The leading unit of {@code codePoint}'s surrogate pair. */
+    private static char highSurrogate(int codePoint) {
+        return (char) (0xD800 + ((codePoint - MIN_SUPPLEMENTARY) >> 10));
+    }
+
+    /** The trailing unit of {@code codePoint}'s surrogate pair. */
+    private static char lowSurrogate(int codePoint) {
+        return (char) (0xDC00 + (codePoint & 0x3FF));
     }
 
     /** Whether this string begins with {@code prefix}. */

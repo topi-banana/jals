@@ -147,7 +147,13 @@ public final class Long extends Number implements Comparable<Long> {
         if (text == null || text.isEmpty()) {
             throw new NumberFormatException(text);
         }
-        int base = radix < Character.MIN_RADIX || radix > Character.MAX_RADIX ? 10 : radix;
+        // Refused, not coerced. {@link #toString(long, int)} falls back to ten because a rendering
+        // has to answer something; a parse does not, and the JDK throws. Reading `"11"` in radix 1
+        // as eleven is a computed radix turning into a silently wrong number.
+        if (radix < Character.MIN_RADIX || radix > Character.MAX_RADIX) {
+            throw new NumberFormatException(text);
+        }
+        int base = radix;
         int at = 0;
         boolean negative = text.charAt(0) == '-';
         if (negative || text.charAt(0) == '+') {

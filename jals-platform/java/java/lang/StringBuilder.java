@@ -25,6 +25,10 @@ public final class StringBuilder implements CharSequence {
 
     public StringBuilder(String initial) {
         this();
+        // The length is read first, exactly as the JDK sizes the buffer from it — which is also
+        // what makes a `null` throw here instead of being appended as `"null"`. `append(null)` is
+        // a statement about a value; a constructor argument is not one.
+        reserve(initial.length());
         append(initial);
     }
 

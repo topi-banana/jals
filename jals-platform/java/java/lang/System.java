@@ -130,14 +130,20 @@ public final class System {
      *
      * <p>Lengths rather than arrays, because the five overloads have five unrelated parameter types
      * and no supertype this package can name to join them.
+     *
+     * <p>Written as {@code length > bound - offset} rather than {@code offset + length > bound},
+     * which is the JDK's own idiom and the reason for it: the sum overflows, and a call it wrapped
+     * past the check would copy elements before the loop ran off the end — where the JDK guarantees
+     * a rejected call writes nothing at all. The offsets are known non-negative by the two tests
+     * above, so the difference cannot overflow.
      */
     private static void checkCopy(
         int sourceLength, int from, int targetLength, int to, int length) {
         if (length < 0
             || from < 0
             || to < 0
-            || from + length > sourceLength
-            || to + length > targetLength) {
+            || length > sourceLength - from
+            || length > targetLength - to) {
             throw new ArrayIndexOutOfBoundsException();
         }
     }

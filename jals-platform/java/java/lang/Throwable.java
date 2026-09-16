@@ -69,9 +69,15 @@ public class Throwable {
         return this.message;
     }
 
-    /** The detail message, or {@code null} — the same answer as {@link #getMessage}. */
+    /**
+     * The detail message, or {@code null} — the same answer as {@link #getMessage}.
+     *
+     * <p>Through {@link #getMessage} rather than off the field, because that method is the one a
+     * subclass overrides. Reading the field here would leave a subclass that computes its message
+     * rendering as though it had none.
+     */
     public String getLocalizedMessage() {
-        return this.message;
+        return getMessage();
     }
 
     /** What caused this, or {@code null}. */
@@ -108,10 +114,13 @@ public class Throwable {
     @Override
     public String toString() {
         String name = typeName();
-        if (this.message == null) {
+        // Through `getLocalizedMessage`, as the JDK renders one, so a subclass that overrides
+        // `getMessage` is rendered with what it returns rather than with the field it never set.
+        String detail = getLocalizedMessage();
+        if (detail == null) {
             return name;
         }
-        return name.concat(SEPARATOR).concat(this.message);
+        return name.concat(SEPARATOR).concat(detail);
     }
 
     /**
