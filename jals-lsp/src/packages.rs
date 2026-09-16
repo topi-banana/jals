@@ -37,6 +37,40 @@ impl Packages {
         jals_editor::ProjectLayout::package_sources_of(&selection, manifest.links_packages())
     }
 
+    /// The same, for a workspace with **no manifest to resolve from**.
+    ///
+    /// A document under no project, and a project whose manifest is missing or unparsable, are
+    /// still Java: they say `String`, and an index built with no library has no `java.lang` at all
+    /// — not the type, not the implicit `Object` supertype edge — so every reference into the
+    /// standard library would report as an unresolved name. There is no fallback behind the
+    /// packages any more, so the defaults answer: the default platform, and no linking.
+    ///
+    /// `jals lint`'s `App::detached` is the same answer one crate over, for the same reason.
+    pub(crate) fn default_sources() -> Vec<jals_editor::PackageSource> {
+        let manifest = Manifest::default();
+        // The failures are discarded for the reason [`resolve`] discards them: this server has no
+        // channel to report a manifest problem on, and there is no manifest here to report about.
+        let selection = Self::chain(None)
+            .select_reporting(&manifest.package_names())
+            .0;
+        jals_editor::ProjectLayout::package_sources_of(&selection, manifest.links_packages())
+    }
+
+    /// The routes this server consults, in order: what it was built with, then what the project
+    /// declared.
+    ///
+    /// One place, because the route order and the "offer nothing, push nothing" guard are one rule
+    /// and a second spelling of either is a route this server consults and `jals build` does not.
+    fn chain(declared: Option<jals_native::SourceResolver>) -> ResolverChain {
+        let mut builtin = StaticResolver::new("built into `jals`");
+        builtin.add(JavaBase::package(Rc::new(SilentHost)));
+        let chain = ResolverChain::new().push(Box::new(builtin));
+        match declared {
+            Some(project) if !project.is_empty() => chain.push(Box::new(project)),
+            _ => chain,
+        }
+    }
+
     /// Every package this project resolves: what this server was built with, then what the project
     /// declared in `[packages]`.
     ///
@@ -51,19 +85,11 @@ impl Packages {
         if names.is_empty() {
             return PackageSelection::empty();
         }
-        let mut builtin = StaticResolver::new("built into `jals`");
-        builtin.add(JavaBase::package(Rc::new(SilentHost)));
         let (declared, _) =
             jals_editor::packages::ProjectPackages::resolver(storage, &manifest.packages);
-        let chain = ResolverChain::new().push(Box::new(builtin));
-        let chain = if declared.is_empty() {
-            chain
-        } else {
-            chain.push(Box::new(declared))
-        };
         // The failures are discarded and the successes kept: this server has no channel to report
         // a manifest problem on, and the name that failed is already absent from the index, which
         // is what a reference into it reports.
-        chain.select_reporting(&names).0
+        Self::chain(Some(declared)).select_reporting(&names).0
     }
 }

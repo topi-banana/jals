@@ -333,7 +333,12 @@ impl ProjectWorkspace {
             classfiles,
             library_sources,
             source_dep_sources,
-            Vec::new(),
+            // The platform, even here. This is the path `bare` takes when a manifest is missing or
+            // unparsable, and an index built with no library has no `java.lang` at all — so every
+            // `String` in the project would report as an unresolved name the moment `jals.toml`
+            // has a typo in it. There is no manifest to read a selection out of, so the defaults
+            // answer.
+            crate::packages::Packages::default_sources(),
             BTreeMap::new(),
             feature_set,
             build_features,
@@ -519,7 +524,15 @@ impl DetachedWorkspace {
                 // anchor a native aggregate to at all. The `Exec::inline()` this constructor
                 // carries is right here: no I/O to overlap, over a handful of files.
                 MemoryStorage::memory(CodeTree::default()),
-                ProjectLayout::default(),
+                // The platform, even here. A document under no project still says `String`, and
+                // an index built with no library has no `java.lang` at all — not the type, not
+                // the implicit `Object` supertype edge — so every reference into the standard
+                // library would report as an unresolved name. There is no manifest to resolve a
+                // selection from, so the defaults answer.
+                ProjectLayout {
+                    package_sources: crate::packages::Packages::default_sources(),
+                    ..ProjectLayout::default()
+                },
                 // Rootless: every key this group can produce is registered in the host's table as
                 // it is mounted, so the root is never consulted. Should one ever escape the table,
                 // the rootless join renders no address rather than inventing one.
