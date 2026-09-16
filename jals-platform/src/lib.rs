@@ -30,8 +30,10 @@
 //!
 //! `java.io`: `PrintStream`, `Closeable`, and the checked I/O exceptions.
 //!
-//! `java.util` and `java.lang.Object` are here too, at signature fidelity: declarations with no
-//! bodies, never compiled into anything. See below.
+//! `java.util` is here too, at signature fidelity, and so are the `java.lang` types a module has
+//! no host for or no way to synthesise: `Object`, `Enum`, `Record`, `Iterable`, `Cloneable`,
+//! `Thread`, `Runtime`, `Process` and `StringBuffer`. Declarations with no bodies, never compiled
+//! into anything. See below.
 //!
 //! # What is deliberately not
 //!
@@ -44,7 +46,9 @@
 //!   implementation units, so there is no way to hand it that file. Nothing has to remember a rule.
 //! - **`java.util` is declarations only.** A `List` nobody has implemented is a type a program can
 //!   still *name*, which is what an editor needs; it is not a type a module can call.
-//! - **Reflection, `Enum`, `Record`.** Each needs metadata the backend does not emit.
+//! - **Reflection, and a body for `Enum` or `Record`.** A constant's `ordinal()` and a record's
+//!   accessors are synthesised per declaration, so there is no single body either could carry. Both
+//!   are *declared*, so a program can still name them.
 //! - **`Math`'s transcendentals.** `sin`, `exp` and `log` need either a polynomial table this
 //!   package would have to be trusted about or a host binding each. `sqrt` is exact and is here.
 //! - **Full Unicode case mapping.** `Character` and `String` map ASCII and say so, rather than

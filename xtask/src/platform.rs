@@ -35,7 +35,8 @@ pub(crate) struct Platform;
 impl Platform {
     /// The units the platform declares but never compiles, by path prefix or exact path.
     ///
-    /// Two entries, and each is a property of the wasm backend rather than of the Java:
+    /// Each is a property of the wasm backend, or of the host a module does not have, rather than
+    /// of the Java:
     ///
     /// - `java/lang/Object.java` **is** the backend's own `anyref`, answered for before it consults
     ///   its struct table. A declared `Object` with fields would be one question with two answers —
@@ -43,19 +44,26 @@ impl Platform {
     /// - `java/util/` has no implementation yet, and `java/lang/Iterable.java` names a type in it,
     ///   so neither can be lowered without the other.
     /// - `java/lang/Enum.java` and `java/lang/Record.java` are the two implicit supertypes whose
-    ///   members the *compiler* synthesises per declaration — a constant.s `ordinal()`, a record.s
+    ///   members the *compiler* synthesises per declaration — a constant's `ordinal()`, a record's
     ///   accessors. There is no single body either could carry that would produce them, so they
     ///   are declared for analysis and never lowered.
-    /// - `java/lang/Thread.java` and `java/lang/Runtime.java` describe a host a module does not
-    ///   have — a second thread, a process to halt. They are the record a `javac` build's analysis
-    ///   resolves those names through, and no body here could do what they promise.
+    /// - `java/lang/Thread.java`, `java/lang/Runtime.java` and `java/lang/Process.java` describe a
+    ///   host a module does not have — a second thread, a process to start or halt. They are the
+    ///   record a `javac` build's analysis resolves those names through, and no body here could do
+    ///   what they promise.
+    /// - `java/lang/StringBuffer.java` would be `StringBuilder` under a second name, since a module
+    ///   has one thread and nothing for its synchronization to guard, and `java/lang/Cloneable.java`
+    ///   declares no member at all.
     const SIGNATURE_ONLY: &'static [&'static str] = &[
         "java/util/",
-        "java/lang/Object.java",
-        "java/lang/Iterable.java",
+        "java/lang/Cloneable.java",
         "java/lang/Enum.java",
+        "java/lang/Iterable.java",
+        "java/lang/Object.java",
+        "java/lang/Process.java",
         "java/lang/Record.java",
         "java/lang/Runtime.java",
+        "java/lang/StringBuffer.java",
         "java/lang/Thread.java",
     ];
 
@@ -155,6 +163,19 @@ impl Platform {
             !implementation.is_empty(),
             "every platform source is signature-only, which would compile to an empty module"
         );
+        // An entry that matches nothing is a rename nobody followed, and it is silent: the file it
+        // used to name falls into `implementation` and the generated list looks fine. A signature
+        // unit reaching the compile is `java/lang/Object.java` becoming a struct, or a class of
+        // bodiless methods reaching the lowering — so the stale entry is refused here, where the
+        // rename is still in the diff.
+        for entry in Self::SIGNATURE_ONLY {
+            ensure!(
+                sources
+                    .iter()
+                    .any(|path| path == entry || path.starts_with(entry)),
+                "`{entry}` is listed as signature-only and names no source under `java/`"
+            );
+        }
 
         let mut out = String::from(HEADER);
         for path in signatures {

@@ -70,7 +70,9 @@ Each because of what the target is, and each stated in the class that would have
   there is no way to hand it that file, and nothing has to remember a rule.
 - **`java.util` is declarations only.** A `List` nobody has implemented is a type a program can
   still *name*, which is what an editor needs; it is not a type a module can call.
-- **Reflection, `Enum`, `Record`.** Each needs metadata the backend does not emit.
+- **Reflection, and a body for `Enum` or `Record`.** A constant's `ordinal()` and a record's
+  accessors are synthesised per declaration, so there is no single body either could carry. Both are
+  *declared*, so a program can still name them.
 - **`Math`'s transcendentals.** `sin`, `exp` and `log` need either a polynomial table this package
   would have to be trusted about or a host binding each. `sqrt` is exact and is here — reduce into
   `[1, 4)`, five Newton passes, then a Dekker exact-residual correction. It agrees with the JDK on
@@ -80,9 +82,13 @@ Each because of what the target is, and each stated in the class that would have
 - **Full Unicode case mapping.** `Character` and `String` map ASCII and say so, rather than shipping
   a half-Unicode answer that looks general.
 - **`System.exit`.** A wasm module does not *run*: it is called, and it returns.
-- **`Thread` and `Runtime` are declarations only.** A module has one thread, which it does not own,
-  and no process to halt. They are here so a `javac` build's analysis resolves the JDK types a
-  project names.
+- **`Thread`, `Runtime` and `Process` are declarations only.** A module has one thread, which it
+  does not own, and no process to start or halt. They are here so a `javac` build's analysis
+  resolves the JDK types a project names.
+- **`StringBuffer` and `Cloneable` are declarations too**, for two different reasons. An
+  implementation of the first would be `StringBuilder` under a second name — a module has one thread
+  and nothing for the synchronization to guard — and the second declares no member at all. Both are
+  here because a program that names one is writing correct Java.
 - **Stack traces.** There is no walkable frame list, which is why `Throwable` renders through
   `typeName()` — a method every subclass overrides — instead of `getClass().getName()`.
 

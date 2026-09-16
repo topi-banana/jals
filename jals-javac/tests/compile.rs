@@ -5424,14 +5424,18 @@ public class Hid {
 ///
 /// Every other unresolved type is a value the caller wrote and the descriptor has to spell, so
 /// refusing is right there. A bound is a fact about the *index*, and the index is routinely partial:
-/// `Cloneable`, `Comparator`, and every `java.util.function` type are absent from the platform's
-/// record, which is the only configuration this crate's own tests and the playground index.
-/// Refusing therefore made `<T extends Cloneable>` uncompilable outright — including the class-level
-/// form, which compiled before any bound was read at all.
+/// `Comparator` and every `java.util.function` type are absent from the platform's record, which is
+/// the only configuration this crate's own tests and the playground index. Refusing therefore made
+/// `<T extends Comparator>` uncompilable outright — including the class-level form, which compiled
+/// before any bound was read at all.
+///
+/// The bound has to be a name the platform genuinely does not declare, which is why this is not
+/// `Cloneable`: a bound the index *can* name erases to that name, exactly as `javac` erases it, and
+/// the two cases are the whole point of the distinction.
 #[test]
 fn a_bound_the_index_cannot_name_erases_to_object() {
     let method = descriptors(
-        "public class D { static <T extends Cloneable> T r(T a) { return a; } }",
+        "public class D { static <T extends Comparator> T r(T a) { return a; } }",
         "D",
     );
     assert!(
@@ -5439,7 +5443,7 @@ fn a_bound_the_index_cannot_name_erases_to_object() {
         "got {method:?}"
     );
     let class_level = descriptors(
-        "public class F<T extends Cloneable> { T held; T get() { return held; } }",
+        "public class F<T extends Comparator> { T held; T get() { return held; } }",
         "F",
     );
     assert!(
