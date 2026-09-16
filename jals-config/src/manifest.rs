@@ -2824,26 +2824,64 @@ impl Manifest {
             // Both source-root tables, because `[test] source-dirs` *adds to* `[build]
             // source-dirs` rather than replacing it: a package rooted in one of those is the same
             // collision, reachable only from `jals test`, which is the worst place to find it.
-            let root = package.java.trim_end_matches('/');
+            //
+            // Through `Self::declared_root` and not string arithmetic, because a declared directory
+            // is lowered through `RelativePath::resolve` everywhere it is *read* — so `./src` and
+            // `src/` are the same root there, and a check that compared the spellings would accept
+            // an overlap the readers then produce.
+            let Some(root) = Self::declared_root(&package.java) else {
+                return Err(ValidationError::ProjectPackageOutsideProject {
+                    name: name.clone(),
+                    java: package.java.clone(),
+                });
+            };
             let roots = self
                 .build
                 .source_dirs
                 .iter()
                 .chain(self.test.source_dirs.iter());
-            if roots.into_iter().any(|dir| {
-                let dir = dir.trim_end_matches('/');
-                dir == root
-                    || root.starts_with(&alloc::format!("{dir}/"))
-                    || dir.starts_with(&alloc::format!("{root}/"))
-            }) {
+            if roots
+                .into_iter()
+                .filter_map(|dir| Self::declared_root(dir))
+                .any(|dir| dir.starts_with(&root) || root.starts_with(&dir))
+            {
                 return Err(ValidationError::ProjectPackageInSourceRoot {
                     name: name.clone(),
                     java: package.java.clone(),
                 });
             }
+            // And against every *other* package's root, which is the same collision one table
+            // over: `files_under` is recursive, so a file under both is published by both packages
+            // — declared twice in one module under a linking build, and under two fidelities when
+            // the two entries state different `kind`s.
+            for (other, entry) in &self.packages {
+                if other == name {
+                    continue;
+                }
+                let Some(dir) = Self::declared_root(&entry.java) else {
+                    continue;
+                };
+                if dir.starts_with(&root) || root.starts_with(&dir) {
+                    return Err(ValidationError::OverlappingProjectPackages {
+                        name: name.clone(),
+                        other: other.clone(),
+                    });
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// A declared directory, lowered the way every *reader* of one lowers it.
+    ///
+    /// `jals-classpath` and `jals-editor` both resolve a declared path against the project root
+    /// through [`RelativePath::resolve`], which folds `.`, a doubled or trailing `/`, and `..`.
+    /// Comparing the raw spellings here instead would accept `./src` beside `src` as two different
+    /// roots and then hand the readers one directory under two names. `None` is a path that
+    /// escapes the project or is not project-relative at all — refused by the readers too.
+    fn declared_root(raw: &str) -> Option<jals_storage::RelativePath> {
+        jals_storage::RelativePath::resolve(&jals_storage::RelativePath::ROOT, raw).ok()
     }
 
     /// Check that a `remap` reference names a declared `[mappings]` key.
@@ -3373,12 +3411,26 @@ pub enum ValidationError {
         /// The contested name.
         name: String,
     },
-    /// A `[packages]` entry.s `java` directory overlaps a `[build] source-dirs` root.
+    /// A `[packages]` entry's `java` directory overlaps a declared source root.
     ProjectPackageInSourceRoot {
         /// The package.
         name: String,
         /// Its declared directory.
         java: String,
+    },
+    /// A `[packages]` entry's `java` does not name a directory inside the project.
+    ProjectPackageOutsideProject {
+        /// The package.
+        name: String,
+        /// Its declared directory.
+        java: String,
+    },
+    /// Two `[packages]` entries name directories one of which contains the other.
+    OverlappingProjectPackages {
+        /// The package being checked.
+        name: String,
+        /// The one it overlaps.
+        other: String,
     },
     /// A `[dependencies]` or `[dev-dependencies]` entry could not be classified — an empty `jar`, an
     /// unsupported URL scheme, or conflicting git refs. Wraps the classification [`DependencyError`]
@@ -3583,8 +3635,21 @@ impl fmt::Display for ValidationError {
             ),
             Self::ProjectPackageInSourceRoot { name, java } => write!(
                 f,
-                "`[packages.\"{name}\"] java = \"{java}\"` overlaps a `[build] source-dirs` root: \
-                 a file under both would be compiled twice and indexed under two origins"
+                "`[packages.\"{name}\"] java = \"{java}\"` overlaps a declared source root \
+                 (`[build] source-dirs` or `[test] source-dirs`): a file under both would be \
+                 compiled twice and indexed under two origins"
+            ),
+            Self::ProjectPackageOutsideProject { name, java } => write!(
+                f,
+                "`[packages.\"{name}\"] java = \"{java}\"` does not name a directory inside \
+                 the project: a declared package is read out of the project's own tree, which has \
+                 nothing outside its root to read"
+            ),
+            Self::OverlappingProjectPackages { name, other } => write!(
+                f,
+                "`[packages.\"{name}\"]` and `[packages.\"{other}\"]` name directories one of \
+                 which holds the other: a file under both is published by both packages, which \
+                 declares one type twice"
             ),
             Self::Dependency(err) => write!(f, "{err}"),
             Self::DuplicateDependency { name } => write!(
@@ -6336,5 +6401,132 @@ mod tests {
             signatures.packages["acme.util"].kind,
             ProjectPackageKind::Signatures
         );
+    }
+
+    /// An overlap is decided on the *resolved* path, which is how every reader of one decides it.
+    ///
+    /// Two halves, and the second is the reason the comparison is over `RelativePath` rather than
+    /// over the spellings. `./vendor/java` and `vendor/java` are one directory to
+    /// [`RelativePath::resolve`], so a check that compared strings would accept the pair and hand
+    /// the readers one directory under two names. And a `RelativePath` compares by *segment*, so
+    /// `vendor/javafoo` is not under `vendor/java` — which a `starts_with` over the spellings would
+    /// have said it was.
+    #[test]
+    fn validate_decides_a_package_overlap_on_the_resolved_path() {
+        let declared = |java: &str| ProjectPackage {
+            java: java.to_owned(),
+            kind: ProjectPackageKind::Implementation,
+        };
+
+        for (root, java) in [
+            ("vendor/java", "./vendor/java"),
+            ("vendor/java", "vendor/java/"),
+            ("./vendor/java", "vendor/java"),
+            ("vendor/java", "vendor//java"),
+            ("vendor/java", "vendor/extra/../java"),
+        ] {
+            let mut m = Manifest::default();
+            m.build.source_dirs = alloc::vec![root.to_owned()];
+            m.packages.insert("acme.util".to_owned(), declared(java));
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::ProjectPackageInSourceRoot {
+                    name: "acme.util".to_owned(),
+                    java: java.to_owned(),
+                }),
+                "`{java}` and `{root}` are the same directory"
+            );
+        }
+
+        // A sibling whose name merely *begins* with the root's is not under it.
+        for java in ["vendor/javafoo", "vendorx/java"] {
+            let mut m = Manifest::default();
+            m.build.source_dirs = alloc::vec!["vendor/java".to_owned()];
+            m.packages.insert("acme.util".to_owned(), declared(java));
+            assert_eq!(m.validate(), Ok(()), "`{java}` is not under `vendor/java`");
+        }
+    }
+
+    /// Two declared packages may not name directories one of which holds the other.
+    ///
+    /// `files_under` is recursive, so a file below both is published by both — one type declared
+    /// twice in a linking module, and read at two fidelities when the entries state different
+    /// `kind`s. The same collision one table over from [`ProjectPackageInSourceRoot`], and reported
+    /// separately because the line to change is a different one.
+    #[test]
+    fn validate_rejects_two_packages_whose_directories_overlap() {
+        let declared = |java: &str| ProjectPackage {
+            java: java.to_owned(),
+            kind: ProjectPackageKind::Implementation,
+        };
+
+        let mut nested = Manifest::default();
+        nested
+            .packages
+            .insert("acme.util".to_owned(), declared("vendor/java"));
+        nested
+            .packages
+            .insert("acme.io".to_owned(), declared("vendor/java/acme/io"));
+        // `BTreeMap` order: `acme.io` is checked first and reports the one it overlaps.
+        assert_eq!(
+            nested.validate(),
+            Err(ValidationError::OverlappingProjectPackages {
+                name: "acme.io".to_owned(),
+                other: "acme.util".to_owned(),
+            })
+        );
+
+        let mut identical = Manifest::default();
+        identical
+            .packages
+            .insert("acme.util".to_owned(), declared("vendor/java"));
+        identical
+            .packages
+            .insert("acme.io".to_owned(), declared("./vendor/java/"));
+        assert_eq!(
+            identical.validate(),
+            Err(ValidationError::OverlappingProjectPackages {
+                name: "acme.io".to_owned(),
+                other: "acme.util".to_owned(),
+            })
+        );
+
+        // Siblings are fine, and so is one package on its own.
+        let mut siblings = Manifest::default();
+        siblings
+            .packages
+            .insert("acme.util".to_owned(), declared("vendor/util"));
+        siblings
+            .packages
+            .insert("acme.io".to_owned(), declared("vendor/io"));
+        assert_eq!(siblings.validate(), Ok(()));
+    }
+
+    /// A `java` directory outside the project is refused, and says so.
+    ///
+    /// A declared package is read out of the project's own captured tree, so `../vendor` names
+    /// nothing a reader could ever open — and it is reported as the escape it is rather than
+    /// through [`ValidationError::InvalidProjectPackage`], whose sentence is about an *empty*
+    /// entry and would point the author at the wrong mistake.
+    #[test]
+    fn validate_rejects_a_package_directory_outside_the_project() {
+        for java in ["../vendor/java", "/vendor/java", "C:/vendor/java"] {
+            let mut m = Manifest::default();
+            m.packages.insert(
+                "acme.util".to_owned(),
+                ProjectPackage {
+                    java: java.to_owned(),
+                    kind: ProjectPackageKind::Implementation,
+                },
+            );
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::ProjectPackageOutsideProject {
+                    name: "acme.util".to_owned(),
+                    java: java.to_owned(),
+                }),
+                "`{java}` is outside the project"
+            );
+        }
     }
 }

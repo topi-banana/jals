@@ -63,7 +63,17 @@ impl ProjectPackages {
         }
         let view = storage.view();
         for (name, package) in declared {
-            let Ok(root) = jals_storage::DirKey::parse(&package.java) else {
+            // Through `resolve` rather than `parse`, because every other reader of a declared
+            // directory lowers it that way — `[build] source-dirs` in `jals-classpath`, a
+            // dependency path in `jals-project` — and a second rule here is a spelling
+            // `Manifest::validate` accepts and this refuses. `parse` rejects a trailing `/`, a
+            // leading `./` and any interior `..`; `resolve` folds the first two and refuses an
+            // escape of the project root, which is the answer the manifest was validated against.
+            let Ok(root) = jals_storage::RelativePath::resolve(
+                &jals_storage::RelativePath::ROOT,
+                &package.java,
+            )
+            .map(jals_storage::DirKey::new) else {
                 warnings.push(PackageWarning {
                     name: name.clone(),
                     problem: alloc::format!(
