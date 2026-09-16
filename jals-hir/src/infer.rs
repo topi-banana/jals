@@ -1662,12 +1662,17 @@ impl<'a> Inferer<'a> {
     /// `Some` only when every arm is `Ty::Null` or that one type: two *different* reference types
     /// still need a least upper bound over the hierarchy, and `null` beside a primitive is not a
     /// conditional Java admits at all.
+    ///
+    /// A type variable is a reference type here, because JLS §15.25 gives `cond ? t : null` the
+    /// other operand's type whatever reference type it is. Leaving it out sent `return b ? v :
+    /// null` — the body of every generic container's accessor — to the numeric join, which answers
+    /// `Unknown`, and the wasm backend then refused a conditional whose type it could not name.
     fn join_with_null(tys: &[Ty]) -> Option<Ty> {
         let mut reference: Option<&Ty> = None;
         for ty in tys {
             match ty {
                 Ty::Null => {}
-                Ty::Class(_) | Ty::Array(_) => match reference {
+                Ty::Class(_) | Ty::Array(_) | Ty::TypeVar { .. } => match reference {
                     Some(seen) if seen != ty => return None,
                     Some(_) => {}
                     None => reference = Some(ty),
