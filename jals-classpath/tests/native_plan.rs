@@ -442,3 +442,68 @@ required-features = ["1.19.4"]
         );
     }
 }
+
+/// A `[packages] java` root is captured, and unconditionally.
+///
+/// A project-declared package is read out of *this* captured tree, so a root nothing captured is a
+/// package holding no `.java` — which fails to resolve, and takes the whole build with it, because
+/// the name is still in `Manifest::package_names`. Silent in the same way the two above are: the
+/// directory is there on disk and the failure is reported as an unresolvable *package name*, two
+/// layers from the scope that did not capture it.
+///
+/// Only `.java`, for the reason a source root captures only `.java`: a `[packages]` directory is
+/// Java and nothing else.
+#[test]
+fn the_snapshot_captures_every_declared_package_root() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::create_dir_all(root.join("vendor/java/acme/util")).unwrap();
+    fs::create_dir_all(root.join("platform/java/acme/io")).unwrap();
+    fs::write(
+        root.join("vendor/java/acme/util/Util.java"),
+        b"class Util {}",
+    )
+    .unwrap();
+    fs::write(root.join("platform/java/acme/io/Out.java"), b"class Out {}").unwrap();
+    fs::write(root.join("vendor/java/acme/util/notes.txt"), b"ignored").unwrap();
+
+    let manifest = manifest(
+        r#"
+[packages."acme.util"]
+java = "vendor/java"
+
+[packages."acme.io"]
+java = "platform/java"
+kind = "signatures"
+"#,
+    );
+
+    let captured = jals_exec::tokio_rt::run(|exec| async move {
+        let scopes = NativeProjectPlan::snapshot_scopes(&manifest, root);
+        let storage = NativeStorage::for_project_scoped(root, scopes, exec)
+            .await
+            .unwrap();
+        let view = storage.view();
+        view.tree()
+            .files_under(&DirKey::ROOT)
+            .map(|file| file.key().path().to_string())
+            .collect::<Vec<_>>()
+    })
+    .expect("test runtime bootstraps");
+
+    for expected in [
+        "vendor/java/acme/util/Util.java",
+        "platform/java/acme/io/Out.java",
+    ] {
+        assert!(
+            captured.iter().any(|path| path == expected),
+            "`{expected}` is missing from the captured tree: {captured:?}"
+        );
+    }
+    assert!(
+        !captured
+            .iter()
+            .any(|path| path == "vendor/java/acme/util/notes.txt"),
+        "a non-Java file under a package root was captured: {captured:?}"
+    );
+}

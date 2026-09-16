@@ -475,6 +475,17 @@ impl NativeProjectPlan {
                 scopes.push(NativeScope::extension(path, "java"));
             }
         }
+        // Every `[packages] java` root. A project-declared package is read out of *this* captured
+        // tree (`jals_editor::packages::ProjectPackages::resolver`), so a root nothing captured is
+        // a package holding no `.java` — which fails to resolve, and takes the whole build with it
+        // because the name is still in `Manifest::package_names`. Unconditionally, for the reason
+        // `[test] source-dirs` is captured unconditionally: which packages a command resolves is
+        // not a property of the capture.
+        for package in manifest.packages.values() {
+            if let Some(path) = Self::project_relative(project_root, &package.java) {
+                scopes.push(NativeScope::extension(path, "java"));
+            }
+        }
         // `[build] resource-dirs`, retaining *every* file: a resource is whatever the author put
         // there. Without this scope the directories are outside the captured tree, and the jar
         // `[build] remap` writes would silently come out with no resources in it at all.
