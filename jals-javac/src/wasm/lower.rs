@@ -86,23 +86,26 @@ pub enum WasmError {
 }
 
 impl WasmError {
+    /// This refusal, said to be about one expression — the innermost that has not already named
+    /// one, so a nested failure reports the operand rather than the whole statement.
+    ///
+    /// The text is trimmed because a lossless CST node carries its own leading trivia, and a
+    /// message quoting it would open its backticks on a space.
+    fn in_expression(self, node: &SyntaxNode) -> Self {
+        match self {
+            Self::NoRepresentation(what) if !what.contains(" in `") => Self::NoRepresentation(
+                alloc::format!("{what}, in `{}`", node.text().to_string().trim()),
+            ),
+            other => other,
+        }
+    }
+
     /// This refusal, said to be about one member's **declared signature**.
     ///
     /// A type with no representation is reported by its own name, which is enough when a reader
     /// wrote it. It is not enough for a *library* input, where every body is lowered rather than
     /// only the reachable ones: "`?` has no wasm representation" over fifty files names nothing at
     /// all, and the answer is always the same question — which declaration.
-    /// This refusal, said to be about one expression — the innermost that has not already named
-    /// one, so a nested failure reports the operand rather than the whole statement.
-    fn in_expression(self, node: &SyntaxNode) -> Self {
-        match self {
-            Self::NoRepresentation(what) if !what.contains(" in `") => {
-                Self::NoRepresentation(alloc::format!("{what}, in `{}`", node.text()))
-            }
-            other => other,
-        }
-    }
-
     fn in_signature(self, member: MemberId, index: &ProjectIndex) -> Self {
         match self {
             Self::NoRepresentation(ty) => Self::NoRepresentation(alloc::format!(
@@ -3532,7 +3535,7 @@ impl Lowering<'_> {
 
     /// One arrow arm's value, converted to the type the whole `switch` expression has.
     fn arm_value(&mut self, value: &ast::Expr, ty: ValType, insn: &mut Insn) -> Result<()> {
-        if self.num_of(value.syntax()).is_ok()
+        if self.numeric_of(value.syntax()).is_some()
             && let Ok(target) = Self::num_for(ty)
         {
             return self.operand(value, target, insn);
@@ -4021,7 +4024,7 @@ impl Lowering<'_> {
             return Ok(());
         }
         let declared_ty = self.layout.val_type(declared)?;
-        if self.num_of(value.syntax()).is_ok()
+        if self.numeric_of(value.syntax()).is_some()
             && let Ok(target) = Self::num_for(declared_ty)
         {
             return self.operand(value, target, insn);
@@ -4281,28 +4284,48 @@ impl Lowering<'_> {
     /// and useless: the whole question is *which* operand, and on a library input — where every
     /// body is lowered rather than only the reachable ones — there are tens of thousands of them.
     fn num_of(&self, node: &SyntaxNode) -> Result<Numeric> {
-        let ty = self
-            .input
-            .type_of_expr(Facts::span(node))
-            .ok_or_else(|| WasmError::Unresolved(node.text().to_string()))?;
-        let Ty::Primitive(primitive) = ty else {
-            return Err(WasmError::NoRepresentation(alloc::format!(
-                "{ty} (the type of `{}`, an arithmetic operand)",
-                node.text()
-            )));
+        if let Some(numeric) = self.numeric_of(node) {
+            return Ok(numeric);
+        }
+        // The message is built here and nowhere above, so the answer costs nothing until it is a
+        // refusal. `SyntaxText::to_string` walks the whole subtree.
+        let Some(ty) = self.input.type_of_expr(Facts::span(node)) else {
+            return Err(WasmError::Unresolved(node.text().to_string()));
+        };
+        Err(WasmError::NoRepresentation(alloc::format!(
+            "{ty} (the type of `{}`, an arithmetic operand)",
+            node.text().to_string().trim()
+        )))
+    }
+
+    /// The same question, asked rather than demanded.
+    ///
+    /// [`num_of`](Self::num_of)'s refusal names the operand, which is two allocations and a walk of
+    /// the operand's whole subtree — wasted wherever the caller is testing whether a value is
+    /// numeric and has another lowering for when it is not. Four call sites do exactly that, one of
+    /// them twice per simple assignment, and a library input runs them over every body it lowers.
+    fn numeric_of(&self, node: &SyntaxNode) -> Option<Numeric> {
+        let Ty::Primitive(primitive) = self.input.type_of_expr(Facts::span(node))? else {
+            return None;
         };
         // A `boolean` is not a numeric type (JLS §4.2), so the shared rule refuses it. On *this*
         // target it shares `int`'s representation, and the only operators it reaches are the bitwise
         // ones, where that is exactly right — a statement about wasm, made where wasm decides its
         // own layout rather than folded into the language rule.
-        Ok(Numeric::of(*primitive).unwrap_or(Numeric::Int))
+        Some(Numeric::of(*primitive).unwrap_or(Numeric::Int))
     }
 
     /// Whether `node`'s recorded type is a reference.
+    ///
+    /// A type variable is one, and it is here for the reason [`narrow_to_eq`](Self::narrow_to_eq)
+    /// exists: `T` is held at `anyref` exactly as `Object` and an interface are. Leaving it out
+    /// made `a == b` answer by which operand was on the *left* — `null == v` reached `ref.eq` and
+    /// `v == null` fell through to the arithmetic path and was refused as an operand with no wasm
+    /// representation, which `T` is not.
     fn is_reference(&self, node: &SyntaxNode) -> bool {
         matches!(
             self.input.type_of_expr(Facts::span(node)),
-            Some(Ty::Class(_) | Ty::Array(_) | Ty::Null)
+            Some(Ty::Class(_) | Ty::Array(_) | Ty::Null | Ty::TypeVar { .. })
         )
     }
 
@@ -4573,7 +4596,7 @@ impl Lowering<'_> {
 
         if assignment.is_simple() {
             place.address(insn);
-            let source = self.num_of(value.syntax()).ok();
+            let source = self.numeric_of(value.syntax());
             let produced = self
                 .expr(&value, insn)?
                 .ok_or(WasmError::Unsupported("an assignment of no value"))?;
@@ -4587,7 +4610,7 @@ impl Lowering<'_> {
             // wherever a type variable is involved, and a field or an array element declared at a
             // concrete type is a place the validator checks exactly. `b.held = id(c);` was a module
             // `wasm-tools` refuses, emitted with nothing said on this side.
-            if let (Some(source), Ok(declared)) = (source, self.num_of(target.syntax())) {
+            if let (Some(source), Some(declared)) = (source, self.numeric_of(target.syntax())) {
                 if source != declared {
                     insn.convert(source, declared)
                         .ok_or(WasmError::Unsupported("this assignment conversion"))?;
@@ -4919,7 +4942,7 @@ impl Lowering<'_> {
     /// The conversion is what makes `flag ? 1 : 2L` one `i64` block rather than a module the validator
     /// rejects for arms of different types.
     fn ternary_arm(&mut self, arm: &ast::Expr, ty: ValType, insn: &mut Insn) -> Result<()> {
-        if self.num_of(arm.syntax()).is_ok()
+        if self.numeric_of(arm.syntax()).is_some()
             && let Ok(target) = Self::num_for(ty)
         {
             return self.operand(arm, target, insn);
