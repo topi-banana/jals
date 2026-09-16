@@ -139,15 +139,14 @@ impl Workspace {
         // platform and `[build] backend` to one that does not link it.
         //
         // Straight from `SOURCES` rather than through a resolver: this needs the Java and no host
-        // state, which is exactly the case that constant exists for.
-        let platform: Vec<jals_editor::PackageSource> = jals_platform::JavaBase::SOURCES
-            .iter()
-            .map(|source| jals_editor::PackageSource {
-                path: source.path.clone().into_owned(),
-                text: source.text.clone().into_owned(),
-                fidelity: jals_hir::LibraryFidelity::Signatures,
-            })
-            .collect();
+        // state, which is exactly the case that constant exists for. The *tier* still goes through
+        // `jals-editor`, which is where the one `SourceKind` + `links` rule lives — `false` because
+        // `[build] backend` defaults to one that does not link, which is also what
+        // `apply_project_inputs` will answer with once the manifest resolves.
+        let platform = jals_editor::ProjectLayout::package_sources_from(
+            jals_platform::JavaBase::SOURCES.iter(),
+            false,
+        );
         let layout = ProjectLayout {
             package_sources: platform,
             ..ProjectLayout::new(vec![source_root])

@@ -278,12 +278,19 @@ pub struct ProjectLayout {
 /// One Java compilation unit a package publishes, as the workspace receives it.
 ///
 /// Deliberately not a [`FileKey`]: the text never came from storage and no host can open it.
+///
+/// The fields are private, which is the point: a host obtains these through
+/// [`ProjectLayout::package_sources_of`] or [`ProjectLayout::package_sources_from`] and never
+/// writes one, so the `SourceKind` + `links` rule that decides `fidelity` has exactly one place it
+/// is applied. The browser used to build one literally with the tier written in, which is a second
+/// answer to that question that happened to agree — and a second answer that agrees is the one
+/// nothing reports when the rule it copied changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageSource {
     /// The logical path, used for ordering and diagnostics only.
-    pub path: String,
+    path: String,
     /// The Java itself.
-    pub text: String,
+    text: String,
     /// Whether these declarations are the ones that will run — see [`jals_hir::LibraryFidelity`].
     ///
     /// The host states it because it is not a property of the text: the same `String.java` is
@@ -291,7 +298,7 @@ pub struct PackageSource {
     /// that will link a real JDK instead. Getting it wrong in the lenient direction costs a missed
     /// report; in the strict direction it accuses a correct program of calling a method the
     /// standard library really has.
-    pub fidelity: LibraryFidelity,
+    fidelity: LibraryFidelity,
 }
 
 impl ProjectLayout {
@@ -332,9 +339,22 @@ impl ProjectLayout {
         packages: &jals_native::PackageSelection,
         links: bool,
     ) -> Vec<PackageSource> {
-        packages
-            .analysis_sources()
-            .map(|(_, source)| PackageSource {
+        Self::package_sources_from(packages.analysis_sources().map(|(_, source)| source), links)
+    }
+
+    /// The same lowering again, over Java a host holds without a selection around it.
+    ///
+    /// The browser opens a tab on a seed project before it has read a manifest, so it has the
+    /// platform's [`JavaSource`](jals_native::JavaSource)s and no [`PackageSelection`] to ask. What
+    /// it must *not* have is a second copy of the fidelity rule: `SourceKind` plus `links` decides
+    /// the tier, and that decision lives here.
+    #[must_use]
+    pub fn package_sources_from<'a>(
+        sources: impl Iterator<Item = &'a jals_native::JavaSource>,
+        links: bool,
+    ) -> Vec<PackageSource> {
+        sources
+            .map(|source| PackageSource {
                 path: source.path.clone().into_owned(),
                 text: source.text.clone().into_owned(),
                 fidelity: match source.kind {
@@ -407,7 +427,7 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
     /// [`SourceFile::cfg_map`]).
     build_features: BTreeSet<String>,
     /// The facts of the Java the resolved packages publish, each with the fidelity its host
-    /// stated, extracted once at construction and reused on every rebuild — a package.s text is a
+    /// stated, extracted once at construction and reused on every rebuild — a package's text is a
     /// constant in the binary, or a tree the host holds, so it is never re-parsed per edit. Only
     /// the *facts* are kept: there is no file behind them, so nothing else in this type would ever
     /// have one to hand back.
