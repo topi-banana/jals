@@ -9,9 +9,10 @@ package java.lang;
  * polynomial table this package would have to be trusted about, or a host binding each. A square
  * root is the one worth doing by hand: it is exact, and every distance calculation reaches for it.
  *
- * <p>{@link #sqrt} agrees with the JDK on every input tried but {@link Double#MAX_VALUE}, where the
- * reduction's scaling overflows. That is stated rather than hidden: the alternative is a claim of
- * exactness this package cannot make.
+ * <p>{@link #sqrt} agrees with the JDK on every input tried. {@link #hypot} does not, and that is
+ * stated rather than hidden: it rounds three times where the JDK rounds once, so it is within about
+ * two units in the last place rather than the one the JDK's javadoc promises. The alternative is a
+ * claim of exactness this package cannot make.
  */
 public final class Math {
 
@@ -249,6 +250,14 @@ public final class Math {
             guess = 0.5 * (guess + mantissa / guess);
         }
         guess = guess + productError(guess, mantissa) / (2.0 * guess);
+        // The reduction put {@code mantissa} in [1, 4), so its root is in [1, 2) and the correctly
+        // rounded answer is never 2.0 itself. The correction step can still land there: for the
+        // largest double of an odd binade the true root sits within half an ulp of the boundary,
+        // where the ulp doubles, and rounding across it returns a value whose square exceeds the
+        // argument. The answer there is always the largest double below the boundary.
+        if (guess >= 2.0) {
+            guess = Double.longBitsToDouble(Double.doubleToRawLongBits(2.0) - 1L);
+        }
         return scaleByPowerOfTwo(guess, scale);
     }
 

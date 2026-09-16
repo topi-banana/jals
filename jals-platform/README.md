@@ -74,8 +74,9 @@ Each because of what the target is, and each stated in the class that would have
 - **`Math`'s transcendentals.** `sin`, `exp` and `log` need either a polynomial table this package
   would have to be trusted about or a host binding each. `sqrt` is exact and is here — reduce into
   `[1, 4)`, five Newton passes, then a Dekker exact-residual correction. It agrees with the JDK on
-  every input tried but `Double.MAX_VALUE`, where the reduction's scaling overflows; that is stated
-  rather than hidden.
+  every input tried. `hypot` does not, and that is stated rather than hidden: it rounds three times
+  where the JDK rounds once, so it is within about two units in the last place rather than the one
+  the JDK's javadoc promises.
 - **Full Unicode case mapping.** `Character` and `String` map ASCII and say so, rather than shipping
   a half-Unicode answer that looks general.
 - **`System.exit`.** A wasm module does not *run*: it is called, and it returns.
