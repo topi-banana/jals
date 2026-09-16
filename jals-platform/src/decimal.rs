@@ -23,12 +23,13 @@
 //! | `1e7` | `10000000` | `1.0E7` |
 //! | `f64::INFINITY` | `inf` | `Infinity` |
 //!
-//! One divergence is left and is `core`'s to own. When two decimals of the shortest length are
-//! **equidistant** from the value, Java takes the one whose last digit is even and `core` does
-//! not, so `1.0594382859262542E15` comes out as `...543`. A differential run over 34 029 bit
-//! patterns against Temurin 25 puts it at 6 — every other rendering agrees exactly. Closing it
-//! means deciding a tie in the algorithm this module delegates rather than laying out its answer,
-//! which is the line drawn above.
+//! One rule `core`'s shortest mode spells differently is folded back in here rather than left. When
+//! two decimals of the shortest length are **equidistant** from the value, Java takes the one whose
+//! last digit is even and `core`'s shortest mode rounds away from zero — which at `f32` width,
+//! where the mantissa is short enough for exact ties to be common, was about one value in every
+//! 500. `core`'s *fixed-precision* mode does round half to even, so [`Decimal::to_even`] asks again
+//! at the length the shortest form already chose. That is precision selection, not a tie decided
+//! inside the algorithm this module delegates to, which is the line drawn above.
 //!
 //! # What is not accepted, deliberately
 //!
@@ -98,7 +99,9 @@ impl Decimal {
     /// See [`two_digits_wanted`](Self::two_digits_wanted). `{:.1e}` is the closest two-significant-
     /// digit decimal to the value, which is exactly the candidate Java's rule picks.
     fn scientific_f64(magnitude: f64) -> String {
-        let shortest = format!("{magnitude:e}");
+        let shortest = Self::to_even(format!("{magnitude:e}"), |digits| {
+            format!("{magnitude:.digits$e}")
+        });
         if Self::two_digits_wanted(&shortest) {
             return Self::nearer(shortest, format!("{magnitude:.1e}"));
         }
@@ -107,11 +110,37 @@ impl Decimal {
 
     /// The same, at `f32` width — `{:.1e}` on the `f32` itself, never on a widened copy.
     fn scientific_f32(magnitude: f32) -> String {
-        let shortest = format!("{magnitude:e}");
+        let shortest = Self::to_even(format!("{magnitude:e}"), |digits| {
+            format!("{magnitude:.digits$e}")
+        });
         if Self::two_digits_wanted(&shortest) {
             return Self::nearer(shortest, format!("{magnitude:.1e}"));
         }
         shortest
+    }
+
+    /// The shortest form with an exact tie resolved the way Java resolves one.
+    ///
+    /// When two decimals of the shortest length are **equidistant** from the value, `core`'s
+    /// shortest mode rounds away from zero and Java takes the one whose last digit is even, so the
+    /// two render one digit apart. `core`'s *fixed-precision* mode already rounds half to even —
+    /// so asking again at the length the shortest form itself chose is the whole fix. That is
+    /// precision selection, not a tie decided inside the algorithm this module delegates to, which
+    /// is the line the module docs draw.
+    ///
+    /// The second answer is kept only when it spells the same length at the same exponent: a carry
+    /// out of the leading digit (`9.95` → `1.00`, one exponent up) is a decimal of a different
+    /// length and no longer the shortest form, so the first answer stands.
+    fn to_even(shortest: String, again: impl FnOnce(usize) -> String) -> String {
+        let Some((mantissa, exponent)) = shortest.split_once('e') else {
+            return shortest;
+        };
+        let digits = mantissa.split_once('.').map_or(0, |(_, tail)| tail.len());
+        let retried = again(digits);
+        match retried.split_once('e') {
+            Some((head, tail)) if tail == exponent && head.len() == mantissa.len() => retried,
+            _ => shortest,
+        }
     }
 
     /// The one of the two candidates Java would have chosen.
@@ -278,6 +307,40 @@ mod tests {
         assert_eq!(Decimal::of_f32(f32::MAX), "3.4028235E38");
         // `Float.MIN_VALUE`, the `float` half of the one-digit rule: Rust says `1e-45`.
         assert_eq!(Decimal::of_f32(f32::from_bits(1)), "1.4E-45");
+    }
+
+    /// An exact tie goes to the even last digit, which is the one rule `core`'s shortest mode
+    /// spells differently.
+    ///
+    /// `core` rounds a tie away from zero, so every row here used to render one digit higher. The
+    /// failure is silent in the same way the one-digit rule's is — each of these round-trips
+    /// through `Float.parseFloat` either way — so a string comparison against a JVM is the only
+    /// thing that catches it. Every expected value was read off Temurin 25; the `float` rows are
+    /// the first six tie patterns above `1.0f`, taken in order so that a change of rule shows up
+    /// as six failures rather than as one that could be a fixture typo.
+    #[test]
+    fn an_exact_tie_takes_the_even_digit_the_way_java_takes_it() {
+        for (bits, expected) in [
+            (0x3F80_8000_u32, "1.0039062"),
+            (0x3F82_8000, "1.0195312"),
+            (0x3F84_8000, "1.0351562"),
+            (0x3F86_8000, "1.0507812"),
+            (0x3F88_8000, "1.0664062"),
+            (0x3F8A_8000, "1.0820312"),
+        ] {
+            let value = f32::from_bits(bits);
+            assert_eq!(
+                Decimal::of_f32(value),
+                expected,
+                "rendering the tie at {bits:#010X}"
+            );
+        }
+
+        // The `double` the module docs used to name as the divergence left standing.
+        assert_eq!(
+            Decimal::of_f64(f64::from_bits(0x430e_1c6d_958d_7b72)),
+            "1.0594382859262542E15"
+        );
     }
 
     /// The rule the two widths share, stated on its own so a regression names itself.
