@@ -112,11 +112,11 @@ filesystem reads into portable interfaces.
   host, with the names it does offer.
 
   `[packages]` is the third route a name resolves through, and the one a project writes: a table of
-  package names, each pointing at a directory of the project.s own `.java`. Java only — there is no
+  package names, each pointing at a directory of the project's own `.java`. Java only — there is no
   Rust half to declare — and a `native` method in one is therefore an *unresolved import*, refused
   where every unbound import is rather than by a check this crate would have to get subtly right.
   A key that another table in this manifest already names is rejected here, because the author can
-  see both lines; a name a *built-in* route also offers is the resolver chain.s ambiguity instead.
+  see both lines; a name a *built-in* route also offers is the resolver chain's ambiguity instead.
 
   `[build] platform` is a **different key for a different question**, and conflating them is what it
   exists to prevent. It names the package supplying `java.lang`, and it is *not* in the list above
@@ -296,16 +296,16 @@ filesystem reads into portable interfaces.
     renders a `jalsfmt.toml`, which is why it is here and not in a host.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
   `FileKey`, and source/config invalidation follows storage revisions. All three hosts index
-  through `Workspace`, so `FileId`.s space partition (`workspace/file_id.rs`), `#[cfg]`
+  through `Workspace`, so `FileId`'s space partition (`workspace/file_id.rs`), `#[cfg]`
   evaluation, and path identity exist once — and so do the two answers about **packages**:
   `ProjectLayout::package_sources_of` lowers a selection into index inputs at the fidelity
   `Manifest::links_packages` decides, and `packages::ProjectPackages::resolver` reads what
   `[packages]` declared out of a `ProjectView`. Both are here because three hosts ask them and none
   depends on the other two, and getting the first wrong is silent: reading a signature record as
   though it were the running code accuses a correct program of calling a method the JDK has.
-  The `FileId` space above the host.s own is `jals-hir`.s, asked for through `FileId::library_index`
+  The `FileId` space above the host's own is `jals-hir`'s, asked for through `FileId::library_index`
   and `FileId::is_openable` rather than restated — a copy of that boundary is a partition that
-  agrees only until one side moves, which is what a fourth base of this crate.s own was. **Positional** queries need an `EditorHost` to decode a
+  agrees only until one side moves, which is what a fourth base of this crate's own was. **Positional** queries need an `EditorHost` to decode a
   cursor and stay behind `Editor`; `Workspace::diagnostics` is the one query that takes a `FileKey`
   and no position, so it is `pub` and answers in the neutral `FileDiagnostic` — which is how
   `jals lint` joins the seam without implementing the positional host methods it has no cursor for.
@@ -485,7 +485,7 @@ filesystem reads into portable interfaces.
   `Unknown` in by exclusion — `!= No`, `== Yes` — is what silently reclassifies it when a fourth
   answer is added, so the two policies have names and the `match` is exhaustive.
 
-  A **package.s** Java is folded in through `with_library` as `ItemOrigin::Library`, and this crate
+  A **package's** Java is folded in through `with_library` as `ItemOrigin::Library`, and this crate
   embeds **no Java of its own** — not a `java.lang`, not a name list standing in for one. The
   `LibraryFidelity` each unit carries is the whole axis: `Complete` is Java compiled into the same
   artifact the project is, so it ranks ahead of the classpath (where it and a record declare one
@@ -519,7 +519,7 @@ filesystem reads into portable interfaces.
   and are asked there by the index capture and by the linter alike; a second reader of either
   question is a reader that misses the direct-`ANNOTATION` shape or accepts anybody's `Nullable`.
   **An empty annotation list is not "the author wrote none".** A signature record has none to carry
-  and a class file.s are decoded by `jals-classfile` and not lowered here, so for those two it means
+  and a class file's are decoded by `jals-classfile` and not lowered here, so for those two it means
   *nobody looked* — `ItemOrigin::carries_annotations` is the question a consumer that reads silence
   as a claim must ask first, and getting it wrong reports every `null` the standard library accepts.
 - `jals-native`: **what a Java package is, and how one is found** — the Java it publishes and the

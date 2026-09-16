@@ -54,8 +54,8 @@ jals-fmt = { workspace = true, features = ["std"] }
 jals-frontend.workspace = true
 jals-storage = { workspace = true, features = ["std"] }
 serde_json.workspace = true
-# The native packages this binary offers: a Java package whose `native` methods are implemented
-# in Rust. `[build] native-packages` selects out of the set `natives.rs` registers.
+# What a Java package is, and the resolver chain a name travels. `packages.rs` builds this
+# binary's chain: the platform below, then whatever the project declared in `[packages]`.
 jals-native.workspace = true
 jals-platform.workspace = true
 jals-lsp.workspace = true

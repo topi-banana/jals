@@ -209,7 +209,7 @@ fn definition_at_jumps_across_files() {
 
 #[test]
 fn unresolved_types_reports_only_genuine_unknowns() {
-    // `Nope` is nameable from nowhere; `String` is the platform.s; `Helper` resolves file-locally.
+    // `Nope` is nameable from nowhere; `String` is the platform's; `Helper` resolves file-locally.
     // Only `Nope` is reported.
     let srcs = ["package a; class Bar { Nope n; String s; Helper h; } class Helper { }"];
     let nodes = nodes(&srcs);

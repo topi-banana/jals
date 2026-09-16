@@ -110,7 +110,7 @@ release = 21                       # javac --release N
 # target = 17                      # javac --target N  (only when release is unset)
 classpath = ["libs/guava.jar"]    # -classpath entries (jars or dirs)
 javac-flags = ["-Xlint:all"]      # appended verbatim, before the source files
-# native-packages = ["jals.io"]    # Java packages implemented in Rust (jals-wasm backend only)
+# native-packages = ["acme.io"]    # third-party Java packages implemented in Rust (jals-wasm only)
 
 # [build.resources]                # a sub-table, so it goes *after* every bare [build] key above
 # template = ["fabric.mod.json"]   # globs naming which resources are rendered as templates
@@ -234,11 +234,11 @@ method it declares becomes a WebAssembly **import** the runner links against the
 ```toml
 [build]
 backend = { type = "jals-wasm" }
-native-packages = ["jals.io"]
+native-packages = ["acme.io"]
 ```
 
 ```java
-import jals.io.Out;
+import acme.io.Out;
 
 public class Hello {
     public static void greet() {
@@ -253,11 +253,12 @@ Four things about this are worth stating, because each one is a rule rather than
 supplied to a module, and a class file has nowhere to put one — so `native-packages` beside a
 class-file backend is a manifest error, the same shape `[toolchain] runtime = "wasm"` beside one is.
 
-**Which packages exist is a property of the binary, not of the manifest.** `jals` ships `jals.io`;
-the browser playground ships its own; a program embedding this toolchain registers whatever it
-likes. A name this build does not offer is reported with the names it does. `jals build` refuses it;
-`jals lint` and the language server warn and carry on, exactly as they do for any other analysis
-input they cannot resolve.
+**Which packages exist is a property of the binary, not of the manifest.** `jals` ships the
+platform ([`jals-platform`](../jals-platform/README.md)); the browser playground ships its own set;
+a program embedding this toolchain registers whatever it likes. A project can add a route of its
+own with `[packages]`, which is Java only. A name this build does not offer is reported with the
+names it does. `jals build` refuses it; `jals lint` and the language server warn and carry on,
+exactly as they do for any other analysis input they cannot resolve.
 
 **A package's methods are not module exports.** Every `static` method of the *project* is exported
 under its bare name; a package's are not. Otherwise a library's internals would fill the list
@@ -266,7 +267,7 @@ second is dropped without a word — a package method could take a project metho
 from it.
 
 **The two halves cannot disagree about a signature.** An import is named by the declaring class's
-internal name and the method's name-with-descriptor (`jals/io/Out`, `writeChars([CII)V`), which are
+internal name and the method's name-with-descriptor (`acme/io/Out`, `writeChars([CII)V`), which are
 the two strings the Rust half registers under. One that spelled it differently produces an import
 nothing satisfies, refused when the module is instantiated with both spellings listed.
 

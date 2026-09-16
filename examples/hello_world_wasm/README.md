@@ -91,7 +91,7 @@ done | awk '{printf "%c", $1} END { print "" }'
 # → Hello, world!
 ```
 
-That indirection is the example.s point rather than an inconvenience to route around: it is exactly
+That indirection is the example's point rather than an inconvenience to route around: it is exactly
 what `platform = "none"` costs, made visible.
 
 ## What the two failure paths report

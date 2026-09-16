@@ -490,7 +490,7 @@ jobs:
       # there is no configuration in which it stops being `no_std + alloc`.
       - run: cargo check -p jals-frontend
       # The package seam and the library it ships. Featureless and dependency-light by charter — a
-      # package author.s crate depends on `jals-native` and on nothing else — so a plain check is
+      # package author's crate depends on `jals-native` and on nothing else — so a plain check is
       # the whole portability statement for both.
       - run: cargo check -p jals-native
       - run: cargo check -p jals-platform

@@ -567,7 +567,7 @@ mod tests {
     /// answers — with the descriptor but no member.
     ///
     /// `Object::new` is the documented `target: None`: the platform declares `java.lang.Object`
-    /// with no constructor — it *is* the backend.s `anyref`, so it is a signature unit that lists
+    /// with no constructor — it *is* the backend's `anyref`, so it is a signature unit that lists
     /// only the members every reference has — and `()V` exists where the member does not. A search
     /// that treated the missing member as a failure would reject the commonest constructor
     /// reference there is.

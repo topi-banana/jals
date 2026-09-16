@@ -120,7 +120,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// The index the file is bound against: the host JDK.s own signatures, or the platform library.
+/// The index the file is bound against: the host JDK's own signatures, or the platform library.
 fn build_index(
     roots: &[(FileId, SyntaxNode)],
     classpath: Option<&LoweredClasspath>,

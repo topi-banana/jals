@@ -16,7 +16,7 @@
 //!
 //! What this does *not* do: feed the resolved `[dependencies]` classpath to the compiler. Library
 //! signatures come from the platform package this tab resolved, so a downloaded jar is on the
-//! *editor.s* classpath but not the compiler.s — the same limitation `jals build` has today.
+//! *editor's* classpath but not the compiler's — the same limitation `jals build` has today.
 
 use std::fmt;
 

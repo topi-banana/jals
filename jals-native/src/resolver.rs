@@ -281,8 +281,8 @@ impl SourceResolver {
 
     /// Declare a package from Java the host read.
     ///
-    /// No version is taken, and that is not an omission. A package.s version exists because a
-    /// consumer memoizes against everything it observed and **a Rust closure.s body is the one
+    /// No version is taken, and that is not an omission. A package's version exists because a
+    /// consumer memoizes against everything it observed and **a Rust closure's body is the one
     /// input it cannot observe** — see [`JavaPackage::new`]. A package declared this way has no
     /// closures at all, so [`JavaPackage::describe`]'s fold over every path and body is already
     /// complete, and a number beside it would be a second identity that could disagree with the

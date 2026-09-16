@@ -27,9 +27,8 @@ jals-fmt = { workspace = true }
 jals-frontend = { workspace = true }
 jals-storage = { workspace = true }
 jals-hir = { workspace = true }
-# The native packages this tab offers: a Java package whose `native` methods are implemented in
-# Rust. `[build] native-packages` selects out of the registry `natives.rs` builds, whose `jals.io`
-# console appends to the Run pane.
+# What a Java package is, and the resolver chain a name travels. `packages.rs` builds this tab's
+# chain over the platform below, whose streams append to the Run pane.
 jals-native = { workspace = true }
 jals-platform = { workspace = true }
 jals-syntax = { workspace = true }

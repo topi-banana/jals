@@ -2049,7 +2049,7 @@ impl LintProject {
         .with_classpath(&inputs.classpath_classes)
         .await;
         // `jals lint` keeps its aggregate past the graph phase — the one command that does — so it
-        // reads the project.s own `[packages]` here rather than being handed a resolver.
+        // reads the project's own `[packages]` here rather than being handed a resolver.
         let (declared, package_warnings) =
             jals_editor::packages::ProjectPackages::resolver(&storage, &manifest.packages);
         for warning in package_warnings {
@@ -2628,7 +2628,7 @@ impl App {
         //
         // Read here rather than by the caller because this is where the storage is: the aggregate
         // is opened for the dependency artifacts and dropped again once they are materialized, and
-        // a caller that wanted to read a declared package.s Java would have to reopen it.
+        // a caller that wanted to read a declared package's Java would have to reopen it.
         jals_native::SourceResolver,
     )> {
         let exec = session.exec();
@@ -2672,8 +2672,8 @@ impl App {
             session,
         )
         .await?;
-        // The project.s own packages, read while the aggregate is still open. A warning rather than
-        // a failure at this layer: what an unreadable package *means* is the command.s policy, and
+        // The project's own packages, read while the aggregate is still open. A warning rather than
+        // a failure at this layer: what an unreadable package *means* is the command's policy, and
         // the name then fails to resolve where every unknown name does, with what is offered.
         let (declared, package_warnings) =
             jals_editor::packages::ProjectPackages::resolver(&storage, &manifest.packages);
