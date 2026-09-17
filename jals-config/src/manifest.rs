@@ -2795,6 +2795,15 @@ impl Manifest {
             if name.is_empty() {
                 return Err(ValidationError::InvalidNativePackage { name: name.clone() });
             }
+            // Asked before the repeat check, because the two are different mistakes with different
+            // fixes and only one of them is visible in the list. `platform` *defaults* to
+            // `java.base`, so `native-packages = ["java.base"]` under no `platform` key at all is
+            // the most natural line a reader of `jals-build/README.md` writes when they want the
+            // platform — and reporting it as a name listed twice points at a one-element array and
+            // sends them looking for a duplicate that is not in the file.
+            if self.build.platform.name() == Some(name.as_str()) {
+                return Err(ValidationError::NativePackageIsThePlatform { name: name.clone() });
+            }
             if !seen.insert(name.as_str()) {
                 return Err(ValidationError::DuplicateNativePackage { name: name.clone() });
             }
@@ -3401,6 +3410,11 @@ pub enum ValidationError {
         /// The repeated name.
         name: String,
     },
+    /// A `[build] native-packages` name is the one `[build] platform` already selects.
+    NativePackageIsThePlatform {
+        /// The contested name.
+        name: String,
+    },
     /// A `[packages]` entry has an empty name or an empty `java` directory.
     InvalidProjectPackage {
         /// The offending key.
@@ -3623,6 +3637,14 @@ impl fmt::Display for ValidationError {
             Self::DuplicateNativePackage { name } => write!(
                 f,
                 "`[build] native-packages` lists `{name}` twice: a package is selected or it is not"
+            ),
+            Self::NativePackageIsThePlatform { name } => write!(
+                f,
+                "`[build] native-packages` names `{name}`, which `[build] platform` already \
+                 selects — and `platform` defaults to `{}`, so a manifest that never writes the \
+                 key still names it. `native-packages` is for a *third-party* package; drop this \
+                 entry, or name a different platform.",
+                Platform::DEFAULT
             ),
             Self::InvalidProjectPackage { name } => write!(
                 f,
@@ -6331,9 +6353,20 @@ mod tests {
         m.build.native_packages = alloc::vec![Platform::DEFAULT.to_owned()];
         assert_eq!(
             m.validate(),
-            Err(ValidationError::DuplicateNativePackage {
+            Err(ValidationError::NativePackageIsThePlatform {
                 name: Platform::DEFAULT.to_owned(),
             })
+        );
+        // And it says so in those words: the old message claimed the list held the name twice,
+        // about a list with one entry in it.
+        let message = m.validate().expect_err("the collision stands").to_string();
+        assert!(
+            message.contains("`[build] platform` already selects"),
+            "the collision names the key it collides with: {message}"
+        );
+        assert!(
+            !message.contains("twice"),
+            "a one-element list is not a repeat: {message}"
         );
 
         // `platform = "none"` names nothing, so nothing collides with it.

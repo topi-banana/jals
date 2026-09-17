@@ -1,10 +1,11 @@
-//! The Java a **native package** publishes, indexed through
-//! [`ProjectIndexBuilder::with_native_packages`].
+//! The Java a **package** publishes, indexed through [`ProjectIndex::builder`]'s `with_library`.
 //!
-//! A native package's classes are compiled into the same artifact the project is, so what they
-//! declare the program *has* — which is the whole difference from a stub, and what every assertion
-//! below is about: the origin is its own, the declarations are complete rather than lenient, and a
-//! package outranks a stub of the same name because the one with a body is the one that will run.
+//! At [`LibraryFidelity::Complete`] a package's classes are compiled into the same artifact the
+//! project is, so what they declare the program *has* — which is the whole difference from the
+//! [`Signatures`](LibraryFidelity::Signatures) record of a library this build does not compile, and
+//! what every assertion below is about: the origin is its own, the declarations are complete rather
+//! than lenient, and a `Complete` unit outranks a record of the same name because the one with a
+//! body is the one that will run.
 
 use jals_hir::{FileAnalysis, FileId, ItemOrigin, LibraryFidelity, ProjectIndex, TypeResolution};
 use jals_syntax::SyntaxNode;

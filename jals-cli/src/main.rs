@@ -2012,6 +2012,18 @@ impl LintProject {
                     &storage.view(),
                 )
                 .source_roots;
+                // The project's own `[packages]` are still readable, and `None` here is not the
+                // same as "the project declared none": it reports a package the project *ships* as
+                // a name this binary does not offer, and drops its Java out of the index — so a
+                // same-package simple name comes back `cannot resolve symbol` and the run goes
+                // from exit 0 to exit 1. What failed is the dependency graph, which is a different
+                // question: the aggregate is open, and the lowering directly above reads it. Read
+                // before the move into `Self`, exactly as the success path below does.
+                let (declared, package_warnings) =
+                    jals_editor::packages::ProjectPackages::resolver(&storage, &manifest.packages);
+                for warning in package_warnings {
+                    shell.warn(format_args!("{warning}"));
+                }
                 return Ok(Self {
                     root: root.to_path_buf(),
                     storage,
@@ -2025,7 +2037,7 @@ impl LintProject {
                     layout: Self::layout_packages(
                         shell,
                         &manifest,
-                        None,
+                        Some(declared),
                         jals_editor::ProjectLayout {
                             feature_set: manifest.feature_set(),
                             build_features: features.into_features(),

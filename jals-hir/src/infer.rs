@@ -1659,9 +1659,17 @@ impl<'a> Inferer<'a> {
 
     /// The one reference type among arms that are otherwise all `null`, if there is exactly one.
     ///
-    /// `Some` only when every arm is `Ty::Null` or that one type: two *different* reference types
-    /// still need a least upper bound over the hierarchy, and `null` beside a primitive is not a
-    /// conditional Java admits at all.
+    /// `Some` only when every arm is `Ty::Null` or that one type. Two *different* reference types
+    /// still need a least upper bound over the hierarchy, so they stay out.
+    ///
+    /// So does `null` beside a **primitive**, and that one is a gap rather than a case that does not
+    /// arise: JLS §15.25 classifies `flag ? null : 1` as a *reference* conditional — the null type
+    /// converts to no numeric type, so the numeric rule does not apply — and gives it
+    /// `lub(null, Integer)`, which is why unboxing one can throw. Answering it needs the boxed
+    /// wrapper's item, which needs the index this associated function does not take, so the
+    /// expression reaches [`join_numeric`](Inferer::join_numeric) and comes back `Unknown`: hover
+    /// shows no type and overload selection has nothing to rank the argument by. Widening this to
+    /// take `&self` is what would close it.
     ///
     /// A type variable is a reference type here, because JLS §15.25 gives `cond ? t : null` the
     /// other operand's type whatever reference type it is. Leaving it out sent `return b ? v :

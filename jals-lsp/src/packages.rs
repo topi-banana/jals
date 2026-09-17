@@ -48,8 +48,10 @@ impl Packages {
     /// `jals lint`'s `App::detached` is the same answer one crate over, for the same reason.
     pub(crate) fn default_sources() -> Vec<jals_editor::PackageSource> {
         let manifest = Manifest::default();
-        // The failures are discarded for the reason [`resolve`] discards them: this server has no
-        // channel to report a manifest problem on, and there is no manifest here to report about.
+        // A *selection* failure is discarded for the reason [`resolve`] discards one, and there is
+        // no reader here to produce the other kind: this builds from `Manifest::default()` and
+        // reaches no project storage, so there is no `[packages]` entry whose Java could fail to
+        // be read.
         let selection = Self::chain(None)
             .select_reporting(&manifest.package_names())
             .0;
@@ -74,9 +76,17 @@ impl Packages {
     /// Every package this project resolves: what this server was built with, then what the project
     /// declared in `[packages]`.
     ///
-    /// A package the project declared but whose Java cannot be read is dropped along with its
-    /// warning, and the name then fails to resolve like any other unknown one — which this host
-    /// degrades on rather than reports, for the reason the module docs give.
+    /// A package the project declared but whose Java cannot be read is dropped, and the name then
+    /// fails to resolve like any other unknown one — which this host degrades on rather than
+    /// reports, for the reason the module docs give.
+    ///
+    /// Its **warning** is not dropped with it. A [`PackageWarning`](jals_editor::packages) is the
+    /// reader failing to get bytes — one non-UTF-8 byte in a declared package's `.java`, a `java`
+    /// directory holding none — which is a different question from "this name did not resolve":
+    /// permission and I/O failures are not equivalent to missing data. Without it, a package goes
+    /// silently absent and every reference into it reports unresolved with nothing saying a file
+    /// could not be read. Stderr is the channel, which is where this crate already reports a
+    /// dependency-source mount that failed.
     fn resolve<S: jals_storage::SourceBackend, C: jals_storage::CacheBackend>(
         manifest: &Manifest,
         storage: &jals_storage::ProjectStorage<S, C>,
@@ -85,11 +95,13 @@ impl Packages {
         if names.is_empty() {
             return PackageSelection::empty();
         }
-        let (declared, _) =
+        let (declared, warnings) =
             jals_editor::packages::ProjectPackages::resolver(storage, &manifest.packages);
-        // The failures are discarded and the successes kept: this server has no channel to report
-        // a manifest problem on, and the name that failed is already absent from the index, which
-        // is what a reference into it reports.
+        for warning in warnings {
+            eprintln!("jals-lsp: {warning}");
+        }
+        // A *selection* failure is discarded and the successes kept: that one is a name this
+        // server does not offer, which is already what a reference into it reports.
         Self::chain(Some(declared)).select_reporting(&names).0
     }
 }

@@ -140,12 +140,14 @@ impl Workspace {
         //
         // Straight from `SOURCES` rather than through a resolver: this needs the Java and no host
         // state, which is exactly the case that constant exists for. The *tier* still goes through
-        // `jals-editor`, which is where the one `SourceKind` + `links` rule lives — `false` because
-        // `[build] backend` defaults to one that does not link, which is also what
-        // `apply_project_inputs` will answer with once the manifest resolves.
+        // `jals-editor`, which is where the one `SourceKind` + `links` rule lives, and the answer
+        // comes from `Manifest::links_packages` rather than a literal — that is the one place the
+        // question is answered, and a seed that wrote the tier in by hand would be a second answer
+        // that happens to agree until the default backend changes. `apply_project_inputs` asks the
+        // same way once the manifest resolves.
         let platform = jals_editor::ProjectLayout::package_sources_from(
             jals_platform::JavaBase::SOURCES.iter(),
-            false,
+            jals_config::Manifest::default().links_packages(),
         );
         let layout = ProjectLayout {
             package_sources: platform,

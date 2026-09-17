@@ -1098,6 +1098,61 @@ fn lint_warns_and_uses_default_context_when_the_dependency_graph_is_invalid() {
     assert!(stderr.contains("warning: project analysis inputs unavailable"));
 }
 
+/// The same fallback keeps the project's own `[packages]`, because the aggregate is still open.
+///
+/// Passing `None` there is not the same as "the project declared none": it makes a package the
+/// project *ships* be reported as a name this binary does not offer and drops its Java out of the
+/// index, so a same-package simple name comes back `cannot resolve symbol` — a real error-severity
+/// diagnostic, invented by the fallback, about a type that is right there in the snapshot. What
+/// failed is the dependency graph, which is a different question.
+#[test]
+fn lint_keeps_the_projects_declared_packages_when_the_dependency_graph_is_invalid() {
+    let dir = project(
+        "[package]\nname = \"lint-pkg\"\n\
+         [dependencies]\nchild = { path = \"child\" }\n\
+         [packages.\"acme.util\"]\njava = \"vendor/java\"\n",
+    );
+    std::fs::create_dir_all(dir.path().join("child")).unwrap();
+    std::fs::write(
+        dir.path().join("child/jals.toml"),
+        "[build]\nsource-dirs = [\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("vendor/java/acme/util")).unwrap();
+    std::fs::write(
+        dir.path().join("vendor/java/acme/util/Greeter.java"),
+        "package acme.util;\npublic class Greeter { public static int hello() { return 7; } }\n",
+    )
+    .unwrap();
+    let source = dir.path().join("src/main/java/acme/util/Client.java");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(
+        &source,
+        "package acme.util;\n\
+         public class Client {\n\
+         private static Greeter held;\n\
+         public static Greeter of() { return held; }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = jals().arg("lint").arg(&source).output().unwrap();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: project analysis inputs unavailable"),
+        "the fallback is what is under test; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("there is no package named"),
+        "a package the project ships is not a name this binary lacks; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot resolve symbol `Greeter`"),
+        "the declared package's Java is in the index; stderr: {stderr}"
+    );
+}
+
 /// Requiring a portable project path for `classes-dir` / `source-dirs` broke projects that
 /// predate build scripts: an absolute output directory and a source root outside the project both
 /// worked before, and neither has anything to do with the build-script phase.
