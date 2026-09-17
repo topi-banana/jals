@@ -142,7 +142,11 @@ public final class String implements CharSequence, Comparable<String> {
         }
         char high = highSurrogate(ch);
         char low = lowSurrogate(ch);
-        for (int i = start; i + 1 < this.value.length; i++) {
+        // `i < length - 1` and not `i + 1 < length`: `from` is a caller's number and
+        // `Integer.MAX_VALUE` is a legal one, where `i + 1` wraps to `Integer.MIN_VALUE`, passes the
+        // guard, and indexes past the array. Subtracting cannot overflow, because a length is never
+        // negative.
+        for (int i = start; i < this.value.length - 1; i++) {
             if (this.value[i] == high && this.value[i + 1] == low) {
                 return i;
             }

@@ -41,9 +41,15 @@ public final class PrintStream implements Closeable {
 
     private void put(char[] chars, int length) {
         if (this.count + length > this.buffered.length) {
+            // The same overflow guard `StringBuilder.reserve` carries, and for the same reason: an
+            // overflowed `grown` is negative, stays below the target, and doubles to zero for ever.
+            int needed = this.count + length;
             int grown = this.buffered.length * 2;
-            while (grown < this.count + length) {
+            while (grown < needed) {
                 grown = grown * 2;
+                if (grown <= 0) {
+                    grown = needed;
+                }
             }
             char[] larger = new char[grown];
             for (int i = 0; i < this.count; i++) {

@@ -329,9 +329,9 @@ mod tests {
     /// The chain is spelled out rather than hidden behind a helper returning a [`Facts`], for the
     /// reason `constant.rs`'s suite gives: a `TypedFile` borrows the binding, which borrows the
     /// analysis *and* the index, so nothing shorter than the whole chain can be handed back. The
-    /// stdlib stubs are folded in because a `String::new` needs `java.lang.String` to resolve, and
-    /// they are parsed in memory rather than read from a host — which is what lets this run in
-    /// CI's wasm cell, where the end-to-end tests stand down.
+    /// platform package is folded in because a `String::new` needs `java.lang.String` to resolve,
+    /// and its Java is parsed in memory rather than read from a host — which is what lets this run
+    /// in CI's wasm cell, where the end-to-end tests stand down.
     fn refs(source: &str) -> Vec<String> {
         let root = block_on_inline(jals_syntax::Parse::parse(source)).syntax();
         let analysis = block_on_inline(FileAnalysis::of(&root));
@@ -566,28 +566,36 @@ mod tests {
     /// A constructor reference matches the interface's arity, and a class that declares none still
     /// answers — with the descriptor but no member.
     ///
-    /// `Object::new` is the documented `target: None`: the platform declares `java.lang.Object`
-    /// with no constructor — it *is* the backend's `anyref`, so it is a signature unit that lists
-    /// only the members every reference has — and `()V` exists where the member does not. A search
-    /// that treated the missing member as a failure would reject the commonest constructor
-    /// reference there is.
+    /// `Runtime::new` is the documented `target: None`: a signature unit is a *record*, and a
+    /// record omits what a caller cannot name — `java.lang.Runtime`'s constructor is private — so
+    /// `()V` exists where the member does not. A search that treated the missing member as a
+    /// failure would reject the reference rather than the call.
+    ///
+    /// `Object::new` is here as the control, and it is the one that used to be `<no member>`: the
+    /// platform declares `java.lang.Object` with a written `public Object()`, because implicit
+    /// constructor synthesis (JLS §8.8.9) is deliberately off for a signature unit — what a record
+    /// does not list, it has not written down — and without the line the commonest `super()` there
+    /// is resolved to nothing.
     #[test]
     fn a_constructor_reference_answers_even_where_the_class_declares_no_constructor() {
         assert_eq!(
             refs(
                 "interface Make { P make(int v); }
                  interface MakeAny { Object make(); }
+                 interface MakeRt { Runtime make(); }
                  class P {
                      P(int v) {}
                      void use() {
                          Make m = P::new;
                          MakeAny t = Object::new;
+                         MakeRt r = Runtime::new;
                      }
                  }",
             ),
             [
                 "P::new => Constructs P.P/1",
-                "Object::new => Constructs java.lang.Object.<no member>"
+                "Object::new => Constructs java.lang.Object.Object/0",
+                "Runtime::new => Constructs java.lang.Runtime.<no member>"
             ]
         );
     }

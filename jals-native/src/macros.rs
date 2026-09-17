@@ -94,12 +94,12 @@ macro_rules! java_package {
                     // copy its own text, and the platform is fifty files an editor re-reads on
                     // every rebuild.
                     path: $crate::__private::Cow::Borrowed($signature),
-                    text: $crate::__private::Cow::Borrowed(include_str!(concat!($root, "/", $signature))),
+                    text: $crate::__private::Cow::Borrowed(::core::include_str!(::core::concat!($root, "/", $signature))),
                     kind: $crate::SourceKind::Signatures,
                 },)*
                 $($crate::JavaSource {
                     path: $crate::__private::Cow::Borrowed($implementation),
-                    text: $crate::__private::Cow::Borrowed(include_str!(concat!($root, "/", $implementation))),
+                    text: $crate::__private::Cow::Borrowed(::core::include_str!(::core::concat!($root, "/", $implementation))),
                     kind: $crate::SourceKind::Implementation,
                 },)*
             ];

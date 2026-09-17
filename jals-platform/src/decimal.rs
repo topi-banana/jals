@@ -35,10 +35,13 @@
 //!
 //! `Double.parseDouble` takes a **hexadecimal** floating-point literal (`0x1.8p1` is `3.0`), and
 //! this does not: the string comes back as a `NumberFormatException`. Supporting it means a
-//! correctly-rounded hex-to-binary conversion written by hand, and the input form cannot reach
-//! here from Java on this target anyway — the backend refuses a string literal, so every argument
-//! to `parseDouble` is a `char[]` a program assembled itself. A refusal is the honest answer until
-//! that changes; a hand-rolled converter nothing differentially tests would not be.
+//! correctly-rounded hex-to-binary conversion written by hand, and a hand-rolled converter nothing
+//! differentially tests is not a better answer than a refusal.
+//!
+//! It is a **gap**, not an unreachable case. A program on this target assembles every argument to
+//! `parseDouble` as a `char[]` — the backend refuses a string literal — but a `char[]` spelling
+//! `0x1.8p1` is as easy to assemble as one spelling `1.5`, so the form is reachable and is simply
+//! refused. What the literal restriction buys is only that it cannot arrive by accident.
 //!
 //! # Why a `float` is not rendered as a `double`
 //!
@@ -99,9 +102,15 @@ impl Decimal {
     /// See [`two_digits_wanted`](Self::two_digits_wanted). `{:.1e}` is the closest two-significant-
     /// digit decimal to the value, which is exactly the candidate Java's rule picks.
     fn scientific_f64(magnitude: f64) -> String {
-        let shortest = Self::to_even(format!("{magnitude:e}"), |digits| {
-            format!("{magnitude:.digits$e}")
-        });
+        let shortest = Self::to_even(
+            format!("{magnitude:e}"),
+            |digits| format!("{magnitude:.digits$e}"),
+            |candidate| {
+                candidate
+                    .parse::<f64>()
+                    .is_ok_and(|parsed| parsed.to_bits() == magnitude.to_bits())
+            },
+        );
         if Self::two_digits_wanted(&shortest) {
             return Self::nearer(shortest, format!("{magnitude:.1e}"));
         }
@@ -110,9 +119,15 @@ impl Decimal {
 
     /// The same, at `f32` width — `{:.1e}` on the `f32` itself, never on a widened copy.
     fn scientific_f32(magnitude: f32) -> String {
-        let shortest = Self::to_even(format!("{magnitude:e}"), |digits| {
-            format!("{magnitude:.digits$e}")
-        });
+        let shortest = Self::to_even(
+            format!("{magnitude:e}"),
+            |digits| format!("{magnitude:.digits$e}"),
+            |candidate| {
+                candidate
+                    .parse::<f32>()
+                    .is_ok_and(|parsed| parsed.to_bits() == magnitude.to_bits())
+            },
+        );
         if Self::two_digits_wanted(&shortest) {
             return Self::nearer(shortest, format!("{magnitude:.1e}"));
         }
@@ -131,14 +146,34 @@ impl Decimal {
     /// The second answer is kept only when it spells the same length at the same exponent: a carry
     /// out of the leading digit (`9.95` → `1.00`, one exponent up) is a decimal of a different
     /// length and no longer the shortest form, so the first answer stands.
-    fn to_even(shortest: String, again: impl FnOnce(usize) -> String) -> String {
+    ///
+    /// And only when it still **round-trips**, which `round_trips` answers by parsing it back at
+    /// the value's own width. Same length at the same exponent is not enough: at an exact power of
+    /// two the rounding interval is asymmetric — the gap to the value below is half the gap to the
+    /// one above — so the *nearest* decimal of that length can sit outside the set that parses back,
+    /// while `core`'s shortest form, which is chosen to round-trip, does not. Without the check
+    /// `Double.toString(0x1p-24)` answered `5.960464477539062E-8`, one ulp low, and 48 other values
+    /// did the same; every one of them is a power of two, which is why a table of ties never sees
+    /// it. Round-tripping is what `Double.toString` documents, so a candidate that loses it is not a
+    /// candidate.
+    fn to_even(
+        shortest: String,
+        again: impl FnOnce(usize) -> String,
+        round_trips: impl FnOnce(&str) -> bool,
+    ) -> String {
         let Some((mantissa, exponent)) = shortest.split_once('e') else {
             return shortest;
         };
         let digits = mantissa.split_once('.').map_or(0, |(_, tail)| tail.len());
         let retried = again(digits);
         match retried.split_once('e') {
-            Some((head, tail)) if tail == exponent && head.len() == mantissa.len() => retried,
+            Some((head, tail))
+                if tail == exponent
+                    && head.len() == mantissa.len()
+                    && round_trips(retried.as_str()) =>
+            {
+                retried
+            }
             _ => shortest,
         }
     }
@@ -341,6 +376,87 @@ mod tests {
             Decimal::of_f64(f64::from_bits(0x430e_1c6d_958d_7b72)),
             "1.0594382859262542E15"
         );
+    }
+
+    /// A rendering that does not parse back is not a rendering Java would print.
+    ///
+    /// `Double.toString` documents a decimal that round-trips, and at an exact power of two the
+    /// rounding interval is **asymmetric** — the gap down to the value below is half the gap up to
+    /// the one above — so the *nearest* decimal of a given length can sit outside the set that
+    /// parses back, while `core`'s shortest form, chosen to round-trip, does not. Taking the
+    /// fixed-precision retry on length alone therefore swapped a correct answer for a wrong one at
+    /// 3 `float`s and 46 `double`s, every one of them a power of two: exactly the values a table of
+    /// ties never reaches.
+    ///
+    /// The rows below are the whole `float` set and five of the `double` set, read off Temurin 25.
+    /// The sweep after them is the general statement, and it is what a *new* divergence of this
+    /// class would fail on: a rendering that does not parse back to the value it renders is wrong
+    /// whatever a JDK says.
+    #[test]
+    fn a_power_of_two_renders_as_a_decimal_that_parses_back() {
+        for (bits, expected) in [
+            (0x0F80_0000_u32, "1.2621775E-29"),
+            (0x6B00_0000, "1.5474251E26"),
+            (0x6C80_0000, "1.2379401E27"),
+        ] {
+            assert_eq!(
+                Decimal::of_f32(f32::from_bits(bits)),
+                expected,
+                "rendering the power of two at {bits:#010X}"
+            );
+        }
+        for (bits, expected) in [
+            (0x3E70_0000_0000_0000_u64, "5.960464477539063E-8"),
+            (0x3D30_0000_0000_0000, "5.684341886080802E-14"),
+            (0x0060_0000_0000_0000, "7.120236347223045E-307"),
+            (0x0100_0000_0000_0000, "7.291122019556398E-304"),
+            (0x0D70_0000_0000_0000, "5.858190679279809E-244"),
+        ] {
+            assert_eq!(
+                Decimal::of_f64(f64::from_bits(bits)),
+                expected,
+                "rendering the power of two at {bits:#018X}"
+            );
+        }
+
+        // Every exact power of two at each width, normal and subnormal alike: 2098 doubles and 277
+        // floats. `E` is Java's spelling and `e` is the parser's, which is the only edit.
+        for exponent in 1_u64..2047 {
+            let bits = exponent << 52;
+            let rendered = Decimal::of_f64(f64::from_bits(bits));
+            let parsed: f64 = rendered
+                .replace('E', "e")
+                .parse()
+                .expect("a parsable decimal");
+            assert_eq!(parsed.to_bits(), bits, "{rendered} does not parse back");
+        }
+        for shift in 0_u64..52 {
+            let bits = 1 << shift;
+            let rendered = Decimal::of_f64(f64::from_bits(bits));
+            let parsed: f64 = rendered
+                .replace('E', "e")
+                .parse()
+                .expect("a parsable decimal");
+            assert_eq!(parsed.to_bits(), bits, "{rendered} does not parse back");
+        }
+        for exponent in 1_u32..255 {
+            let bits = exponent << 23;
+            let rendered = Decimal::of_f32(f32::from_bits(bits));
+            let parsed: f32 = rendered
+                .replace('E', "e")
+                .parse()
+                .expect("a parsable decimal");
+            assert_eq!(parsed.to_bits(), bits, "{rendered} does not parse back");
+        }
+        for shift in 0_u32..23 {
+            let bits = 1 << shift;
+            let rendered = Decimal::of_f32(f32::from_bits(bits));
+            let parsed: f32 = rendered
+                .replace('E', "e")
+                .parse()
+                .expect("a parsable decimal");
+            assert_eq!(parsed.to_bits(), bits, "{rendered} does not parse back");
+        }
     }
 
     /// The rule the two widths share, stated on its own so a regression names itself.

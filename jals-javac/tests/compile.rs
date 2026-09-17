@@ -860,6 +860,43 @@ class Widened extends Sub {
     .expect("an implicit no-argument constructor is still a `super()`");
 }
 
+/// A **written** `super()` in a class rooted at `java.lang.Object` resolves to a member.
+///
+/// `java.lang.Object` is a signature unit, and implicit-constructor synthesis (JLS §8.8.9) is off
+/// for one by design — what a record does not list, it has not written down — so the platform
+/// declares `public Object()` in the Java rather than leaving it to be synthesized. Without that
+/// line the record carried no constructor at all and the commonest `super()` there is resolved to
+/// nothing, on plain Java `javac` accepts. The sibling above covers the *implicit* prologue, which
+/// takes a different path and stayed green throughout.
+#[test]
+fn an_explicit_super_call_resolves_at_the_root_of_the_hierarchy() {
+    compile(
+        r"
+public class Rooted {
+    int x;
+
+    public Rooted() {
+        super();
+        this.x = 1;
+    }
+}
+",
+    )
+    .expect("`super()` at the root of the hierarchy names `java.lang.Object`'s constructor");
+
+    // And the member `Object` states is reachable as a member, not only as a prologue.
+    compile(
+        r"
+public class Asks {
+    public static String of(Object value) {
+        return value.getClass().toString();
+    }
+}
+",
+    )
+    .expect("`getClass()` is a member of `java.lang.Object`");
+}
+
 /// An interface's members carry the modifiers JLS lets the source leave unwritten: a field is
 /// implicitly `public static final` (§9.3) and a method implicitly `public abstract` (§9.4).
 /// Emitting them package-private produces a class file the verifier rejects.

@@ -37,9 +37,16 @@ public final class StringBuilder implements CharSequence {
         if (needed <= this.value.length) {
             return;
         }
+        // Doubling overflows before a `char[]` can reach `Integer.MAX_VALUE`, and an overflowed
+        // `grown` is negative — so `grown < needed` stays true, the next doubling lands on zero, and
+        // `0 * 2` is zero for ever. The guard is what makes the loop terminate at all; past it the
+        // request is `needed` exactly, and the allocation is what fails rather than this.
         int grown = this.value.length * 2;
         while (grown < needed) {
             grown = grown * 2;
+            if (grown <= 0) {
+                grown = needed;
+            }
         }
         char[] larger = new char[grown];
         for (int i = 0; i < this.count; i++) {
@@ -138,7 +145,16 @@ public final class StringBuilder implements CharSequence {
         this.count = length;
     }
 
-    /** This builder's characters, reversed in place. */
+    /**
+     * This builder's characters, reversed in place.
+     *
+     * <p>A surrogate pair is one character, so reversing the code units alone is not enough: it
+     * leaves every pair the wrong way round, a low surrogate ahead of its high one, which is not
+     * valid UTF-16 at all. That matters more here than on a JVM — the host decodes what it is
+     * handed, so an inverted pair reaches a terminal as two replacement characters rather than as
+     * the character somebody wrote. So the code units are reversed and then each pair is put back,
+     * which is what the JDK does and why its answer is a character reversal rather than a byte one.
+     */
     public StringBuilder reverse() {
         int left = 0;
         int right = this.count - 1;
@@ -148,6 +164,20 @@ public final class StringBuilder implements CharSequence {
             this.value[right] = held;
             left++;
             right--;
+        }
+        int at = 0;
+        while (at < this.count - 1) {
+            char low = this.value[at];
+            char high = this.value[at + 1];
+            // `0xDC00..0xDFFF` is the low half of the surrogate range and `0xD800..0xDBFF` the
+            // high half; a `char` widens to `int` for the comparison, exactly as `String`'s own
+            // surrogate arithmetic spells it.
+            if (low >= 0xDC00 && low <= 0xDFFF && high >= 0xD800 && high <= 0xDBFF) {
+                this.value[at] = high;
+                this.value[at + 1] = low;
+                at++;
+            }
+            at++;
         }
         return this;
     }

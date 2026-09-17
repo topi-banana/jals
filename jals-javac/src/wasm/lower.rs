@@ -4234,7 +4234,24 @@ impl Lowering<'_> {
         let op = Self::num_op(operator).ok_or(WasmError::Unsupported("this binary operator"))?;
 
         // A reference `==` / `!=` is identity, not arithmetic, and wasm spells it `ref.eq`.
-        if matches!(op, NumOp::Eq | NumOp::Ne) && self.is_reference(left.syntax()) {
+        //
+        // **Both** sides decide that, never the left one alone. JLS §15.21 makes `==` reference
+        // equality only when both operands are reference types; with a primitive on one side it is
+        // *numeric* equality with an unboxing conversion. Asking the left operand alone handed
+        // `ref.eq` an `i32` — a module no engine loads, emitted after `jals build` reported
+        // success — and `Integer i = …; i == 1` is the everyday shape, newly reachable now that
+        // `Integer` is laid out as a struct. The arithmetic path refuses it by name instead, which
+        // is what `1 == i` already did: the operand-order asymmetry is the bug, not the refusal.
+        //
+        // The question asked is *not* "are both references" but "is either one a reference, and
+        // neither one a known primitive". An operand whose type the inference did not record is a
+        // reference here exactly as it was before, so closing the primitive/reference mix costs no
+        // comparison that used to lower.
+        if matches!(op, NumOp::Eq | NumOp::Ne)
+            && (self.is_reference(left.syntax()) || self.is_reference(right.syntax()))
+            && self.numeric_of(left.syntax()).is_none()
+            && self.numeric_of(right.syntax()).is_none()
+        {
             return self.reference_equality(&left, &right, op == NumOp::Ne, insn);
         }
 

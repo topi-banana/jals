@@ -2,7 +2,7 @@
 name = "jals-native"
 version.workspace = true
 edition.workspace = true
-description = "Java packages implemented in Rust: the Java a package publishes, the host functions its `native` methods bind to, and the registry a host selects from"
+description = "Java packages implemented in Rust: the Java a package publishes, the host functions its `native` methods bind to, and the routes a name resolves through"
 repository.workspace = true
 homepage.workspace = true
 license.workspace = true

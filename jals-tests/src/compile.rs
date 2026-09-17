@@ -1037,11 +1037,13 @@ impl CaseResult {
             }
             let root = parse.syntax();
             let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
-            // `ct.sym` only — no `with_stdlib`. Indexing the embedded stubs as well would not add to
-            // the real JDK's signatures but *outrank* them (`by_fqn` keeps the first insert, and the
-            // stubs are registered before the classpath), so a partial stub `System` would hide the
-            // complete `java.lang.System` and this harness would score stub coverage under a
-            // compiler's name — the thing the module doc above says it does not do.
+            // `ct.sym` only — no `with_library`. This harness scores a compiler against a real
+            // JDK, so what it resolves against has to be the JDK's signatures and not this
+            // repository's own platform package: a `java.lang.System` the platform states less
+            // completely than the JDK does would be scored under a compiler's name — the thing the
+            // module doc above says it does not do. Ranking no longer decides it either way; a
+            // platform indexed at `LibraryFidelity::Signatures` sits *below* the classpath, so the
+            // point is which library is being measured, not which one wins.
             let index = jals_exec::block_on_inline(
                 ProjectIndex::builder(&[(FileId(0), root)])
                     .with_classpath(classpath)

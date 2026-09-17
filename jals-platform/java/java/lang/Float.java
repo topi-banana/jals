@@ -119,11 +119,18 @@ public final class Float extends Number implements Comparable<Float> {
     /**
      * The {@code float} {@code text} spells.
      *
+     * <p>A {@code null} is a {@link NullPointerException} and not a {@link NumberFormatException},
+     * which is the one place this method and {@link Integer#parseInt} disagree: the JDK reaches
+     * {@code text.trim()} before it looks at anything, so the dereference is what fails. Getting
+     * this wrong is silent — a {@code catch (NumberFormatException)} recovers here and propagates
+     * on a JVM.
+     *
+     * @throws NullPointerException if {@code text} is {@code null}
      * @throws NumberFormatException if {@code text} does not spell one
      */
     public static float parseFloat(String text) {
         if (text == null) {
-            throw new NumberFormatException(text);
+            throw new NullPointerException();
         }
         String trimmed = text.trim();
         if (trimmed.isEmpty()) {

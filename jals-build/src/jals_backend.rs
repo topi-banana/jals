@@ -201,8 +201,16 @@ impl JalsBackend {
 
         // Each file's own analysis first: it needs no index, so it is the half that could be
         // computed before one exists.
-        let mut analyses: Vec<FileAnalysis> = Vec::with_capacity(roots.len());
-        for (_, root) in &roots {
+        //
+        // Over the files something **lowers** and no further. The index reads a library unit as a
+        // set of declarations and builds that from `library_roots` — the syntax nodes — never from
+        // an analysis, so analysing and inferring a unit nothing lowers is work whose result is
+        // dropped at the `split_at` below. It is not a small slice either: `compiled_files` is 0 on
+        // the class-file target, so that arm was inferring all 72 platform roots on every
+        // `jals build` and keeping none of them.
+        let lowered = project_files + compiled_files;
+        let mut analyses: Vec<FileAnalysis> = Vec::with_capacity(lowered);
+        for (_, root) in &roots[..lowered] {
             analyses.push(FileAnalysis::of(root).await);
         }
 
@@ -227,6 +235,7 @@ impl JalsBackend {
 
         // Bind each analysis to the index, then force the inference. The bindings must outlive the
         // witnesses that borrow their memo cells, so both vectors are held for the whole compile.
+        // The `zip` is what stops at `lowered`: `analyses` is the shorter of the two.
         let semantics: Vec<FileSemantics<'_>> = roots
             .iter()
             .zip(&analyses)

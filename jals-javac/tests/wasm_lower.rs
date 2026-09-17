@@ -977,6 +977,62 @@ fn a_reference_comparison_narrows_an_anyref_to_eqref() {
     .assert_eq(&body_of(&module, "same"));
 }
 
+/// A `==` with a **primitive on one side** is numeric equality, whichever side that is.
+///
+/// JLS §15.21 makes `==` reference equality only when both operands are reference types; with a
+/// primitive on one side it is numeric equality with an unboxing conversion. Asking the left
+/// operand alone committed to `ref.eq` and then pushed a struct reference and an `i32` at it — a
+/// module no engine loads, emitted after the compile reported success — while the mirror spelling
+/// took the arithmetic path and refused by name. The legal Java that reaches it is
+/// `Integer i = Integer.valueOf(n); i == 1` under a *linking* build, where `Integer` is a struct
+/// this backend laid out; the witness here is the same shape with a project class, because the
+/// lowering never checks legality (that is the linter's job) and a signature-fidelity `Integer` is
+/// refused one step earlier for having no representation at all.
+///
+/// Both spellings refuse now, with the same words: the operand-order asymmetry was the bug, and a
+/// refusal a caller can read is the answer until the backend unboxes.
+#[test]
+fn a_comparison_with_a_primitive_operand_is_not_reference_equality() {
+    for expression in ["b == 1", "1 == b"] {
+        let source = format!(
+            "public class A {{\n\
+             \x20   static class Box {{ int v; }}\n\
+             \x20   public static boolean eq(Box b) {{ return {expression}; }}\n\
+             }}"
+        );
+        let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(&source)).syntax();
+        let index = jals_exec::block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root.clone())])
+                .with_library(&platform())
+                .build(),
+        );
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+        let semantics = analysis.in_project(&index, FileId(0));
+        let typed = jals_exec::block_on_inline(semantics.typed());
+        let error = CompileWasm::module(&[typed], &[], &index, WasmOptions::default())
+            .expect_err("a refusal, not a module the validator rejects");
+        assert!(
+            error.to_string().contains("has no wasm representation"),
+            "expected the arithmetic-path refusal for `{expression}`, got {error}"
+        );
+    }
+
+    // The control: two references still compare by identity, and a `null` on either side still
+    // reaches `ref.is_null` rather than being read as a primitive.
+    let module = module_of(&["public class A {\n\
+         \x20   public static boolean same(Object l, Object r) { return l == r; }\n\
+         \x20   public static boolean gone(Object l) { return null == l; }\n\
+         }"]);
+    assert!(
+        body_of(&module, "same").contains("RefEq"),
+        "two references still compare by identity"
+    );
+    assert!(
+        body_of(&module, "gone").contains("RefIsNull"),
+        "a `null` operand still asks the null question"
+    );
+}
+
 /// A method with many overriders is ordered by depth, and the ordering terminates.
 ///
 /// The predicate this replaces compared two candidates with `is_subtype`, which is not a total

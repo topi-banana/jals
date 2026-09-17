@@ -249,6 +249,108 @@ mod running {
         assert_eq!(out, "1.4142135623730951\n4607182418800017408\n0.1\n0.0\n");
     }
 
+    /// A surrogate pair is one character, so reversing the code units alone is not a reversal.
+    ///
+    /// Swapping raw `char`s leaves every pair inverted — a low surrogate ahead of its high one,
+    /// which is not valid UTF-16 — and that matters more here than on a JVM: the host decodes what
+    /// it is handed, so an inverted pair reaches a terminal as two replacement characters rather
+    /// than as the character somebody wrote. Asserted as code units, because the failure is
+    /// invisible in the decoded text.
+    #[test]
+    fn reversing_a_builder_reverses_characters_and_not_code_units() {
+        let (out, _) = run(
+            "public final class Main {\n\
+             public static void run() {\n\
+             StringBuilder b = new StringBuilder();\n\
+             b.append('a').append((char) 0xD83D).append((char) 0xDE00).append('b');\n\
+             String r = b.reverse().toString();\n\
+             for (int i = 0; i < r.length(); i++) {\n\
+             System.out.println(Integer.toHexString(r.charAt(i)));\n\
+             }\n\
+             }\n\
+             }",
+            "run",
+        );
+        // `b`, then the pair the *right* way round, then `a` — what a JDK 25 `reverse()` answers.
+        assert_eq!(out, "62\nd83d\nde00\n61\n");
+    }
+
+    /// `indexOf(int, int)` takes a caller's number, and `Integer.MAX_VALUE` is a legal one.
+    ///
+    /// The supplementary path guarded its loop with `i + 1 < length`, which wraps to
+    /// `Integer.MIN_VALUE` at the top of the range, passes, and indexes past the array — an
+    /// `ArrayIndexOutOfBoundsException` where a JDK returns `-1`. The rows after it are the
+    /// ordinary answers, so a guard that over-corrected would fail here too.
+    #[test]
+    fn an_oversized_start_index_is_answered_rather_than_thrown() {
+        let (out, _) = run(
+            "public final class Main {\n\
+             private static final char[] PLAIN = {'h', 'e', 'l', 'l', 'o'};\n\
+             private static final char[] PAIR = {'a', (char) 0xD83D, (char) 0xDE00, 'b'};\n\
+             public static void run() {\n\
+             String plain = new String(PLAIN);\n\
+             String pair = new String(PAIR);\n\
+             System.out.println(plain.indexOf(0x1F600, Integer.MAX_VALUE));\n\
+             System.out.println(plain.indexOf('l', Integer.MAX_VALUE));\n\
+             System.out.println(pair.indexOf(0x1F600, 0));\n\
+             System.out.println(plain.indexOf('l', 0));\n\
+             }\n\
+             }",
+            "run",
+        );
+        assert_eq!(out, "-1\n-1\n1\n2\n");
+    }
+
+    /// `parseDouble(null)` is a `NullPointerException`, and `parseInt(null)` is not.
+    ///
+    /// The JDK reaches `text.trim()` before it looks at anything, so the dereference is what fails
+    /// at `double` and `float` width, while the integer parsers state the format refusal. Getting
+    /// it wrong is silent: a `catch (NumberFormatException)` recovers here and propagates on a JVM.
+    #[test]
+    fn a_null_text_fails_the_way_each_parser_fails_on_a_jvm() {
+        let (out, _) = run(
+            "public final class Main {\n\
+             private static final char[] NPE = {'N', 'P', 'E'};\n\
+             private static final char[] NFE = {'N', 'F', 'E'};\n\
+             private static void say(char[] which) { System.out.println(new String(which)); }\n\
+             public static void run() {\n\
+             try { Double.parseDouble(null); } catch (NullPointerException e) { say(NPE); }\n\
+             catch (NumberFormatException e) { say(NFE); }\n\
+             try { Float.parseFloat(null); } catch (NullPointerException e) { say(NPE); }\n\
+             catch (NumberFormatException e) { say(NFE); }\n\
+             try { Integer.parseInt(null); } catch (NullPointerException e) { say(NPE); }\n\
+             catch (NumberFormatException e) { say(NFE); }\n\
+             }\n\
+             }",
+            "run",
+        );
+        assert_eq!(out, "NPE\nNPE\nNFE\n");
+    }
+
+    /// A builder that outgrows its buffer keeps growing, rather than spinning.
+    ///
+    /// The doubling loop overflowed `int` before a `char[]` could reach `Integer.MAX_VALUE`, and an
+    /// overflowed `grown` is negative — so it stayed below the target, the next doubling landed on
+    /// zero, and `0 * 2` is zero for ever. Every runtime in this workspace is current-thread, so
+    /// that wedges the process with no error to report. This does not reach the overflow (no test
+    /// allocates two gigabytes) — it pins that the guard did not break ordinary growth, and the
+    /// overflow arm is a one-line `grown = needed` on the same loop.
+    #[test]
+    fn a_builder_grows_past_its_initial_buffer() {
+        let (out, _) = run(
+            "public final class Main {\n\
+             public static void run() {\n\
+             StringBuilder b = new StringBuilder();\n\
+             for (int i = 0; i < 5000; i++) { b.append('x'); }\n\
+             System.out.println(b.length());\n\
+             System.out.println(b.charAt(4999));\n\
+             }\n\
+             }",
+            "run",
+        );
+        assert_eq!(out, "5000\nx\n");
+    }
+
     /// An exception the package raises reaches the project's own `catch`.
     ///
     /// The whole hierarchy is the package's Java — `NumberFormatException` through

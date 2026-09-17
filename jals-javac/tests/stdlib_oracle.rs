@@ -1,16 +1,19 @@
-//! Checks the embedded stdlib stubs against a real JDK's own signatures.
+//! Checks the platform package's Java against a real JDK's own signatures.
 //!
-//! `jals-hir` models `java.lang` / `java.util` / `java.io` as hand-written, signature-only Java
-//! stubs. That is a deliberate design choice — it keeps the analysis pure and `wasm32`-compatible,
-//! with no host file to find — but it changes character the moment a compiler *emits* from them.
-//! A stub that says `println(String)` where the JDK says `println(CharSequence)` produces a class
-//! file that loads happily and throws `NoSuchMethodError` on the first call, because nothing in the
-//! pipeline checks: type errors are the linter's job, and the linter is reading the same wrong stub.
+//! `jals-hir` embeds no Java at all: `java.lang` / `java.util` / `java.io` are a *package*
+//! (`jals-platform`), read at `LibraryFidelity::Signatures` by every host but a linking wasm
+//! build. That is a deliberate design choice — it keeps the analysis pure and `wasm32`-compatible,
+//! with no host file to find — but it changes character the moment a compiler *emits* from that
+//! text. A record that says `println(String)` where the JDK says `println(CharSequence)` produces
+//! a class file that loads happily and throws `NoSuchMethodError` on the first call, because
+//! nothing in the pipeline checks: type errors are the linter's job, and the linter is reading the
+//! same wrong record.
 //!
-//! So the stubs get an oracle. `$JAVA_HOME/lib/ct.sym` is the signature data `javac --release` reads:
-//! an ordinary zip whose entries are ordinary class files with their method bodies stripped. Reading
-//! it needs a host path, which is why this lives in a **test** — the product still sees only the
-//! stubs, and the `zip` crate is already the workspace's dev-only archive oracle.
+//! So the record gets an oracle. `$JAVA_HOME/lib/ct.sym` is the signature data `javac --release`
+//! reads: an ordinary zip whose entries are ordinary class files with their method bodies
+//! stripped. Reading it needs a host path, which is why this lives in a **test** — the product
+//! still sees only the package, and the `zip` crate is already the workspace's dev-only archive
+//! oracle.
 //!
 //! A missing JDK skips the checks rather than failing, matching the CLI tests' `javac_available()`
 //! convention.
@@ -69,7 +72,7 @@ const fn release_letter(version: u32) -> Option<char> {
 
 /// Every class the JDK ships for `release`, by internal name, as a parsed class file.
 ///
-/// Only the packages the stubs model are read: `ct.sym` holds every release of every module, and
+/// Only the packages the platform models are read: `ct.sym` holds every release of every module, and
 /// parsing all of it to check a few dozen types would dominate the test's runtime.
 fn jdk_classes(home: &std::path::Path, release: char) -> Vec<(String, ClassFile)> {
     const PACKAGES: &[&str] = &["java/lang/", "java/util/", "java/io/"];
@@ -166,16 +169,16 @@ const DIVERGENCES: &[(&str, &str)] = &[
 /// The direction matters: the record is allowed to be a *subset* of the real API, but every entry
 /// in that subset has to be real, because a compiler emits from it verbatim.
 #[test]
-fn every_stdlib_stub_member_exists_in_the_real_jdk() {
-    // A missing JDK stands the test down. It says so: this is the *only* check that the embedded
-    // stubs match the signatures a real JVM will link against, and a signature that drifted would
-    // otherwise surface as a `NoSuchMethodError` at run time rather than here.
+fn every_platform_member_exists_in_the_real_jdk() {
+    // A missing JDK stands the test down. It says so: this is the *only* check that the platform
+    // package matches the signatures a real JVM will link against, and a signature that drifted
+    // would otherwise surface as a `NoSuchMethodError` at run time rather than here.
     let Some((home, version)) = jdk() else {
-        eprintln!("note: no JDK on this host; the stdlib stubs went unchecked");
+        eprintln!("note: no JDK on this host; the platform package went unchecked");
         return;
     };
     let Some(release) = release_letter(version) else {
-        eprintln!("note: JDK {version} has no `ct.sym` release letter; the stubs went unchecked");
+        eprintln!("note: JDK {version} has no `ct.sym` release letter; the package went unchecked");
         return;
     };
     let jdk_classes = jdk_classes(&home, release);
@@ -241,7 +244,7 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
                     };
                     (name, (&methods, MethodDescriptor::to_string(&descriptor)))
                 }
-                // An enum constant is a field of its own type; the stubs declare none.
+                // An enum constant is a field of its own type; the platform declares none.
                 _ => continue,
             };
             let (declared, descriptor) = expected;
@@ -268,10 +271,10 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
         )
     }));
 
-    assert!(checked > 50, "only {checked} stub members were checked");
+    assert!(checked > 50, "only {checked} platform members were checked");
     assert!(
         wrong.is_empty(),
-        "{} stub member(s) do not match the JDK:\n{}",
+        "{} platform member(s) do not match the JDK:\n{}",
         wrong.len(),
         wrong.join("\n")
     );

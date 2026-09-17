@@ -19,6 +19,18 @@ package java.lang;
  */
 public class Object {
 
+    /**
+     * The no-argument constructor every class without a written {@code extends} chains up to.
+     *
+     * <p>Written out rather than left to JLS &sect;8.8.9, because a signature unit is read with
+     * {@code Declarations::SignaturesOnly} and the implicit-constructor synthesis is deliberately
+     * off there: what a record does not list, it has simply not written down. So without this line
+     * {@code java.lang.Object} has no constructor member at all, and an explicit {@code super();}
+     * in a class rooted here resolves to nothing — which is a compile error on legal Java that
+     * {@code javac} accepts.
+     */
+    public Object();
+
     /** A textual representation of this object. */
     public String toString();
 
@@ -27,4 +39,7 @@ public class Object {
 
     /** A hash consistent with {@link #equals}. */
     public int hashCode();
+
+    /** The runtime class of this object. */
+    public Class getClass();
 }
