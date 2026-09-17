@@ -528,7 +528,7 @@ filesystem reads into portable interfaces.
   with; this crate has no features at all, and no dependencies, so a package author's crate depends
   on it and on nothing else.) It ships **no Java of its own**, not even `java.lang`: the platform is
   a package like any other (`jals-platform`), and a standard library privileged into the crate that
-  defines what a package *is* would be a second way to publish Java. Four properties are
+  defines what a package *is* would be a second way to publish Java. Five properties are
   load-bearing.
   - **One crate owns both halves, and there is exactly one place they are checked against each
     other.** A binding is keyed by the declaring class's internal name and the method's
