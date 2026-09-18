@@ -1,14 +1,27 @@
-//! Tests for the embedded `java.lang` stubs, indexed via [`ProjectIndexBuilder::with_stdlib`].
+//! Tests for the **platform library**, indexed as a signature record through
+//! [`ProjectIndexBuilder::with_library`].
 //!
-//! They pin the Step-1 contract: core JDK types become real (stub-origin) project items, so a
-//! reference to one resolves and its members infer — while the default [`ProjectIndex::builder`] is
-//! unchanged (those types stay `external`), and a stub is never offered as a navigation target.
+//! They pin what a record buys: core JDK types become real project items, so a reference to one
+//! resolves and its members infer, while a member the record omits is a gap rather than an absence
+//! — the demotion in [`Ty::is_assignable_to`] is what keeps it from accusing a correct program. A
+//! record is never offered as a navigation target, and a bare index has no standard library at all.
 
 use jals_hir::{
-    FileAnalysis, FileId, FileSemantics, ItemOrigin, ProjectIndex, Ty, TypeMismatch,
-    TypeResolution, TypedFile,
+    FileAnalysis, FileId, FileSemantics, ItemOrigin, LibraryFidelity, ProjectIndex, Ty,
+    TypeMismatch, TypeResolution, TypedFile,
 };
 use jals_syntax::SyntaxNode;
+
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
 
 /// Parses each source, keeping its `SOURCE_FILE` node alive (rowan nodes are ref-counted).
 fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
@@ -36,7 +49,7 @@ impl Fixture {
         let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
         let index = jals_exec::block_on_inline(
             ProjectIndex::builder(&[(FileId(0), node)])
-                .with_stdlib()
+                .with_library(&platform())
                 .build(),
         );
         Self { analysis, index }
@@ -78,7 +91,10 @@ fn string_resolves_to_a_stdlib_project_item() {
     let id = ty
         .project_id()
         .expect("with the stubs indexed, `String` is a project (not external) type");
-    assert_eq!(index.item(id).origin, ItemOrigin::Stdlib);
+    assert_eq!(
+        index.item(id).origin,
+        ItemOrigin::Library(LibraryFidelity::Signatures)
+    );
     assert_eq!(index.item(id).fqn.to_string(), "java.lang.String");
 }
 
@@ -122,14 +138,21 @@ fn stdlib_symbol_goto_is_none() {
     assert_eq!(fixture.semantics().definition_at(offset), None);
 }
 
+/// A bare index has **no `java.lang` at all**, and that is the point rather than a regression.
+///
+/// What used to stand here asserted the opposite: that `String` resolved as `External` with no
+/// library indexed, because a hard-coded name list answered for it. That list was a second
+/// specification of what `java.lang` contains, and it had already drifted from the first — it
+/// carried `Thread`, `Runtime` and `Cloneable`, which no stub declared. Deleting it is what makes
+/// the platform package the only answer, and this is the consequence a host must respect: resolve
+/// the platform, or have no standard library.
 #[test]
-fn default_build_keeps_string_external() {
-    // Regression guard: without the stubs, `String` is external exactly as before.
+fn a_bare_index_has_no_standard_library() {
     let src = "class C { String f; }";
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes(&[src])).build());
     assert_eq!(
         index.resolve_type_name(FileId(0), "String", None),
-        TypeResolution::External,
+        TypeResolution::Unresolved,
     );
 }
 
@@ -196,7 +219,10 @@ fn java_util_types_need_an_import_but_then_resolve_to_stubs() {
         .project_id()
         .expect("List resolves to the stub when imported");
     assert_eq!(index.item(id).fqn.to_string(), "java.util.List");
-    assert_eq!(index.item(id).origin, ItemOrigin::Stdlib);
+    assert_eq!(
+        index.item(id).origin,
+        ItemOrigin::Library(LibraryFidelity::Signatures)
+    );
 }
 
 // --- Generic invariance: the same nominal type with differing type arguments -----------------
@@ -319,7 +345,11 @@ fn builder_with_stdlib_never_panics_and_project_items_are_in_bounds() {
         "🦀 class Broken { int (}",
     ];
     let nodes = nodes(&sources);
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_stdlib().build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform())
+            .build(),
+    );
     // Every *project* item's name range stays within its source; stub items live at reserved high
     // file ids and are excluded from this host-source bounds check.
     for (_, item) in index
@@ -331,40 +361,6 @@ fn builder_with_stdlib_never_panics_and_project_items_are_in_bounds() {
             item.name_range.end <= src.len(),
             "project item {} out of bounds",
             item.fqn
-        );
-    }
-}
-
-#[test]
-fn every_java_lang_stub_resolves_without_the_stubs_too() {
-    // Drift guard for the two lists that answer the same question. `ProjectIndex::is_java_lang` is
-    // what a *default*-built index resolves an unimported `java.lang` name through; the stubs are
-    // what a `with_stdlib` one binds it to. A type the stubs declare and that list omits therefore
-    // makes one source report `cannot-resolve` in one build and not the other — which is how
-    // `AssertionError` came to resolve with the stubs indexed and not without them.
-    let fixture = Fixture::new("class C { }");
-    let declared: Vec<String> = fixture
-        .index
-        .items()
-        .filter(|(_, item)| item.origin == ItemOrigin::Stdlib)
-        .filter_map(|(_, item)| {
-            let fqn = item.fqn.to_string();
-            // Top-level `java.lang` types only: a nested one is never named bare.
-            let name = fqn.strip_prefix("java.lang.")?;
-            (!name.contains('.')).then(|| name.to_owned())
-        })
-        .collect();
-    assert!(
-        declared.len() > 30,
-        "expected the java.lang stubs to be enumerable: {declared:?}"
-    );
-
-    let bare = jals_exec::block_on_inline(ProjectIndex::builder(&nodes(&["class C { }"])).build());
-    for name in declared {
-        assert_eq!(
-            bare.resolve_type_name(FileId(0), &name, None),
-            TypeResolution::External,
-            "`{name}` is declared by the java.lang stubs but missing from the implicit-import list",
         );
     }
 }

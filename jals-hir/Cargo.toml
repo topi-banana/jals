@@ -11,6 +11,7 @@ jals-exec.workspace = true
 jals-syntax.workspace = true
 
 [dev-dependencies]
+jals-platform.workspace = true
 expect-test = "1.5"
 proptest.workspace = true
 
