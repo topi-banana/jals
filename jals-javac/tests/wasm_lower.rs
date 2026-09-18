@@ -107,10 +107,11 @@ fn body_of(module: &Module, export: &str) -> String {
             .collect();
         panic!("no exported function `{export}`; the module exports {names:?}")
     };
-    // The function index space starts with the imports, so a defined function's place in
-    // `module.funcs` is its index minus their count.
-    let defined =
-        usize::try_from(*index).expect("a function index that fits") - module.imports.len();
+    // The function index space starts with the *function* imports, so a defined function's place
+    // in `module.funcs` is its index minus their count — `func_index(0)` is that count, since it
+    // names where the first defined function would sit.
+    let defined = usize::try_from(*index).expect("a function index that fits")
+        - usize::try_from(module.func_index(0)).expect("a function import count that fits");
     let func = &module.funcs[defined];
 
     let mut rendered = String::new();
