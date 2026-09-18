@@ -1072,15 +1072,15 @@ mod tests {
     /// The chain is spelled out rather than hidden behind a helper returning a [`Facts`]: a
     /// `TypedFile` borrows the binding, which borrows the analysis *and* the index, so nothing
     /// shorter than the whole chain can be handed back. Each test therefore writes it, and the
-    /// stdlib stubs are folded in because they are compile-time constants parsed in memory rather
-    /// than a host read.
+    /// platform package is folded in because its Java is a compile-time constant parsed in memory
+    /// rather than a host read.
     macro_rules! bound {
         ($source:expr, $facts:ident, $root:ident => $body:block) => {{
             let $root = block_on_inline(jals_syntax::Parse::parse($source)).syntax();
             let analysis = block_on_inline(jals_hir::FileAnalysis::of(&$root));
             let index = block_on_inline(
                 jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), $root.clone())])
-                    .with_stdlib()
+                    .with_library(&crate::test_support::TestPlatform::records())
                     .build(),
             );
             let semantics = analysis.in_project(&index, jals_hir::FileId(0));

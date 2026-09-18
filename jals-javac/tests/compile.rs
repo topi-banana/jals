@@ -10,6 +10,17 @@ use std::process::{Command, Stdio};
 use jals_hir::{FileAnalysis, FileId, ProjectIndex};
 use jals_javac::lower::{Compile, CompiledClass, LowerError};
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Java 25, matching the class files the rest of the workspace pins its fixtures to.
 const MAJOR_JAVA_25: u16 = 69;
 
@@ -35,7 +46,7 @@ fn compile(source: &str) -> Result<Vec<CompiledClass>, LowerError> {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root)])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let semantics = analysis.in_project(&index, FileId(0));
@@ -59,7 +70,11 @@ fn compile_across(sources: &[&str]) -> Result<Vec<CompiledClass>, LowerError> {
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&roots)
+            .with_library(&platform())
+            .build(),
+    );
     let last = FileId(u32::try_from(sources.len() - 1).expect("file id"));
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&roots[sources.len() - 1].1));
     let semantics = analysis.in_project(&index, last);
@@ -185,14 +200,16 @@ public class Counter {
 /// a class file that loads and then misbehaves.
 #[test]
 fn an_unsupported_construct_is_reported() {
-    let source = r"
+    let source = r#"
 public class Unsupported {
     public static void main(String[] args) {
-        Runnable r = () -> {};
+        Object text = "a";
+        text += "b";
     }
 }
-";
-    let error = compile(source).expect_err("a lambda is not lowered yet");
+"#;
+    let error =
+        compile(source).expect_err("a concatenating `+=` on an `Object` is not lowered yet");
     assert!(
         matches!(error, LowerError::Unsupported(_)),
         "expected an Unsupported error, got {error}"
@@ -433,7 +450,7 @@ public class Returns {
     static float asFloat() { return 1; }
     static byte asByte() { return (byte) 300; }
     // A reference return needs no conversion, but it does need `areturn` rather than `ireturn`.
-    // `println(Object)` is not in the embedded stubs, so the value is tested rather than printed.
+    // `println(Object)` is not in the platform's record, so the value is tested rather than printed.
     static Object asObject() { return null; }
 
     public static void main(String[] args) {
@@ -841,6 +858,43 @@ class Widened extends Sub {
 ",
     )
     .expect("an implicit no-argument constructor is still a `super()`");
+}
+
+/// A **written** `super()` in a class rooted at `java.lang.Object` resolves to a member.
+///
+/// `java.lang.Object` is a signature unit, and implicit-constructor synthesis (JLS §8.8.9) is off
+/// for one by design — what a record does not list, it has not written down — so the platform
+/// declares `public Object()` in the Java rather than leaving it to be synthesized. Without that
+/// line the record carried no constructor at all and the commonest `super()` there is resolved to
+/// nothing, on plain Java `javac` accepts. The sibling above covers the *implicit* prologue, which
+/// takes a different path and stayed green throughout.
+#[test]
+fn an_explicit_super_call_resolves_at_the_root_of_the_hierarchy() {
+    compile(
+        r"
+public class Rooted {
+    int x;
+
+    public Rooted() {
+        super();
+        this.x = 1;
+    }
+}
+",
+    )
+    .expect("`super()` at the root of the hierarchy names `java.lang.Object`'s constructor");
+
+    // And the member `Object` states is reachable as a member, not only as a prologue.
+    compile(
+        r"
+public class Asks {
+    public static String of(Object value) {
+        return value.getClass().toString();
+    }
+}
+",
+    )
+    .expect("`getClass()` is a member of `java.lang.Object`");
 }
 
 /// An interface's members carry the modifiers JLS lets the source leave unwritten: a field is
@@ -5407,14 +5461,18 @@ public class Hid {
 ///
 /// Every other unresolved type is a value the caller wrote and the descriptor has to spell, so
 /// refusing is right there. A bound is a fact about the *index*, and the index is routinely partial:
-/// `Runnable`, `Cloneable`, `Comparator`, and every `java.util.function` type are absent from the
-/// embedded stubs, which is the only configuration this crate's own tests and the playground index.
-/// Refusing therefore made `<T extends Runnable>` uncompilable outright — including the class-level
-/// form, which compiled before any bound was read at all.
+/// `Comparator` and every `java.util.function` type are absent from the platform's record, which is
+/// the only configuration this crate's own tests and the playground index. Refusing therefore made
+/// `<T extends Comparator>` uncompilable outright — including the class-level form, which compiled
+/// before any bound was read at all.
+///
+/// The bound has to be a name the platform genuinely does not declare, which is why this is not
+/// `Cloneable`: a bound the index *can* name erases to that name, exactly as `javac` erases it, and
+/// the two cases are the whole point of the distinction.
 #[test]
 fn a_bound_the_index_cannot_name_erases_to_object() {
     let method = descriptors(
-        "public class D { static <T extends Runnable> T r(T a) { return a; } }",
+        "public class D { static <T extends Comparator> T r(T a) { return a; } }",
         "D",
     );
     assert!(
@@ -5422,7 +5480,7 @@ fn a_bound_the_index_cannot_name_erases_to_object() {
         "got {method:?}"
     );
     let class_level = descriptors(
-        "public class F<T extends Runnable> { T held; T get() { return held; } }",
+        "public class F<T extends Comparator> { T held; T get() { return held; } }",
         "F",
     );
     assert!(
