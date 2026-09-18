@@ -8,10 +8,17 @@
 //! duration of one call and hands out indices into that table. That is what keeps a Java object
 //! reachable from Rust without this crate naming a garbage collector, and what makes a slot from
 //! one call structurally useless in another.
+//!
+//! A [`HostId`] is the other half of that story. A package that must keep a Java reference — or a
+//! Rust object — *between* calls asks the host to hold it, and addresses it by an integer the JVM
+//! side can carry in a field. [`HostValue`] is the shape such a value takes when a package stores
+//! it in its own `Vec`: a number, a null, or a retained reference.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+
+use crate::host::NativeHost;
 
 /// A reference argument, as an index into the references the host made live for this call.
 ///
@@ -31,6 +38,29 @@ impl RefSlot {
 
     /// The index this slot names, for the host that issued it.
     pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// One entry in the host's table of things that outlive a call.
+///
+/// The table is the host's, its lifetime is the run's, and this is only the integer a package
+/// stores to find its entry again. It is deliberately not a pointer: a package author's crate
+/// cannot name the engine, and the engine cannot hand out an address it would have to keep valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HostId(u32);
+
+impl HostId {
+    /// The id a host hands out for the `raw`-th entry it stored.
+    ///
+    /// Public because the *host* constructs these — `jals-build`'s tinywasm adapter is the only
+    /// caller in this workspace, and it is in another crate.
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The integer this id is, for the host that issued it.
+    pub const fn raw(self) -> u32 {
         self.0
     }
 }
@@ -106,6 +136,70 @@ impl NativeValue {
     }
 }
 
+/// A value a package keeps across calls: a number, a null, or a reference the host retains.
+///
+/// This is the element type of the `Vec` behind a native container — `java.util.ArrayList`'s
+/// `Vec<HostValue>` is the first one — and the reason a container can hold Java objects at all.
+/// A [`NativeValue::Ref`] names a reference for one call and nothing afterwards; turning it into
+/// [`Reference`](Self::Reference) asks the host to root it, and restoring one hands back a fresh
+/// slot for the call that is asking.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HostValue {
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    /// A Java `null`, kept apart from a number exactly as [`NativeValue::Null`] is.
+    Null,
+    /// A reference the host holds, rooted in whatever collector the module runs under.
+    Reference(HostId),
+}
+
+impl HostValue {
+    /// Take `value` into a shape that survives the call it arrived in.
+    ///
+    /// A reference is retained through the host, so the object stays reachable — and stays the
+    /// same object — for as long as the entry lives. A number or a null is already durable and
+    /// needs no table slot.
+    pub fn capture(host: &mut dyn NativeHost, value: NativeValue) -> Result<Self, NativeError> {
+        Ok(match value {
+            NativeValue::I32(value) => Self::I32(value),
+            NativeValue::I64(value) => Self::I64(value),
+            NativeValue::F32(value) => Self::F32(value),
+            NativeValue::F64(value) => Self::F64(value),
+            NativeValue::Null => Self::Null,
+            NativeValue::Ref(slot) => Self::Reference(host.reference_retain(slot)?),
+        })
+    }
+
+    /// The value as the current call must see it.
+    ///
+    /// A retained reference becomes a slot of *this* call — the host root is the same object, but
+    /// the index into the live-reference table is per call by construction.
+    pub fn restore(self, host: &mut dyn NativeHost) -> Result<NativeValue, NativeError> {
+        Ok(match self {
+            Self::I32(value) => NativeValue::I32(value),
+            Self::I64(value) => NativeValue::I64(value),
+            Self::F32(value) => NativeValue::F32(value),
+            Self::F64(value) => NativeValue::F64(value),
+            Self::Null => NativeValue::Null,
+            Self::Reference(id) => NativeValue::Ref(host.reference_restore(id)?),
+        })
+    }
+
+    /// What this value is, as a name a diagnostic can use.
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::I32(_) => "i32",
+            Self::I64(_) => "i64",
+            Self::F32(_) => "f32",
+            Self::F64(_) => "f64",
+            Self::Null => "null",
+            Self::Reference(_) => "a reference",
+        }
+    }
+}
+
 /// Why a native call could not answer.
 ///
 /// Every variant is a *refusal*, never a Java exception: a wasm host cannot throw one, because a
@@ -129,6 +223,15 @@ pub enum NativeError {
     NotAnArray,
     /// An element index outside the array.
     OutOfBounds { index: u32, len: u32 },
+    /// A handle names no entry the host holds — never issued, already taken out, or left over from
+    /// a run whose table is gone.
+    UnknownHandle { id: u32 },
+    /// The entry a handle names is not the kind of thing the caller reached for: a number where a
+    /// Rust object was expected, an object where a retained reference was.
+    HostKind {
+        expected: &'static str,
+        found: &'static str,
+    },
     /// A call back into the module did not complete. Carries whatever the engine said.
     Call(String),
     /// Anything a package itself wants to report.
@@ -166,6 +269,12 @@ impl fmt::Display for NativeError {
             Self::NotAnArray => f.write_str("the reference is not an array"),
             Self::OutOfBounds { index, len } => {
                 write!(f, "index {index} is outside an array of {len}")
+            }
+            Self::UnknownHandle { id } => {
+                write!(f, "handle {id} names nothing the host holds")
+            }
+            Self::HostKind { expected, found } => {
+                write!(f, "the host value is {found}, and {expected} was needed")
             }
             Self::Call(message) => write!(f, "the call back into the module failed: {message}"),
             Self::Message(message) => f.write_str(message),
