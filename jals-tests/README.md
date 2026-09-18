@@ -253,8 +253,8 @@ A gap listing names a file; `emit` turns that file into the bytes. It hands the 
 same front end and writes the class files or the WebAssembly module, so `javap -c`,
 `wasm-tools print`, and a real JVM or engine can be pointed at what the compiler actually produced.
 It resolves against the host JDK's `ct.sym` like `jals-compile` does — which is what makes a corpus
-case reproduce — and `--stdlib` switches to the embedded stubs, which is what `jals-javac`'s own
-tests resolve against.
+case reproduce — and `--stdlib` switches to the platform package this repository ships, which is
+what `jals-javac`'s own tests resolve against.
 
 ```sh
 cargo run --release -p jals-tests --example emit -- <File.java> <out-dir>
@@ -298,9 +298,9 @@ formatter corpora it is **generated locally and gitignored, never committed**.
 
 ### The classpath is a real JDK's
 
-`jals-hir`'s embedded stubs are ~58 signature-only types — enough to say something useful about
-an editor buffer, nowhere near enough to compile arbitrary Java. Scoring against them would
-report *stub coverage* wearing a compiler's name. `$JAVA_HOME/lib/ct.sym` is the signature data
+The platform package is the standard library `jals` ships — enough to say something useful about
+an editor buffer, nowhere near enough to compile arbitrary Java. Scoring against it would report
+*platform coverage* wearing a compiler's name. `$JAVA_HOME/lib/ct.sym` is the signature data
 `javac --release` reads (an ordinary zip of ordinary class files with their bodies stripped), so
 the harness lowers it into the `LoweredClasspath` the analysis resolves against — the same thing
 the product does through `jals-classpath` for a real dependency. Reading it needs a host path,
@@ -403,18 +403,20 @@ and compute the wrong number — and it is the wasm counterpart of `descriptor-e
 
 ### Two denominators, because this backend has a target subset
 
-`WasmError::NoRepresentation` is not a gap. A wasm host has no `java.base`, so a file naming
-`String` is **outside what this backend compiles**, by design, exactly as a file javac declines
-alone is outside `jals-compile`'s corpus. Those cases are reported as *out of subset* and excluded
-from the rate that measures the compiler; the corpus total is printed beside it so the scoped rate
-can never read as coverage of Java. On the current corpus that is 1286 of 2188 cases, `String`
-alone accounting for the largest share of them.
+`WasmError::NoRepresentation` is not a gap. This harness resolves against `ct.sym` and links no
+platform, so a file naming `String` is **outside what the module under test can compile**, by
+design, exactly as a file javac declines alone is outside `jals-compile`'s corpus. Those cases are
+reported as *out of subset* and excluded from the rate that measures the compiler; the corpus total
+is printed beside it so the scoped rate can never read as coverage of Java. On the current corpus
+that is 1286 of 2188 cases, `String` alone accounting for the largest share of them.
 
 Three types the backend *does* represent are not in that count, and each is a rule rather than a
-stub: `java.lang.Object` is the root of Java's reference hierarchy and `anyref` is wasm's, a **type
-variable** erases to its bound and to `Object` with none (JLS §4.6), and an `@interface` is an
-interface (§9.6). What still needs `java.base` after that is what a **value** of a library type
-needs — a `String`, a wrapper for a boxing conversion, a `PrintStream` for a call.
+declaration: `java.lang.Object` is the root of Java's reference hierarchy and `anyref` is wasm's, a
+**type variable** erases to its bound and to `Object` with none (JLS §4.6), and an `@interface` is
+an interface (§9.6). What still needs a library after that is what a **value** of a library type
+needs — a `String`, a wrapper for a boxing conversion, a `PrintStream` for a call — and a project
+that wants those links the platform package, which is a different index from the one this harness
+scores against.
 
 `WasmError::NoImplementation` is the neighbouring outcome and is deliberately *not* out of
 subset. Its owner is a project type — a `native` method, or an interface method whose only

@@ -85,6 +85,38 @@ pub enum WasmError {
     TooLarge,
 }
 
+impl WasmError {
+    /// This refusal, said to be about one expression — the innermost that has not already named
+    /// one, so a nested failure reports the operand rather than the whole statement.
+    ///
+    /// The text is trimmed because a lossless CST node carries its own leading trivia, and a
+    /// message quoting it would open its backticks on a space.
+    fn in_expression(self, node: &SyntaxNode) -> Self {
+        match self {
+            Self::NoRepresentation(what) if !what.contains(" in `") => Self::NoRepresentation(
+                alloc::format!("{what}, in `{}`", node.text().to_string().trim()),
+            ),
+            other => other,
+        }
+    }
+
+    /// This refusal, said to be about one member's **declared signature**.
+    ///
+    /// A type with no representation is reported by its own name, which is enough when a reader
+    /// wrote it. It is not enough for a *library* input, where every body is lowered rather than
+    /// only the reachable ones: "`?` has no wasm representation" over fifty files names nothing at
+    /// all, and the answer is always the same question — which declaration.
+    fn in_signature(self, member: MemberId, index: &ProjectIndex) -> Self {
+        match self {
+            Self::NoRepresentation(ty) => Self::NoRepresentation(alloc::format!(
+                "{ty}, in the signature of `{}`",
+                CompileWasm::member_path(member, index)
+            )),
+            other => other,
+        }
+    }
+}
+
 impl core::fmt::Display for WasmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -952,13 +984,21 @@ impl CompileWasm {
                 }
                 for ty in index.resolved_param_tys(member) {
                     layout.declare_array(&ty, module)?;
-                    params.push(layout.val_type(&ty)?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 let returned = index.resolved_member_ty(member);
                 layout.declare_array(&returned, module)?;
                 let results = match returned {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty)?],
+                    ty => alloc::vec![
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?
+                    ],
                 };
                 let descriptor = Descriptor::method_descriptor(member, index, false)
                     .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
@@ -1014,11 +1054,19 @@ impl CompileWasm {
                 };
                 let mut params = alloc::vec![layout.class_ref(item)?];
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty)?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 let results = match index.resolved_member_ty(member) {
                     Ty::Void => Vec::new(),
-                    ty => alloc::vec![layout.val_type(&ty)?],
+                    ty => alloc::vec![
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?
+                    ],
                 };
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
@@ -1113,7 +1161,11 @@ impl CompileWasm {
                     params.push(layout.class_ref(enclosing)?);
                 }
                 for ty in index.resolved_param_tys(member) {
-                    params.push(layout.val_type(&ty)?);
+                    params.push(
+                        layout
+                            .val_type(&ty)
+                            .map_err(|error| error.in_signature(member, index))?,
+                    );
                 }
                 // The captures come after every declared parameter, so a declared one keeps its slot.
                 let captured = is_constructor
@@ -1128,7 +1180,11 @@ impl CompileWasm {
                 } else {
                     match index.resolved_member_ty(member) {
                         Ty::Void => Vec::new(),
-                        ty => alloc::vec![layout.val_type(&ty)?],
+                        ty => alloc::vec![
+                            layout
+                                .val_type(&ty)
+                                .map_err(|error| error.in_signature(member, index))?
+                        ],
                     }
                 };
 
@@ -1387,7 +1443,9 @@ impl Layout {
         let mut fields = Vec::with_capacity(slots.len());
         for slot in &slots {
             let ty = match slot {
-                Slot::Declared(member) => self.val_type(&index.resolved_member_ty(*member))?,
+                Slot::Declared(member) => self
+                    .val_type(&index.resolved_member_ty(*member))
+                    .map_err(|error| error.in_signature(*member, index))?,
                 Slot::Enclosing(enclosing) => self.class_ref(*enclosing)?,
                 Slot::Capture(ty) => self.val_type(ty)?,
             };
@@ -1574,15 +1632,16 @@ impl Layout {
                 let Ok((value, _)) = Literal::integer(text) else {
                     return default();
                 };
-                #[allow(clippy::cast_precision_loss)]
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     ValType::F32 => insn.f32_const(value as f32),
                     ValType::F64 => insn.f64_const(value as f64),
-                    _ => match i32::try_from(value) {
-                        Ok(value) => insn.i32_const(value),
-                        Err(_) => return default(),
-                    },
+                    // The low 32 bits, for the reason the expression path takes them: an `int`
+                    // literal past `i32::MAX` spells a bit pattern. Falling back to the start
+                    // function instead only moved the same value to the same refusal one pass
+                    // later.
+                    _ => insn.i32_const(value as i32),
                 };
             }
             (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
@@ -1710,6 +1769,14 @@ impl Layout {
             // a field of type `T` is one field whatever a use instantiates it at, and typing it at
             // the bound would make two instantiations two different structs.
             Ty::TypeVar { .. } => ValType::Ref(RefType::nullable(HeapType::Any)),
+            // `Unknown` is not "a library type this backend cannot spell" — it is inference
+            // having failed, which is a different problem with a different fix, and reporting it
+            // as the other one sends a reader looking for a dependency in a file that has none.
+            Ty::Unknown => {
+                return Err(WasmError::NoRepresentation(
+                    "a type inference could not determine".to_owned(),
+                ));
+            }
             other => return Err(WasmError::NoRepresentation(other.to_string())),
         })
     }
@@ -3468,7 +3535,7 @@ impl Lowering<'_> {
 
     /// One arrow arm's value, converted to the type the whole `switch` expression has.
     fn arm_value(&mut self, value: &ast::Expr, ty: ValType, insn: &mut Insn) -> Result<()> {
-        if self.num_of(value.syntax()).is_ok()
+        if self.numeric_of(value.syntax()).is_some()
             && let Ok(target) = Self::num_for(ty)
         {
             return self.operand(value, target, insn);
@@ -3548,6 +3615,11 @@ impl Lowering<'_> {
 
     /// Emit `expr`. Returns its type, or `None` when it left nothing on the stack.
     fn expr(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
+        self.expr_inner(expr, insn)
+            .map_err(|error| error.in_expression(expr.syntax()))
+    }
+
+    fn expr_inner(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
         match expr {
             ast::Expr::Literal(literal) => self.literal(literal, insn).map(Some),
             ast::Expr::Paren(paren) => {
@@ -3757,12 +3829,22 @@ impl Lowering<'_> {
                 // about one of them. The width comes from the inferred type below, so the one the
                 // fact reads off the suffix is dropped.
                 let (value, _) = Literal::integer(text)?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "an `int` literal denotes its low 32 bits (JLS \u{a7}3.10.1) \u{2014} see below"
+                )]
                 match ty {
                     ValType::I64 => insn.i64_const(value),
-                    _ => insn
-                        .i32_const(i32::try_from(value).map_err(|_| {
-                            WasmError::Unsupported("an out-of-range `int` literal")
-                        })?),
+                    // The low 32 bits, not a range check. An `int` literal is legal up to
+                    // `0xFFFFFFFF` in a hexadecimal, octal or binary spelling, where it denotes the
+                    // *bit pattern* and not the number: `0xFFFFFFFF` is `-1`. Decimal has one such
+                    // spelling too, `2147483648`, which JLS \u{a7}3.10.1 admits only as the operand of a
+                    // unary minus \u{2014} and the negation that follows wraps it back to itself, which
+                    // is why `Integer.MIN_VALUE` is written that way and no other. Refusing the
+                    // value here rejected all four, and `i64` already reads its own out-of-range
+                    // spellings this way (`Literal::integer` falls back to `u64`), so this is the
+                    // one width that answered differently.
+                    _ => insn.i32_const(value as i32),
                 };
             }
             FLOAT_LITERAL => {
@@ -3942,7 +4024,7 @@ impl Lowering<'_> {
             return Ok(());
         }
         let declared_ty = self.layout.val_type(declared)?;
-        if self.num_of(value.syntax()).is_ok()
+        if self.numeric_of(value.syntax()).is_some()
             && let Ok(target) = Self::num_for(declared_ty)
         {
             return self.operand(value, target, insn);
@@ -4152,7 +4234,24 @@ impl Lowering<'_> {
         let op = Self::num_op(operator).ok_or(WasmError::Unsupported("this binary operator"))?;
 
         // A reference `==` / `!=` is identity, not arithmetic, and wasm spells it `ref.eq`.
-        if matches!(op, NumOp::Eq | NumOp::Ne) && self.is_reference(left.syntax()) {
+        //
+        // **Both** sides decide that, never the left one alone. JLS §15.21 makes `==` reference
+        // equality only when both operands are reference types; with a primitive on one side it is
+        // *numeric* equality with an unboxing conversion. Asking the left operand alone handed
+        // `ref.eq` an `i32` — a module no engine loads, emitted after `jals build` reported
+        // success — and `Integer i = …; i == 1` is the everyday shape, newly reachable now that
+        // `Integer` is laid out as a struct. The arithmetic path refuses it by name instead, which
+        // is what `1 == i` already did: the operand-order asymmetry is the bug, not the refusal.
+        //
+        // The question asked is *not* "are both references" but "is either one a reference, and
+        // neither one a known primitive". An operand whose type the inference did not record is a
+        // reference here exactly as it was before, so closing the primitive/reference mix costs no
+        // comparison that used to lower.
+        if matches!(op, NumOp::Eq | NumOp::Ne)
+            && (self.is_reference(left.syntax()) || self.is_reference(right.syntax()))
+            && self.numeric_of(left.syntax()).is_none()
+            && self.numeric_of(right.syntax()).is_none()
+        {
             return self.reference_equality(&left, &right, op == NumOp::Ne, insn);
         }
 
@@ -4196,26 +4295,54 @@ impl Lowering<'_> {
     }
 
     /// The numeric type `node`'s recorded type is.
+    ///
+    /// Both refusals name the operand, which is the difference between a message a reader can act
+    /// on and one that only says a compile stopped. "An arithmetic operand of this type" was true
+    /// and useless: the whole question is *which* operand, and on a library input — where every
+    /// body is lowered rather than only the reachable ones — there are tens of thousands of them.
     fn num_of(&self, node: &SyntaxNode) -> Result<Numeric> {
-        let ty = self
-            .input
-            .type_of_expr(Facts::span(node))
-            .ok_or(WasmError::Unsupported("a value with no inferred type"))?;
-        let Ty::Primitive(primitive) = ty else {
-            return Err(WasmError::Unsupported("an arithmetic operand of this type"));
+        if let Some(numeric) = self.numeric_of(node) {
+            return Ok(numeric);
+        }
+        // The message is built here and nowhere above, so the answer costs nothing until it is a
+        // refusal. `SyntaxText::to_string` walks the whole subtree.
+        let Some(ty) = self.input.type_of_expr(Facts::span(node)) else {
+            return Err(WasmError::Unresolved(node.text().to_string()));
+        };
+        Err(WasmError::NoRepresentation(alloc::format!(
+            "{ty} (the type of `{}`, an arithmetic operand)",
+            node.text().to_string().trim()
+        )))
+    }
+
+    /// The same question, asked rather than demanded.
+    ///
+    /// [`num_of`](Self::num_of)'s refusal names the operand, which is two allocations and a walk of
+    /// the operand's whole subtree — wasted wherever the caller is testing whether a value is
+    /// numeric and has another lowering for when it is not. Four call sites do exactly that, one of
+    /// them twice per simple assignment, and a library input runs them over every body it lowers.
+    fn numeric_of(&self, node: &SyntaxNode) -> Option<Numeric> {
+        let Ty::Primitive(primitive) = self.input.type_of_expr(Facts::span(node))? else {
+            return None;
         };
         // A `boolean` is not a numeric type (JLS §4.2), so the shared rule refuses it. On *this*
         // target it shares `int`'s representation, and the only operators it reaches are the bitwise
         // ones, where that is exactly right — a statement about wasm, made where wasm decides its
         // own layout rather than folded into the language rule.
-        Ok(Numeric::of(*primitive).unwrap_or(Numeric::Int))
+        Some(Numeric::of(*primitive).unwrap_or(Numeric::Int))
     }
 
     /// Whether `node`'s recorded type is a reference.
+    ///
+    /// A type variable is one, and it is here for the reason [`narrow_to_eq`](Self::narrow_to_eq)
+    /// exists: `T` is held at `anyref` exactly as `Object` and an interface are. Leaving it out
+    /// made `a == b` answer by which operand was on the *left* — `null == v` reached `ref.eq` and
+    /// `v == null` fell through to the arithmetic path and was refused as an operand with no wasm
+    /// representation, which `T` is not.
     fn is_reference(&self, node: &SyntaxNode) -> bool {
         matches!(
             self.input.type_of_expr(Facts::span(node)),
-            Some(Ty::Class(_) | Ty::Array(_) | Ty::Null)
+            Some(Ty::Class(_) | Ty::Array(_) | Ty::Null | Ty::TypeVar { .. })
         )
     }
 
@@ -4237,12 +4364,16 @@ impl Lowering<'_> {
         } else {
             (left, Some(right))
         };
-        self.expr(value, insn)?
+        let value_ty = self
+            .expr(value, insn)?
             .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
         match other {
             Some(other) => {
-                self.expr(other, insn)?
+                Self::narrow_to_eq(value_ty, insn);
+                let other_ty = self
+                    .expr(other, insn)?
                     .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
+                Self::narrow_to_eq(other_ty, insn);
                 insn.ref_eq();
             }
             None => {
@@ -4253,6 +4384,24 @@ impl Lowering<'_> {
             insn.i32_eqz();
         }
         Ok(ValType::I32)
+    }
+
+    /// Narrow an `anyref` operand to `eqref`, which is what `ref.eq` takes.
+    ///
+    /// `Object`, an interface, and a type variable are all held at the top of the reference
+    /// hierarchy, and `eqref` sits one step below it — so `a == b` over any of them pushed two
+    /// `anyref`s at an instruction that accepts neither, and the module failed validation with
+    /// "expected subtype of eqref". A `String.equals(Object other)` opening with `other == this`
+    /// is the everyday shape.
+    ///
+    /// The cast always succeeds: every reference this backend creates is a `struct.new` or an
+    /// `array.new`, and both are `eqref`. It is nullable because Java's `==` compares two nulls as
+    /// equal and `ref.eq` answers that correctly — a non-nullable cast would trap on the one
+    /// comparison that has a defined answer.
+    fn narrow_to_eq(ty: ValType, insn: &mut Insn) {
+        if ty == ValType::Ref(RefType::nullable(HeapType::Any)) {
+            insn.ref_cast(HeapType::Eq, true);
+        }
     }
 
     /// `e instanceof T`.
@@ -4464,7 +4613,7 @@ impl Lowering<'_> {
 
         if assignment.is_simple() {
             place.address(insn);
-            let source = self.num_of(value.syntax()).ok();
+            let source = self.numeric_of(value.syntax());
             let produced = self
                 .expr(&value, insn)?
                 .ok_or(WasmError::Unsupported("an assignment of no value"))?;
@@ -4478,7 +4627,7 @@ impl Lowering<'_> {
             // wherever a type variable is involved, and a field or an array element declared at a
             // concrete type is a place the validator checks exactly. `b.held = id(c);` was a module
             // `wasm-tools` refuses, emitted with nothing said on this side.
-            if let (Some(source), Ok(declared)) = (source, self.num_of(target.syntax())) {
+            if let (Some(source), Some(declared)) = (source, self.numeric_of(target.syntax())) {
                 if source != declared {
                     insn.convert(source, declared)
                         .ok_or(WasmError::Unsupported("this assignment conversion"))?;
@@ -4810,7 +4959,7 @@ impl Lowering<'_> {
     /// The conversion is what makes `flag ? 1 : 2L` one `i64` block rather than a module the validator
     /// rejects for arms of different types.
     fn ternary_arm(&mut self, arm: &ast::Expr, ty: ValType, insn: &mut Insn) -> Result<()> {
-        if self.num_of(arm.syntax()).is_ok()
+        if self.numeric_of(arm.syntax()).is_some()
             && let Ok(target) = Self::num_for(ty)
         {
             return self.operand(arm, target, insn);
@@ -5103,12 +5252,17 @@ impl Lowering<'_> {
         // Most-derived first, so a subclass's override is tested before its superclass's: testing the
         // other way round would let the base class's `ref.test` succeed for every descendant and answer
         // with the wrong method.
-        found.sort_by(|&(a, _), &(b, _)| {
-            self.index
-                .is_subtype(a, b)
-                .cmp(&self.index.is_subtype(b, a))
-                .reverse()
-        });
+        //
+        // By **depth in the class chain**, and not by comparing the two entries with `is_subtype`.
+        // That comparator is not a total order — three classes where one extends another and the
+        // third is unrelated compare as `a < b`, `b == c`, `a == c` — so it is intransitive, and
+        // Rust's sort detects that and panics rather than producing a wrong order. It went
+        // unnoticed for as long as no dispatch had enough overriders to reach the check: a
+        // `java.lang` with twenty-four exception classes overriding one method is what found it.
+        // Depth is the property the ordering actually wants and is transitive by construction —
+        // a subclass's chain strictly contains its superclass's, so `depth(sub) > depth(super)`
+        // always — and it leaves unrelated classes in `structs` order, which is deterministic.
+        found.sort_by_key(|&(item, _)| core::cmp::Reverse(self.index.superclasses(item).count()));
         found
     }
 
@@ -5129,19 +5283,7 @@ impl Lowering<'_> {
         ty: Option<ValType>,
         insn: &mut Insn,
     ) -> Result<Option<ValType>> {
-        // A bare call in an instance method is an implicit `this`, which is local 0.
-        let receiver_ty = if let Some(ast::Expr::FieldAccess(access)) = call.callee() {
-            let receiver = access
-                .receiver()
-                .ok_or(WasmError::Unsupported("a call with no receiver"))?;
-            self.expr(&receiver, insn)?
-                .ok_or(WasmError::Unsupported("a receiver with no value"))?
-        } else {
-            // A bare call in an instance method is an implicit `this` — or, from a class that holds
-            // an enclosing instance, whichever enclosing instance owns the method.
-            let item = self.load_unqualified_receiver(self.index.member(member).owner, insn)?;
-            self.layout.class_ref(item)?
-        };
+        let receiver_ty = self.push_receiver(call, member, insn)?;
         let receiver = self.scratch(receiver_ty);
         insn.local_set(receiver);
 
@@ -5213,12 +5355,118 @@ impl Lowering<'_> {
                 }
                 insn.call(function);
             }
+            // `Object.equals` is the one bodyless method this backend can still answer: Java's
+            // own definition for a class that does not override it is reference identity, and
+            // `ref.eq` is exactly that. Reaching here means no arm above matched, so the runtime
+            // type overrides nothing — the identity comparison is the answer, not a trap.
+            None if self.is_object_equals(member) => match slots.first() {
+                Some(&(argument, held)) => {
+                    insn.local_get(receiver);
+                    Self::narrow_to_eq(receiver_ty, insn);
+                    insn.local_get(argument);
+                    Self::narrow_to_eq(held, insn);
+                    insn.ref_eq();
+                }
+                None => {
+                    insn.unreachable();
+                }
+            },
             None => {
                 insn.unreachable();
             }
         }
         insn.end();
         Ok(ty)
+    }
+
+    /// Push the receiver of `call` and hand back its wasm type, without calling anything.
+    ///
+    /// Shared by the dispatch chain and the `Object.equals` intrinsic: both need the receiver in a
+    /// local before they branch on it, and a second reading of "whose `this` is this" is how the
+    /// two would come to disagree.
+    fn push_receiver(
+        &mut self,
+        call: &ast::CallExpr,
+        member: MemberId,
+        insn: &mut Insn,
+    ) -> Result<ValType> {
+        if let Some(ast::Expr::FieldAccess(access)) = call.callee() {
+            let receiver = access
+                .receiver()
+                .ok_or(WasmError::Unsupported("a call with no receiver"))?;
+            return self
+                .expr(&receiver, insn)?
+                .ok_or(WasmError::Unsupported("a receiver with no value"));
+        }
+        // A bare call in an instance method is an implicit `this` — or, from a class that holds an
+        // enclosing instance, whichever enclosing instance owns the method.
+        let item = self.load_unqualified_receiver(self.index.member(member).owner, insn)?;
+        self.layout.class_ref(item)
+    }
+
+    /// `Object.equals`, whose body is `ref.eq`.
+    ///
+    /// The one method on `java.lang.Object` this backend lowers without a body. `Object` *is* the
+    /// engine's `anyref`, so it has no struct to give a function to, and Java's answer for a class
+    /// that does not override it is reference identity — exactly what `ref.eq` computes. A class
+    /// that does override it is dispatched by [`virtual_call`](Self::virtual_call), whose fallback
+    /// is this same comparison, so a `String` compares by value and a plain object by identity, as
+    /// on a JVM.
+    fn object_equals_identity(
+        &mut self,
+        call: &ast::CallExpr,
+        member: MemberId,
+        arguments: &[ast::Expr],
+        insn: &mut Insn,
+    ) -> Result<Option<ValType>> {
+        let receiver_ty = self.push_receiver(call, member, insn)?;
+        let receiver = self.scratch(receiver_ty);
+        insn.local_set(receiver);
+
+        // The argument is evaluated exactly once, so it is spilled before the two operands are
+        // pushed — the same shape the dispatch chain uses, and the same reason.
+        let planned = self.plan_arguments(member, arguments)?;
+        let mut slots: Vec<(u32, ValType)> = Vec::with_capacity(planned.len());
+        for arg in &planned {
+            let value = self.push_argument(arg, insn)?;
+            let slot = self.scratch(value);
+            insn.local_set(slot);
+            slots.push((slot, value));
+        }
+        let Some(&(argument, held)) = slots.first() else {
+            return Err(WasmError::NoImplementation(CompileWasm::member_path(
+                member, self.index,
+            )));
+        };
+        insn.local_get(receiver);
+        Self::narrow_to_eq(receiver_ty, insn);
+        insn.local_get(argument);
+        Self::narrow_to_eq(held, insn);
+        insn.ref_eq();
+        Ok(Some(ValType::I32))
+    }
+
+    /// Whether `member` is `java.lang.Object.equals(Object)` — the one bodyless method with a
+    /// defined lowering.
+    fn is_object_equals(&self, member: MemberId) -> bool {
+        let info = self.index.member(member);
+        if info.name != "equals" || info.modifiers.is_static || info.params.len() != 1 {
+            return false;
+        }
+        let Some(object) = self.layout.object else {
+            return false;
+        };
+        info.owner == object
+            && self
+                .index
+                .resolved_param_tys(member)
+                .first()
+                .and_then(Ty::project_id)
+                == Some(object)
+            && matches!(
+                self.index.resolved_member_ty(member),
+                Ty::Primitive(Primitive::Boolean)
+            )
     }
 
     /// Push the enclosing instance an inner class's constructor takes: the qualifier when the source
@@ -5555,6 +5803,13 @@ impl Lowering<'_> {
                 ty => Some(self.layout.val_type(&ty)?),
             };
             return self.virtual_call(call, member, &arguments, &overriders, ty, insn);
+        }
+        // No override anywhere in the module, and the method still has a defined answer: Java's
+        // `Object.equals` is reference identity. Without this, every `x.equals(y)` on an `Object`,
+        // an interface, or a type variable reached the "no representation" arm below — `Object` is
+        // the engine's own reference type and is in neither the struct table nor the interface set.
+        if self.is_object_equals(member) {
+            return self.object_equals_identity(call, member, &arguments, insn);
         }
         // Only now: a method with no function index is abstract, and an abstract one is only ever
         // reached through the chain above. Looking it up first reported "outside this module" for every

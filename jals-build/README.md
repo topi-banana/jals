@@ -110,7 +110,7 @@ release = 21                       # javac --release N
 # target = 17                      # javac --target N  (only when release is unset)
 classpath = ["libs/guava.jar"]    # -classpath entries (jars or dirs)
 javac-flags = ["-Xlint:all"]      # appended verbatim, before the source files
-# native-packages = ["jals.io"]    # Java packages implemented in Rust (jals-wasm backend only)
+# native-packages = ["acme.io"]    # third-party Java packages implemented in Rust (jals-wasm only)
 
 # [build.resources]                # a sub-table, so it goes *after* every bare [build] key above
 # template = ["fabric.mod.json"]   # globs naming which resources are rendered as templates
@@ -222,10 +222,19 @@ nothing still leaves every dependency script cached.
 | `target`        | integer          | —                        | `--target N` — only when `release` is unset                                                                                                                     |
 | `classpath`     | array of strings | `[]`                     | `-classpath` (joined with the platform separator); omitted entirely when empty                                                                                  |
 | `javac-flags`   | array of strings | `[]`                     | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet                         |
+| `platform`      | string           | `"java.base"`            | the **platform library** this project's Java is written against, or `"none"` for a module that speaks only in primitives and arrays; controls linking, not analysis   |
 | `native-packages` | array of strings | `[]`                   | the **native packages** to link — Java packages whose `native` methods are implemented in Rust. `jals-wasm` backend only (see below)                            |
 | `resources`     | sub-table        | `{ template = [] }`      | how resources become jar members; `template` is the globs rendered rather than copied (see below). A sub-table, so it goes after every bare `[build]` key       |
 
-### Native packages
+### The platform and native packages
+
+`[build] platform` names the library supplying `java.lang` and friends. It defaults to the platform
+`jals` ships (`jals-platform`'s `java.base`), so a wasm project gets a `String` and a `System.out`
+by writing nothing; `platform = "none"` is the opt-out, and it is a real configuration rather than a
+degraded one — the smallest artifact this backend produces, analysed without `java.lang` too. The
+key controls **linking, not analysis**: every project's analysis indexes the platform, because the
+source being edited names `String` whatever the backend is, and a linking build changes only the
+*fidelity* those declarations are read at.
 
 A **native package** is a Java package whose `native` methods are implemented in Rust. Selecting one
 does two things: its Java is compiled into the same artifact the project is, and each `native`
@@ -234,11 +243,11 @@ method it declares becomes a WebAssembly **import** the runner links against the
 ```toml
 [build]
 backend = { type = "jals-wasm" }
-native-packages = ["jals.io"]
+native-packages = ["acme.io"]
 ```
 
 ```java
-import jals.io.Out;
+import acme.io.Out;
 
 public class Hello {
     public static void greet() {
@@ -253,11 +262,12 @@ Four things about this are worth stating, because each one is a rule rather than
 supplied to a module, and a class file has nowhere to put one — so `native-packages` beside a
 class-file backend is a manifest error, the same shape `[toolchain] runtime = "wasm"` beside one is.
 
-**Which packages exist is a property of the binary, not of the manifest.** `jals` ships `jals.io`;
-the browser playground ships its own; a program embedding this toolchain registers whatever it
-likes. A name this build does not offer is reported with the names it does. `jals build` refuses it;
-`jals lint` and the language server warn and carry on, exactly as they do for any other analysis
-input they cannot resolve.
+**Which packages exist is a property of the binary, not of the manifest.** `jals` ships the
+platform and `jals.io` ([`jals-platform`](../jals-platform/README.md)); the browser playground
+ships the same set over its own host; a program embedding this toolchain registers whatever it
+likes. A name this build does not offer is reported with the names it does. `jals build` refuses
+it; `jals lint` and the language server warn and carry on, exactly as they do for any other
+analysis input they cannot resolve.
 
 **A package's methods are not module exports.** Every `static` method of the *project* is exported
 under its bare name; a package's are not. Otherwise a library's internals would fill the list
@@ -266,7 +276,7 @@ second is dropped without a word — a package method could take a project metho
 from it.
 
 **The two halves cannot disagree about a signature.** An import is named by the declaring class's
-internal name and the method's name-with-descriptor (`jals/io/Out`, `writeChars([CII)V`), which are
+internal name and the method's name-with-descriptor (`acme/io/Out`, `writeChars([CII)V`), which are
 the two strings the Rust half registers under. One that spelled it differently produces an import
 nothing satisfies, refused when the module is instantiated with both spellings listed.
 
@@ -1065,8 +1075,8 @@ classpath. What is still missing is the _resolver_ above — turning **Maven coo
 classpath entries (POM walking + coordinate version conflict resolution + lockfile). Until
 then, a project lists explicit jar URLs/paths under `[dependencies]` (or jars/dirs under
 `[build] classpath`) by hand. JDK standard-library classes are not loaded this way either; the
-embedded `java.lang`/`java.util` stubs stand in for them (reading the JDK's `jimage`/`modules` is a
-separate, still-unwired step).
+platform package stands in for them (reading the JDK's `jimage`/`modules` is a separate,
+still-unwired step).
 
 ## 4. Packaging
 

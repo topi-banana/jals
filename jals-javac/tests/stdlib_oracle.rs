@@ -1,16 +1,19 @@
-//! Checks the embedded stdlib stubs against a real JDK's own signatures.
+//! Checks the platform package's Java against a real JDK's own signatures.
 //!
-//! `jals-hir` models `java.lang` / `java.util` / `java.io` as hand-written, signature-only Java
-//! stubs. That is a deliberate design choice — it keeps the analysis pure and `wasm32`-compatible,
-//! with no host file to find — but it changes character the moment a compiler *emits* from them.
-//! A stub that says `println(String)` where the JDK says `println(CharSequence)` produces a class
-//! file that loads happily and throws `NoSuchMethodError` on the first call, because nothing in the
-//! pipeline checks: type errors are the linter's job, and the linter is reading the same wrong stub.
+//! `jals-hir` embeds no Java at all: `java.lang` / `java.util` / `java.io` are a *package*
+//! (`jals-platform`), read at `LibraryFidelity::Signatures` by every host but a linking wasm
+//! build. That is a deliberate design choice — it keeps the analysis pure and `wasm32`-compatible,
+//! with no host file to find — but it changes character the moment a compiler *emits* from that
+//! text. A record that says `println(String)` where the JDK says `println(CharSequence)` produces
+//! a class file that loads happily and throws `NoSuchMethodError` on the first call, because
+//! nothing in the pipeline checks: type errors are the linter's job, and the linter is reading the
+//! same wrong record.
 //!
-//! So the stubs get an oracle. `$JAVA_HOME/lib/ct.sym` is the signature data `javac --release` reads:
-//! an ordinary zip whose entries are ordinary class files with their method bodies stripped. Reading
-//! it needs a host path, which is why this lives in a **test** — the product still sees only the
-//! stubs, and the `zip` crate is already the workspace's dev-only archive oracle.
+//! So the record gets an oracle. `$JAVA_HOME/lib/ct.sym` is the signature data `javac --release`
+//! reads: an ordinary zip whose entries are ordinary class files with their method bodies
+//! stripped. Reading it needs a host path, which is why this lives in a **test** — the product
+//! still sees only the package, and the `zip` crate is already the workspace's dev-only archive
+//! oracle.
 //!
 //! A missing JDK skips the checks rather than failing, matching the CLI tests' `javac_available()`
 //! convention.
@@ -22,6 +25,17 @@ use std::process::Command;
 use jals_classfile::{ClassFile, MethodDescriptor};
 use jals_hir::{DefKind, ItemOrigin, ProjectIndex};
 use jals_javac::desc::Descriptor;
+
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
 
 /// The running JDK's home directory and specification version, from the JVM itself.
 ///
@@ -58,7 +72,7 @@ const fn release_letter(version: u32) -> Option<char> {
 
 /// Every class the JDK ships for `release`, by internal name, as a parsed class file.
 ///
-/// Only the packages the stubs model are read: `ct.sym` holds every release of every module, and
+/// Only the packages the platform models are read: `ct.sym` holds every release of every module, and
 /// parsing all of it to check a few dozen types would dominate the test's runtime.
 fn jdk_classes(home: &std::path::Path, release: char) -> Vec<(String, ClassFile)> {
     const PACKAGES: &[&str] = &["java/lang/", "java/util/", "java/io/"];
@@ -127,22 +141,56 @@ fn field_signatures(class: &ClassFile) -> BTreeSet<String> {
         .collect()
 }
 
-/// Every member of the embedded stubs must exist in the JDK with the identical descriptor.
+/// The public members the platform declares that the JDK does not, each because the wasm target
+/// leaves no JDK-shaped way to write it — as `(internal name, "name descriptor")`.
 ///
-/// The direction matters: the stubs are allowed to be a *subset* of the real API — that is the
-/// whole point of a stub — but every entry in that subset has to be real, because a compiler emits
-/// from it verbatim.
+/// A ledger, not an exemption: an entry here is a member a `jals`-backend JVM build can still
+/// select and a real JVM will refuse to link. So the test fails for an entry that stops being a
+/// divergence as well, and the list only shrinks by somebody deleting a line.
+/// Implementation types `ct.sym` does not record, by fully-qualified name.
+///
+/// `ct.sym` is the *API* of a release: a private nested class is not part of it. `ArrayList.Itr` is
+/// one — the platform needs a class to hold the list and the cursor, and the JDK's own iterator is
+/// private in exactly the same way. A ledger, not an exemption: an entry here that `ct.sym` *does*
+/// record fails, so the list only shrinks by somebody deleting a line.
+///
+/// Keyed by the FQN rather than an internal name because a nested type's string-only internal
+/// spelling renders `/` where a class file has `$`, and the ledger should name the type a reader
+/// can find in the source.
+const PRIVATE_TYPES: &[&str] = &["java.util.ArrayList.Itr"];
+
+const DIVERGENCES: &[(&str, &str)] = &[
+    // `System.out` and `System.err` are built in `java.lang`, and the JDK's route to a stream —
+    // `FileOutputStream` over a `FileDescriptor` — is a type hierarchy this platform does not have.
+    // A constructor taking the host's stream number is the only one a class in another package
+    // can reach.
+    ("java/io/PrintStream", "<init> (I)V"),
+    // The JDK's one `arraycopy(Object, int, Object, int, int)` tells arrays apart reflectively. An
+    // `Object` here is the engine's `anyref` with no such step, so the choice is made by overload
+    // selection at the call site instead (`System.java`'s class comment).
+    ("java/lang/System", "arraycopy ([CI[CII)V"),
+    ("java/lang/System", "arraycopy ([II[III)V"),
+    ("java/lang/System", "arraycopy ([JI[JII)V"),
+    ("java/lang/System", "arraycopy ([BI[BII)V"),
+    ("java/lang/System", "arraycopy ([DI[DII)V"),
+];
+
+/// Every public member of the platform's record must exist in the JDK with the identical
+/// descriptor, [`DIVERGENCES`] aside.
+///
+/// The direction matters: the record is allowed to be a *subset* of the real API, but every entry
+/// in that subset has to be real, because a compiler emits from it verbatim.
 #[test]
-fn every_stdlib_stub_member_exists_in_the_real_jdk() {
-    // A missing JDK stands the test down. It says so: this is the *only* check that the embedded
-    // stubs match the signatures a real JVM will link against, and a signature that drifted would
-    // otherwise surface as a `NoSuchMethodError` at run time rather than here.
+fn every_platform_member_exists_in_the_real_jdk() {
+    // A missing JDK stands the test down. It says so: this is the *only* check that the platform
+    // package matches the signatures a real JVM will link against, and a signature that drifted
+    // would otherwise surface as a `NoSuchMethodError` at run time rather than here.
     let Some((home, version)) = jdk() else {
-        eprintln!("note: no JDK on this host; the stdlib stubs went unchecked");
+        eprintln!("note: no JDK on this host; the platform package went unchecked");
         return;
     };
     let Some(release) = release_letter(version) else {
-        eprintln!("note: JDK {version} has no `ct.sym` release letter; the stubs went unchecked");
+        eprintln!("note: JDK {version} has no `ct.sym` release letter; the package went unchecked");
         return;
     };
     let jdk_classes = jdk_classes(&home, release);
@@ -151,19 +199,32 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
         "found no java.lang/java.util/java.io signatures for release {release} in ct.sym"
     );
 
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&[]).with_stdlib().build());
+    let index =
+        jals_exec::block_on_inline(ProjectIndex::builder(&[]).with_library(&platform()).build());
     let mut checked = 0usize;
     let mut wrong = Vec::new();
+    // Every ledger entry starts unmatched; one the platform no longer declares is reported below.
+    let mut stale: BTreeSet<(String, String)> = DIVERGENCES
+        .iter()
+        .map(|&(internal, signature)| (internal.to_owned(), signature.to_owned()))
+        .collect();
+    let mut stale_private: BTreeSet<&str> = PRIVATE_TYPES.iter().copied().collect();
 
     for (id, item) in index.items() {
-        if item.origin != ItemOrigin::Stdlib {
+        if !matches!(item.origin, ItemOrigin::Library(_)) {
             continue;
         }
         let internal = Descriptor::internal_name(item.fqn.as_str());
         let Some((_, class)) = jdk_classes.iter().find(|(name, _)| *name == internal) else {
+            if stale_private.remove(item.fqn.as_str()) {
+                continue;
+            }
             wrong.push(format!("{internal}: no such class in the JDK"));
             continue;
         };
+        // A type the ledger calls private is one the JDK records after all, which means it is API
+        // and has to be checked like any other.
+        stale_private.remove(item.fqn.as_str());
         let methods = method_signatures(class);
         let fields = field_signatures(class);
 
@@ -172,6 +233,13 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
             // Inherited members are reachable from `members_of` but are declared elsewhere; only
             // this class's own declarations can be looked up in this class file.
             if member.owner != id {
+                continue;
+            }
+            // `ct.sym` records API, and this text is an implementation as well as a record: its
+            // private state and helpers are guaranteed absent there. `protected` has no bit of its
+            // own and so goes unchecked with package-private — the price of not reading modifiers
+            // back out of the syntax tree.
+            if !member.modifiers.is_public {
                 continue;
             }
             let (name, expected) = match member.kind {
@@ -195,22 +263,42 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
                     };
                     (name, (&methods, MethodDescriptor::to_string(&descriptor)))
                 }
-                // An enum constant is a field of its own type; the stubs declare none.
+                // An enum constant is a field of its own type; the platform declares none.
                 _ => continue,
             };
             let (declared, descriptor) = expected;
             checked += 1;
             let signature = format!("{name} {descriptor}");
-            if !declared.contains(&signature) {
-                wrong.push(format!("{internal}.{signature} is not declared by the JDK"));
+            let listed = DIVERGENCES.contains(&(internal.as_str(), signature.as_str()));
+            if listed {
+                stale.remove(&(internal.clone(), signature.clone()));
+            }
+            match (declared.contains(&signature), listed) {
+                (true, true) => wrong.push(format!(
+                    "{internal}.{signature} is listed in DIVERGENCES but the JDK declares it"
+                )),
+                (false, false) => {
+                    wrong.push(format!("{internal}.{signature} is not declared by the JDK"));
+                }
+                _ => {}
             }
         }
     }
+    wrong.extend(stale.into_iter().map(|(internal, signature)| {
+        format!(
+            "{internal}.{signature} is listed in DIVERGENCES but the platform does not declare it"
+        )
+    }));
+    wrong.extend(
+        stale_private.into_iter().map(|internal| {
+            format!("{internal} is listed in PRIVATE_TYPES but the JDK records it")
+        }),
+    );
 
-    assert!(checked > 50, "only {checked} stub members were checked");
+    assert!(checked > 50, "only {checked} platform members were checked");
     assert!(
         wrong.is_empty(),
-        "{} stub member(s) do not match the JDK:\n{}",
+        "{} platform member(s) do not match the JDK:\n{}",
         wrong.len(),
         wrong.join("\n")
     );

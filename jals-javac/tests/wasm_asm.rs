@@ -13,8 +13,8 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_javac::wasm::{
-    CompType, ExportKind, FieldType, Func, Global, HeapType, Insn, Instr, Module, NumOp, Numeric,
-    RefType, StorageType, SubType, ValType,
+    CompType, ExportKind, FieldType, Func, Global, HeapType, ImportKind, Insn, Instr, Module,
+    NumOp, Numeric, RefType, StorageType, SubType, ValType,
 };
 
 /// Whether a tool that understands WebAssembly 3.0 is on this host. Like the JVM-backed tests, a
@@ -663,6 +663,84 @@ fn an_import_carries_both_of_its_names_into_the_bytes() {
     );
     assert!(text.contains("answer(I)I"), "the field name is encoded");
     assert_eq!(module.imports.len(), 1);
-    assert_eq!(module.imports[0].params, vec![ValType::I32]);
-    assert_eq!(module.imports[0].results, vec![ValType::I32]);
+    let ImportKind::Function { params, results } = &module.imports[0].kind else {
+        panic!("a host function import: {:?}", module.imports[0].kind);
+    };
+    assert_eq!(params, &vec![ValType::I32]);
+    assert_eq!(results, &vec![ValType::I32]);
+}
+
+/// A module that imports a **library's** function, global, and tag, and declares the shared type
+/// group they are all expressed in.
+///
+/// The shape a project module linked against a precompiled `java.base` has. Two things about it are
+/// only decidable by a validator: a shared import's type index names a declared type rather than
+/// the singleton entry a host import gets, and a global or tag import occupies *its own* index
+/// space — so a `call` still names a function index while a `global.get` names a global one. The
+/// engine's side of the arrangement is pinned by `jals-build`'s `wasm_linking` test; this one pins
+/// the encoding.
+fn linked_module() -> Module {
+    let mut module = Module::new();
+    // The group both modules declare identically: a struct, the tag's payload, and the function
+    // types the imports name.
+    let point = module.add_type(SubType::plain(CompType::Struct(vec![FieldType {
+        storage: StorageType::Val(ValType::I32),
+        mutable: true,
+    }])));
+    let payload = signature(&mut module, vec![ValType::I32], Vec::new());
+    let make = signature(
+        &mut module,
+        vec![ValType::I32],
+        vec![ValType::Ref(RefType::nullable(HeapType::Concrete(point)))],
+    );
+    module.begin_group();
+    let gives_i32 = signature(&mut module, Vec::new(), vec![ValType::I32]);
+
+    let make_index = module.add_shared_import("java.base".to_owned(), "make".to_owned(), make);
+    let counter = module.add_global_import(
+        "java.base".to_owned(),
+        "counter".to_owned(),
+        ValType::I32,
+        true,
+    );
+    let boom = module.add_tag_import("java.base".to_owned(), "boom".to_owned(), payload);
+    assert_eq!(
+        (make_index, counter, boom),
+        (0, 0, 0),
+        "each import takes the first index of its own space"
+    );
+    assert_eq!(module.func_index(0), 1, "one function import precedes it");
+
+    // `use()` calls the shared function, drops the reference, and reads the imported global.
+    let mut use_ = Insn::new();
+    use_.i32_const(3)
+        .call(make_index)
+        .drop()
+        .global_get(counter);
+    module.funcs.push(Func {
+        type_index: gives_i32,
+        locals: Vec::new(),
+        body: use_.into_body(),
+    });
+    // `raise()` throws through the imported tag, with its payload on the stack.
+    let mut raise = Insn::new();
+    raise.i32_const(1).throw(boom);
+    module.funcs.push(Func {
+        type_index: payload,
+        locals: Vec::new(),
+        body: raise.into_body(),
+    });
+
+    export(&mut module, "use", 0);
+    export(&mut module, "raise", 1);
+    module
+}
+
+#[test]
+fn a_module_that_imports_a_librarys_values_validates() {
+    validate(
+        &linked_module()
+            .finish()
+            .expect("a module whose lengths all fit"),
+    );
 }

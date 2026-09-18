@@ -333,7 +333,9 @@ impl ProjectWorkspace {
             classfiles,
             library_sources,
             source_dep_sources,
-            Vec::new(),
+            // A bare workspace is one whose manifest could not be read, and its documents are
+            // still Java: without the platform every `String` in one reports as unresolved.
+            crate::packages::Packages::default_sources(),
             BTreeMap::new(),
             feature_set,
             build_features,
@@ -376,7 +378,7 @@ impl ProjectWorkspace {
         classfiles: &[jals_classfile::ClassFile],
         library_sources: Vec<FileKey>,
         source_dep_sources: Vec<FileKey>,
-        native_sources: Vec<jals_editor::PackageSource>,
+        package_sources: Vec<jals_editor::PackageSource>,
         materialized: BTreeMap<FileKey, PathBuf>,
         feature_set: FeatureSet,
         build_features: BTreeSet<String>,
@@ -386,7 +388,7 @@ impl ProjectWorkspace {
             project_sources,
             library_sources,
             source_dep_sources,
-            native_sources,
+            package_sources,
             feature_set,
             // What each project file's `#[cfg(feature = "…")]` evaluates against (used only
             // when `feature_set` enables the `attributes` dialect).
@@ -519,7 +521,11 @@ impl DetachedWorkspace {
                 // anchor a native aggregate to at all. The `Exec::inline()` this constructor
                 // carries is right here: no I/O to overlap, over a handful of files.
                 MemoryStorage::memory(CodeTree::default()),
-                ProjectLayout::default(),
+                ProjectLayout {
+                    // A document under no project is still Java; see `Packages::default_sources`.
+                    package_sources: crate::packages::Packages::default_sources(),
+                    ..ProjectLayout::default()
+                },
                 // Rootless: every key this group can produce is registered in the host's table as
                 // it is mounted, so the root is never consulted. Should one ever escape the table,
                 // the rootless join renders no address rather than inventing one.

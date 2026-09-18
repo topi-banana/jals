@@ -1,0 +1,364 @@
+package java.lang;
+
+/**
+ * A sequence of {@code char} values.
+ *
+ * <p>A {@code String} here is a {@code char[]} and nothing else — no offset, no shared backing
+ * array, no interning. Every instance owns its characters, so {@link #substring} copies. That is
+ * the simple implementation rather than the JDK's, and on a target whose collector is the
+ * embedder's it is also the one with no aliasing to reason about.
+ *
+ * <p>There is no string literal on this target yet: the backend refuses one. A constant this class
+ * needs is therefore written as a {@code char[]} initialiser and wrapped once in a {@code static}
+ * field, which is what every constant in this package looks like.
+ *
+ * <p>{@link #toUpperCase} and {@link #toLowerCase} map ASCII only, and say so rather than
+ * pretending otherwise: full Unicode case mapping is a table this package does not carry.
+ */
+public final class String implements CharSequence, Comparable<String> {
+
+    /** {@code "null"}, for the one place a null reference is rendered rather than refused. */
+    private static final char[] NULL_TEXT = {'n', 'u', 'l', 'l'};
+
+    private static final String NULL = new String(NULL_TEXT, 0, NULL_TEXT.length);
+
+    /** The first code point that needs a surrogate pair. */
+    private static final int MIN_SUPPLEMENTARY = 0x10000;
+
+    /** The last code point Unicode defines. */
+    private static final int MAX_CODE_POINT = 0x10FFFF;
+
+    private final char[] value;
+
+    /** An empty string. */
+    public String() {
+        this.value = new char[0];
+    }
+
+    /** A string holding a copy of every character in {@code chars}. */
+    public String(char[] chars) {
+        this(chars, 0, chars.length);
+    }
+
+    /** A string holding a copy of {@code count} characters from {@code chars} at {@code offset}. */
+    public String(char[] chars, int offset, int count) {
+        // `count > length - offset` rather than `offset + count > length`, which is the JDK's own
+        // idiom: the sum overflows, and a call it wrapped past this check would be refused by the
+        // copy loop below with the wrong exception after allocating an array the caller never asked
+        // for. `offset` is known non-negative by the test before it, so the difference cannot.
+        if (offset < 0 || count < 0 || count > chars.length - offset) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        char[] copied = new char[count];
+        for (int i = 0; i < count; i++) {
+            copied[i] = chars[offset + i];
+        }
+        this.value = copied;
+    }
+
+    /** A string with the same characters as {@code other}. */
+    public String(String other) {
+        this(other.value, 0, other.value.length);
+    }
+
+    @Override
+    public int length() {
+        return this.value.length;
+    }
+
+    /** Whether this string has no characters. */
+    public boolean isEmpty() {
+        return this.value.length == 0;
+    }
+
+    @Override
+    public char charAt(int index) {
+        if (index < 0 || index >= this.value.length) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        return this.value[index];
+    }
+
+    /** A copy of this string's characters. */
+    public char[] toCharArray() {
+        char[] out = new char[this.value.length];
+        for (int i = 0; i < this.value.length; i++) {
+            out[i] = this.value[i];
+        }
+        return out;
+    }
+
+    /** The characters from {@code begin} to the end. */
+    public String substring(int begin) {
+        return substring(begin, this.value.length);
+    }
+
+    /** The characters in {@code [begin, end)}. */
+    public String substring(int begin, int end) {
+        if (begin < 0 || end > this.value.length || begin > end) {
+            throw new StringIndexOutOfBoundsException();
+        }
+        return new String(this.value, begin, end - begin);
+    }
+
+    /** This string followed by {@code other}. */
+    public String concat(String other) {
+        // A `null` is dereferenced rather than treated as empty, which is what the JDK does: the
+        // early-out is for an *empty* string, and admitting `null` to it turns a caught mistake
+        // into a silently wrong answer.
+        if (other.value.length == 0) {
+            return this;
+        }
+        char[] joined = new char[this.value.length + other.value.length];
+        for (int i = 0; i < this.value.length; i++) {
+            joined[i] = this.value[i];
+        }
+        for (int i = 0; i < other.value.length; i++) {
+            joined[this.value.length + i] = other.value[i];
+        }
+        return new String(joined, 0, joined.length);
+    }
+
+    /**
+     * The index of the first {@code ch} at or after {@code from}, or {@code -1}.
+     *
+     * <p>{@code ch} is a <em>code point</em> and not a widened {@code char}, which is what the
+     * {@code int} parameter is for. Truncating it to sixteen bits matches both too much and too
+     * little: {@code 0x10061} would find an {@code 'a'} that is not there, and a supplementary
+     * code point — which this string holds as a surrogate pair — would never be found at all.
+     */
+    public int indexOf(int ch, int from) {
+        int start = from < 0 ? 0 : from;
+        if (ch < 0 || ch > MAX_CODE_POINT) {
+            return -1;
+        }
+        if (ch < MIN_SUPPLEMENTARY) {
+            for (int i = start; i < this.value.length; i++) {
+                if (this.value[i] == (char) ch) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        char high = highSurrogate(ch);
+        char low = lowSurrogate(ch);
+        // `i < length - 1` and not `i + 1 < length`: `from` is a caller's number and
+        // `Integer.MAX_VALUE` is a legal one, where `i + 1` wraps to `Integer.MIN_VALUE`, passes the
+        // guard, and indexes past the array. Subtracting cannot overflow, because a length is never
+        // negative.
+        for (int i = start; i < this.value.length - 1; i++) {
+            if (this.value[i] == high && this.value[i + 1] == low) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The index of the first {@code ch}, or {@code -1}. */
+    public int indexOf(int ch) {
+        return indexOf(ch, 0);
+    }
+
+    /** The index of the last {@code ch}, or {@code -1}; a code point, as {@link #indexOf(int)}. */
+    public int lastIndexOf(int ch) {
+        if (ch < 0 || ch > MAX_CODE_POINT) {
+            return -1;
+        }
+        if (ch < MIN_SUPPLEMENTARY) {
+            for (int i = this.value.length - 1; i >= 0; i--) {
+                if (this.value[i] == (char) ch) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        char high = highSurrogate(ch);
+        char low = lowSurrogate(ch);
+        for (int i = this.value.length - 2; i >= 0; i--) {
+            if (this.value[i] == high && this.value[i + 1] == low) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** The leading unit of {@code codePoint}'s surrogate pair. */
+    private static char highSurrogate(int codePoint) {
+        return (char) (0xD800 + ((codePoint - MIN_SUPPLEMENTARY) >> 10));
+    }
+
+    /** The trailing unit of {@code codePoint}'s surrogate pair. */
+    private static char lowSurrogate(int codePoint) {
+        return (char) (0xDC00 + (codePoint & 0x3FF));
+    }
+
+    /** Whether this string begins with {@code prefix}. */
+    public boolean startsWith(String prefix) {
+        if (prefix.value.length > this.value.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.value.length; i++) {
+            if (this.value[i] != prefix.value[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether this string ends with {@code suffix}. */
+    public boolean endsWith(String suffix) {
+        int offset = this.value.length - suffix.value.length;
+        if (offset < 0) {
+            return false;
+        }
+        for (int i = 0; i < suffix.value.length; i++) {
+            if (this.value[offset + i] != suffix.value[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether this string holds {@code needle} anywhere. */
+    public boolean contains(CharSequence needle) {
+        return indexOf(needle.toString()) >= 0;
+    }
+
+    /** The index at which {@code needle} first occurs, or {@code -1}. */
+    public int indexOf(String needle) {
+        int limit = this.value.length - needle.value.length;
+        for (int start = 0; start <= limit; start++) {
+            int i = 0;
+            while (i < needle.value.length && this.value[start + i] == needle.value[i]) {
+                i++;
+            }
+            if (i == needle.value.length) {
+                return start;
+            }
+        }
+        return -1;
+    }
+
+    /** This string with every ASCII letter upper-cased; other characters unchanged. */
+    public String toUpperCase() {
+        char[] out = toCharArray();
+        for (int i = 0; i < out.length; i++) {
+            out[i] = Character.toUpperCase(out[i]);
+        }
+        return new String(out, 0, out.length);
+    }
+
+    /** This string with every ASCII letter lower-cased; other characters unchanged. */
+    public String toLowerCase() {
+        char[] out = toCharArray();
+        for (int i = 0; i < out.length; i++) {
+            out[i] = Character.toLowerCase(out[i]);
+        }
+        return new String(out, 0, out.length);
+    }
+
+    /** This string without leading or trailing characters at or below {@code U+0020}. */
+    public String trim() {
+        int start = 0;
+        int end = this.value.length;
+        while (start < end && this.value[start] <= ' ') {
+            start++;
+        }
+        while (end > start && this.value[end - 1] <= ' ') {
+            end--;
+        }
+        return substring(start, end);
+    }
+
+    /** Whether {@code other} is a string with the same characters. */
+    @Override
+    public boolean equals(Object other) {
+        if (other == this) {
+            return true;
+        }
+        if (!(other instanceof String)) {
+            return false;
+        }
+        String that = (String) other;
+        if (that.value.length != this.value.length) {
+            return false;
+        }
+        for (int i = 0; i < this.value.length; i++) {
+            if (this.value[i] != that.value[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public int compareTo(String other) {
+        int shorter =
+            this.value.length < other.value.length ? this.value.length : other.value.length;
+        for (int i = 0; i < shorter; i++) {
+            if (this.value[i] != other.value[i]) {
+                return this.value[i] - other.value[i];
+            }
+        }
+        return this.value.length - other.value.length;
+    }
+
+    /** The JDK's hash: {@code s[0]*31^(n-1) + s[1]*31^(n-2) + ... + s[n-1]}. */
+    @Override
+    public int hashCode() {
+        int hash = 0;
+        for (int i = 0; i < this.value.length; i++) {
+            hash = 31 * hash + this.value[i];
+        }
+        return hash;
+    }
+
+    @Override
+    public String toString() {
+        return this;
+    }
+
+    /** {@code value}'s rendering, or {@code "null"}. */
+    public static String valueOf(Object value) {
+        if (value == null) {
+            return NULL;
+        }
+        return value.toString();
+    }
+
+    /** A string holding {@code chars}. */
+    public static String valueOf(char[] chars) {
+        return new String(chars, 0, chars.length);
+    }
+
+    /** A one-character string. */
+    public static String valueOf(char value) {
+        char[] one = {value};
+        return new String(one, 0, 1);
+    }
+
+    /** {@code value} in base ten. */
+    public static String valueOf(int value) {
+        return Integer.toString(value);
+    }
+
+    /** {@code value} in base ten. */
+    public static String valueOf(long value) {
+        return Long.toString(value);
+    }
+
+    /** {@code "true"} or {@code "false"}. */
+    public static String valueOf(boolean value) {
+        return Boolean.toString(value);
+    }
+
+    /** {@code value} in Java's decimal layout. */
+    public static String valueOf(double value) {
+        return Double.toString(value);
+    }
+
+    /** {@code value} in Java's decimal layout, at {@code float} width. */
+    public static String valueOf(float value) {
+        return Float.toString(value);
+    }
+}

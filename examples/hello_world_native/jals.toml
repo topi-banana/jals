@@ -2,13 +2,17 @@
 name = "hello_world_native"
 version = "0.1.0"
 
-# One WebAssembly module for the whole project, and a Java package whose implementation is Rust.
+# One WebAssembly module for the whole project, with the platform library linked into it.
 #
-# `native-packages` is the pair's other half: `jals.io` publishes Java that is compiled into this
-# same module, and one host import per `native` method it declares. Only this backend can take one
-# in — a class file has nowhere to put a host function — so `jals.toml` refuses the two apart.
+# There is no `native-packages` line, and that is the point: `java.base` is not a package a project
+# opts into, it is what `java.lang` *is* on this target. `[build] platform` names it and defaults to
+# it, so a wasm project gets a `String` and a `System.out` by writing nothing — and a project that
+# wants the smallest possible module says `platform = "none"` instead.
+#
+# `native-packages` is still there, for a *third-party* package: Java plus the Rust behind its
+# `native` methods, which only this backend can take in because a class file has nowhere to put a
+# host function.
 [build]
 backend = { type = "jals-wasm" }
-native-packages = ["jals.io"]
 source-dirs = ["src/main/java"]
 classes-dir = "target/classes"   # where project.wasm lands (also what `jals clean` removes)

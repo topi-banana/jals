@@ -35,6 +35,8 @@ extern crate alloc;
 mod diagnostic;
 mod rules;
 mod suppress;
+#[cfg(test)]
+mod test_support;
 
 use alloc::vec::Vec;
 use core::cell::OnceCell;
@@ -639,7 +641,7 @@ mod tests {
         // Index-aware (with stdlib): the undeclared checked exception is flagged.
         let index = block_on_inline(
             jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())])
-                .with_stdlib()
+                .with_library(&crate::test_support::TestPlatform::records())
                 .build(),
         );
         let analysis = block_on_inline(jals_hir::FileAnalysis::of(&parse.syntax()));
@@ -664,7 +666,11 @@ mod tests {
     fn indexed(src: &str, config: &Config) -> Vec<Diagnostic> {
         block_on_inline(async {
             let parse = jals_syntax::Parse::parse(src).await;
+            // The platform, as every host resolves one. Without it the index has no `java.lang`
+            // at all, so a `String` in the fixture reads as a second unresolved name.
+            let platform = crate::test_support::TestPlatform::records();
             let index = jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())])
+                .with_library(&platform)
                 .build()
                 .await;
             let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;

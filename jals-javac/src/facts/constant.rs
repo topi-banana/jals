@@ -790,15 +790,15 @@ mod tests {
     ///
     /// The chain is spelled out rather than hidden behind a helper returning a [`Facts`]: a
     /// `TypedFile` borrows the binding, which borrows the analysis *and* the index, so nothing
-    /// shorter than the whole chain can be handed back. The stdlib stubs are folded in for the same
-    /// reason `jals-javac/tests/compile.rs` does it — a `String` label needs `java.lang.String` to
-    /// resolve, and they are compile-time constants parsed in memory, not a host read.
+    /// shorter than the whole chain can be handed back. The platform package is folded in for the
+    /// same reason `jals-javac/tests/compile.rs` does it — a `String` label needs `java.lang.String`
+    /// to resolve, and its Java is a compile-time constant parsed in memory, not a host read.
     fn keys(source: &str) -> Vec<Result<CaseKey>> {
         let root = block_on_inline(jals_syntax::Parse::parse(source)).syntax();
         let analysis = block_on_inline(FileAnalysis::of(&root));
         let index = block_on_inline(
             ProjectIndex::builder(&[(FileId(0), root.clone())])
-                .with_stdlib()
+                .with_library(&crate::test_support::TestPlatform::records())
                 .build(),
         );
         let semantics = analysis.in_project(&index, FileId(0));
@@ -950,7 +950,7 @@ mod tests {
         let analysis = block_on_inline(FileAnalysis::of(&root));
         let index = block_on_inline(
             ProjectIndex::builder(&[(FileId(0), root.clone())])
-                .with_stdlib()
+                .with_library(&crate::test_support::TestPlatform::records())
                 .build(),
         );
         let semantics = analysis.in_project(&index, FileId(0));

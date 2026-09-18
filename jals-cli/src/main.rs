@@ -1,7 +1,7 @@
 //! `jals` command-line interface.
 
 mod migrate;
-mod natives;
+mod packages;
 mod report;
 mod session;
 mod shell;
@@ -980,7 +980,7 @@ impl BuildArgs {
             tree,
             &inputs,
             Lowering::Build,
-            natives::Natives::select(session.shell(), &manifest)?,
+            packages::Packages::resolve(session.shell(), &manifest)?,
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
@@ -1151,7 +1151,7 @@ impl RunArgs {
         // One selection for the whole command: the same packages are compiled into the module and
         // linked when it is instantiated, so resolving twice would build a second console buffer
         // for the half that runs.
-        let natives = natives::Natives::select(session.shell(), &manifest)?;
+        let natives = packages::Packages::resolve(session.shell(), &manifest)?;
         // The compile step goes through the same `[build] backend` selection `jals build` uses, so a
         // manifest asking for the in-process compiler gets it here too. The run step is selected
         // independently from `[toolchain] runtime`: `"builtin"` is the in-process dummy, anything
@@ -1247,7 +1247,7 @@ impl RunArgs {
         &self,
         session: &Session,
         outcome: &jals_build::BackendOutcome,
-        natives: &jals_native::NativePackageSet,
+        natives: &jals_native::PackageSelection,
         progress: &jals_progress::Progress,
     ) -> Result<ExitCode> {
         let module = outcome
@@ -1378,7 +1378,7 @@ impl TestArgs {
         .await?;
         // One selection for the whole command, for the reason `jals run` resolves one: the module
         // the backend compiles and the module the launcher instantiates are the same module.
-        let natives = natives::Natives::select(session.shell(), &manifest)?;
+        let natives = packages::Packages::resolve(session.shell(), &manifest)?;
         let plan = CompilePlan::prepare(
             &manifest,
             &root,
@@ -1897,23 +1897,12 @@ impl LintProject {
     /// best-effort about every other input it cannot resolve (an unbuilt dependency, a missing
     /// classpath entry), and refusing to lint a file because one package name is misspelled would
     /// be the one input that stops the command outright.
-    fn native_layout_sources(
+    fn layout_packages(
         shell: &std::sync::Arc<Shell>,
         manifest: &Manifest,
     ) -> Vec<jals_editor::PackageSource> {
-        match natives::Natives::select(shell, manifest) {
-            Ok(selection) => selection
-                .sources()
-                .map(|(_, source)| jals_editor::PackageSource {
-                    path: source.path.to_owned(),
-                    text: source.text.to_owned(),
-                })
-                .collect(),
-            Err(error) => {
-                shell.warn(format_args!("{error:#}"));
-                Vec::new()
-            }
-        }
+        let selection = packages::Packages::resolve_reporting(shell, manifest);
+        jals_editor::ProjectLayout::package_sources_of(&selection, manifest.links_packages())
     }
 
     async fn open(
@@ -1924,13 +1913,13 @@ impl LintProject {
     ) -> Result<Self> {
         let shell = session.shell();
         let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
-            return Self::detached(start_dir, exec).await;
+            return Self::detached(start_dir, exec, shell).await;
         };
         let manifest = match Manifest::from_file(&manifest_path).await {
             Ok(manifest) => manifest,
             Err(error) => {
                 shell.warn(format_args!("project analysis inputs unavailable: {error}"));
-                return Self::detached(start_dir, exec).await;
+                return Self::detached(start_dir, exec, shell).await;
             }
         };
         // `Path::new("jals.toml").parent()` is `Some("")`, not `None`, so the fallback below only
@@ -1964,7 +1953,7 @@ impl LintProject {
                 shell.warn(format_args!(
                     "project analysis inputs unavailable: {error:#}"
                 ));
-                return Self::detached(start_dir, exec).await;
+                return Self::detached(start_dir, exec, shell).await;
             }
         };
         // The project's analysis inputs, best-effort: the classpath `.class` from `[build]
@@ -2032,7 +2021,7 @@ impl LintProject {
                     layout: jals_editor::ProjectLayout {
                         feature_set: manifest.feature_set(),
                         build_features: features.into_features(),
-                        native_sources: Self::native_layout_sources(shell, &manifest),
+                        package_sources: Self::layout_packages(shell, &manifest),
                         ..jals_editor::ProjectLayout::new(source_roots)
                     },
                 });
@@ -2043,7 +2032,7 @@ impl LintProject {
             // Resolved once by the assembly, so no host re-lowers `[build] source-dirs` itself.
             source_roots: inputs.source_roots,
             feature_set: inputs.feature_set,
-            native_sources: Self::native_layout_sources(shell, &manifest),
+            package_sources: Self::layout_packages(shell, &manifest),
             // What each project file's `#[cfg(feature = "…")]` evaluates against, read only when
             // `feature_set` enables the `attributes` dialect — so an attribute-free project's lint
             // output is independent of `--features`.
@@ -2067,14 +2056,22 @@ impl LintProject {
     /// An empty scope list is what makes the snapshot empty, so nothing is read from disk. Every
     /// reported file is then mounted, which makes the index exactly the files the caller named —
     /// what a run outside a project always had.
-    async fn detached(anchor: &Path, exec: &Exec) -> Result<Self> {
+    async fn detached(anchor: &Path, exec: &Exec, shell: &std::sync::Arc<Shell>) -> Result<Self> {
         let storage = NativeStorage::for_project_scoped(anchor, [], exec.clone())
             .await
             .with_context(|| format!("opening {} for analysis", anchor.display()))?;
         Ok(Self {
             root: anchor.to_path_buf(),
             storage,
-            layout: jals_editor::ProjectLayout::default(),
+            // The platform, even here. A file linted outside any project still says `String`, and
+            // without the packages this index has no `java.lang` at all — not the type, not the
+            // implicit `Object` supertype edge — so every reference into the standard library
+            // reports as an unresolved name. There is no manifest, so the defaults answer: the
+            // default platform, and no linking.
+            layout: jals_editor::ProjectLayout {
+                package_sources: Self::layout_packages(shell, &Manifest::default()),
+                ..jals_editor::ProjectLayout::default()
+            },
         })
     }
 
@@ -2303,7 +2300,7 @@ impl CompilePlan {
         tree: Vec<jals_build::BackendSource>,
         inputs: &HostProjectInputs,
         lowering: Lowering,
-        natives: jals_native::NativePackageSet,
+        natives: jals_native::PackageSelection,
         exec: &Exec,
         progress: jals_progress::Progress,
     ) -> Result<Self> {
@@ -2349,7 +2346,7 @@ impl CompilePlan {
         jals_build::BackendRequest {
             progress: &self.progress,
             tree: &self.tree,
-            // The in-process compiler reads its library signatures from the embedded stubs rather
+            // The in-process compiler reads its library signatures from the platform package rather
             // than from the classpath; wiring dependency classes in is what would let it compile
             // against them. The `javac` adapter takes the real classpath as a host input instead,
             // because its entries are paths and this request is portable.

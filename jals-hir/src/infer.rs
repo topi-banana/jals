@@ -1642,7 +1642,53 @@ impl<'a> Inferer<'a> {
         if tys.iter().all(|ty| ty == first) {
             return first.clone();
         }
+        // `null` beside a reference type is that reference type (JLS §15.25's reference
+        // conditional: the null type is assignable to every reference type, so the lub of the two
+        // is the other one). No hierarchy walk is needed for it, which is why this case is
+        // answerable where a *mixed* reference join still is not.
+        //
+        // Leaving it unknown is not a neutral "no answer": a consumer that has to give the
+        // expression a representation has nothing to give it. `cause == null ? null :
+        // cause.toString()` — the everyday shape — stopped a compile with a message naming no type
+        // at all.
+        if let Some(reference) = Self::join_with_null(&tys) {
+            return reference;
+        }
         Self::join_numeric(&tys)
+    }
+
+    /// The one reference type among arms that are otherwise all `null`, if there is exactly one.
+    ///
+    /// `Some` only when every arm is `Ty::Null` or that one type. Two *different* reference types
+    /// still need a least upper bound over the hierarchy, so they stay out.
+    ///
+    /// So does `null` beside a **primitive**, and that one is a gap rather than a case that does not
+    /// arise: JLS §15.25 classifies `flag ? null : 1` as a *reference* conditional — the null type
+    /// converts to no numeric type, so the numeric rule does not apply — and gives it
+    /// `lub(null, Integer)`, which is why unboxing one can throw. Answering it needs the boxed
+    /// wrapper's item, which needs the index this associated function does not take, so the
+    /// expression reaches [`join_numeric`](Inferer::join_numeric) and comes back `Unknown`: hover
+    /// shows no type and overload selection has nothing to rank the argument by. Widening this to
+    /// take `&self` is what would close it.
+    ///
+    /// A type variable is a reference type here, because JLS §15.25 gives `cond ? t : null` the
+    /// other operand's type whatever reference type it is. Leaving it out sent `return b ? v :
+    /// null` — the body of every generic container's accessor — to the numeric join, which answers
+    /// `Unknown`, and the wasm backend then refused a conditional whose type it could not name.
+    fn join_with_null(tys: &[Ty]) -> Option<Ty> {
+        let mut reference: Option<&Ty> = None;
+        for ty in tys {
+            match ty {
+                Ty::Null => {}
+                Ty::Class(_) | Ty::Array(_) | Ty::TypeVar { .. } => match reference {
+                    Some(seen) if seen != ty => return None,
+                    Some(_) => {}
+                    None => reference = Some(ty),
+                },
+                _ => return None,
+            }
+        }
+        reference.cloned()
     }
 
     /// The binary numeric promotion of every arm, when they are all numeric and it lands on one of

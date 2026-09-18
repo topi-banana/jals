@@ -12,6 +12,17 @@
 use jals_hir::{DefKind, FileId, ItemId, MemberId, MemberType, Overrides, ProjectIndex};
 use jals_syntax::SyntaxNode;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Parses each source (keeping the `SOURCE_FILE` nodes alive) and builds a [`ProjectIndex`].
 ///
 /// The embedded stdlib stubs are folded in because `java.lang.Object` has to be an *indexed* type
@@ -29,7 +40,11 @@ fn build(sources: &[&str]) -> (Vec<(FileId, SyntaxNode)>, ProjectIndex) {
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_stdlib().build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform())
+            .build(),
+    );
     (nodes, index)
 }
 
