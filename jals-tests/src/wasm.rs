@@ -912,9 +912,10 @@ impl CaseResult {
             }
             let root = parse.syntax();
             let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
-            // `ct.sym` only — no `with_stdlib`, for the reason `compile.rs` states: the embedded
-            // stubs are registered first and would *outrank* the real JDK's signatures, so this
-            // would score stub coverage under a compiler's name.
+            // `ct.sym` only — no `with_library`, for the reason `compile.rs` states: this harness
+            // scores a compiler against the JDK, so the signatures it resolves against have to be
+            // the JDK's and not whatever this repository's own platform package happens to
+            // declare.
             let index = jals_exec::block_on_inline(
                 ProjectIndex::builder(&[(FileId(0), root)])
                     .with_classpath(classpath)

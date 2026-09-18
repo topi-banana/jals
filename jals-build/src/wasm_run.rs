@@ -29,13 +29,20 @@
 //! implementer and an unreachable branch. A second engine is when the seam is worth having.
 
 use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::any::Any;
+use core::cell::RefCell;
 use core::fmt;
 
-use jals_native::{Args, NativeBindings, NativeError, NativeHost, NativeValue, RefSlot, Results};
+use jals_native::{
+    Args, HostId, NativeBindings, NativeError, NativeHost, NativeValue, RefSlot, Results,
+};
 use jals_progress::{Activity, Outcome, Progress};
 use tinywasm::types::{ImportType, WasmType};
 use tinywasm::{ExternItem, FuncContext, HostFunction, Imports, ModuleInstance, RefValue, Store};
@@ -302,15 +309,102 @@ impl fmt::Debug for ParsedModule {
     }
 }
 
+/// The host's table of things that outlive one call.
+///
+/// A [`RefSlot`] dies with the call that issued it, and a Java object an `ArrayList` element names
+/// must not. So a package asks the host to hold it: a **Rust object** behind a class's handle, or a
+/// **reference** the engine has rooted. The table is created once per run — in [`invoke`], beside
+/// the `Store` — and dropped with it, so nothing in it can outlive the module instance it names,
+/// and a handle left over from another run is [`NativeError::UnknownHandle`] rather than a stale
+/// pointer.
+#[derive(Default)]
+struct HostTable {
+    /// The next id to hand out. Monotonic, never reused: a released handle stays released, which is
+    /// what makes "the constructor did not run" distinguishable from "something else took its id".
+    next: u32,
+    entries: BTreeMap<u32, Entry>,
+}
+
+/// One entry: the two kinds a package may ask the host to keep.
+enum Entry {
+    /// A Rust object a Java class's `int` handle names.
+    Object(Box<dyn Any>),
+    /// A Java reference, rooted in the engine's collector by the `RefValue` itself.
+    Reference(RefValue),
+}
+
+impl HostTable {
+    /// Store a Rust object and hand out the id its Java side will carry.
+    fn store(&mut self, object: Box<dyn Any>) -> HostId {
+        let id = HostId::new(self.next);
+        self.next = self.next.saturating_add(1);
+        self.entries.insert(id.raw(), Entry::Object(object));
+        id
+    }
+
+    /// Take the object at `id` out, leaving the slot empty until it is put back.
+    fn take(&mut self, id: HostId) -> Result<Box<dyn Any>, NativeError> {
+        match self.entries.remove(&id.raw()) {
+            Some(Entry::Object(object)) => Ok(object),
+            Some(entry) => {
+                self.entries.insert(id.raw(), entry);
+                Err(NativeError::HostKind {
+                    expected: "a Rust object",
+                    found: "a retained reference",
+                })
+            }
+            None => Err(NativeError::UnknownHandle { id: id.raw() }),
+        }
+    }
+
+    /// Put an object back at its own id.
+    fn restore(&mut self, id: HostId, object: Box<dyn Any>) {
+        self.entries.insert(id.raw(), Entry::Object(object));
+    }
+
+    /// Drop whatever `id` names.
+    fn release(&mut self, id: HostId) -> Result<(), NativeError> {
+        self.entries
+            .remove(&id.raw())
+            .map(|_| ())
+            .ok_or_else(|| NativeError::UnknownHandle { id: id.raw() })
+    }
+
+    /// Root a reference by keeping the `RefValue` alive — its `AnyRef` holds the collector's own
+    /// root token, so an entry here is what keeps the object from being collected.
+    fn retain(&mut self, value: RefValue) -> HostId {
+        let id = HostId::new(self.next);
+        self.next = self.next.saturating_add(1);
+        self.entries.insert(id.raw(), Entry::Reference(value));
+        id
+    }
+
+    /// The reference `id` names, for the call that is asking.
+    fn restore_reference(&self, id: HostId) -> Result<RefValue, NativeError> {
+        match self.entries.get(&id.raw()) {
+            Some(Entry::Reference(value)) => Ok(value.clone()),
+            Some(Entry::Object(_)) => Err(NativeError::HostKind {
+                expected: "a retained reference",
+                found: "a Rust object",
+            }),
+            None => Err(NativeError::UnknownHandle { id: id.raw() }),
+        }
+    }
+}
+
 /// The engine, as a native binding sees it.
 ///
 /// Built per call and thrown away with it, which is what makes a [`RefSlot`] meaningful: the slots
 /// index *this* call's live references, so one from another call names nothing and cannot be made
-/// to.
+/// to. The [`HostTable`] beside it is the run's, and is what carries a value from one call to the
+/// next.
 struct EngineHost<'a> {
     ctx: FuncContext<'a>,
     /// Every non-null reference this call has made live, in the order slots were handed out.
     refs: Vec<RefValue>,
+    /// The run's table. Borrowed per access rather than held, so a binding that calls back into the
+    /// module — whose natives will reach the same table — cannot deadlock on it.
+    table: Rc<RefCell<HostTable>>,
 }
 
 impl EngineHost<'_> {
@@ -425,6 +519,40 @@ impl NativeHost for EngineHost<'_> {
         }
         Ok(())
     }
+
+    fn object_store(&mut self, object: Box<dyn Any>) -> Result<HostId, NativeError> {
+        Ok(self.table.borrow_mut().store(object))
+    }
+
+    fn object_take(&mut self, id: HostId) -> Result<Box<dyn Any>, NativeError> {
+        self.table.borrow_mut().take(id)
+    }
+
+    fn object_restore(&mut self, id: HostId, object: Box<dyn Any>) -> Result<(), NativeError> {
+        self.table.borrow_mut().restore(id, object);
+        Ok(())
+    }
+
+    fn object_drop(&mut self, id: HostId) -> Result<(), NativeError> {
+        self.table.borrow_mut().release(id)
+    }
+
+    fn reference_retain(&mut self, slot: RefSlot) -> Result<HostId, NativeError> {
+        let value = self.reference(slot)?.clone();
+        Ok(self.table.borrow_mut().retain(value))
+    }
+
+    fn reference_restore(&mut self, id: HostId) -> Result<RefSlot, NativeError> {
+        let value = self.table.borrow().restore_reference(id)?;
+        self.refs.push(value);
+        Ok(RefSlot::new(
+            u32::try_from(self.refs.len() - 1).unwrap_or(u32::MAX),
+        ))
+    }
+
+    fn reference_release(&mut self, id: HostId) -> Result<(), NativeError> {
+        self.table.borrow_mut().release(id)
+    }
 }
 
 /// Runs a `jals-wasm` module with the embedded interpreter.
@@ -518,7 +646,11 @@ impl WasmRunner {
         natives: &NativeBindings,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         let module = &module.0;
-        let imports = Self::link(module, natives)?;
+        // The run's table, made beside the `Store` and dropped with it. Every host function the
+        // module imports captures a clone, so a handle minted in one call resolves in the next —
+        // and stops resolving when the run ends, because the table goes with it.
+        let table = Rc::new(RefCell::new(HostTable::default()));
+        let imports = Self::link(module, natives, &table)?;
         let mut store = Store::default();
         // Instantiating in two halves rather than through `instantiate`, which is exactly these
         // two calls. Only the first is *linking* — a malformed module, an unknown import, a
@@ -597,7 +729,11 @@ impl WasmRunner {
     /// What is left to check is therefore only whether a name is bound at all — and because the
     /// import's field name carries the method's descriptor, a Rust half that spelled the signature
     /// differently shows up exactly here, as an unresolved import listing what *is* registered.
-    fn link(module: &tinywasm::Module, natives: &NativeBindings) -> Result<Imports, WasmRunError> {
+    fn link(
+        module: &tinywasm::Module,
+        natives: &NativeBindings,
+        table: &Rc<RefCell<HostTable>>,
+    ) -> Result<Imports, WasmRunError> {
         let mut imports = Imports::new();
         for import in module.imports() {
             let ImportType::Func(signature) = import.ty else {
@@ -617,11 +753,12 @@ impl WasmRunner {
                 });
             };
             let binding = binding.clone();
+            let table = Rc::clone(table);
             imports.define(
                 import.module,
                 import.name,
                 HostFunction::from_untyped(signature, move |ctx, args, results| {
-                    Self::dispatch(&binding, ctx, args, results)
+                    Self::dispatch(&binding, &table, ctx, args, results)
                 }),
             );
         }
@@ -631,6 +768,7 @@ impl WasmRunner {
     /// One call into a native binding: decode the arguments, run it, encode what it wrote back.
     fn dispatch(
         binding: &jals_native::NativeFn,
+        table: &Rc<RefCell<HostTable>>,
         ctx: FuncContext<'_>,
         args: &[tinywasm::WasmValue],
         results: &mut [tinywasm::WasmValue],
@@ -638,6 +776,7 @@ impl WasmRunner {
         let mut host = EngineHost {
             ctx,
             refs: Vec::new(),
+            table: Rc::clone(table),
         };
         let decoded: Vec<NativeValue> = args
             .iter()
@@ -757,9 +896,9 @@ mod tests {
     /// The whole shape of a native package in eight lines, which is what makes it a fixture: the
     /// Java declares one `native` method, the Rust binds the two strings the compiler derives from
     /// that declaration, and nothing between the halves restates a type.
-    fn answering_package(answer: i32) -> jals_native::NativePackage {
-        let mut package = jals_native::NativePackage::new("test.host", 1);
-        package.source(
+    fn answering_package(answer: i32) -> jals_native::JavaPackage {
+        let mut package = jals_native::JavaPackage::new("test.host", 1);
+        package.implementation(
             "test/host/Host.java",
             "package test.host;\npublic final class Host { public static native int answer(); }\n",
         );
@@ -775,12 +914,8 @@ mod tests {
     }
 
     /// One selection holding [`answering_package`].
-    fn answering_selection(answer: i32) -> jals_native::NativePackageSet {
-        let mut registry = jals_native::NativeRegistry::new();
-        registry.add(answering_package(answer));
-        registry
-            .select(&["test.host".to_owned()])
-            .expect("just registered")
+    fn answering_selection(answer: i32) -> jals_native::PackageSelection {
+        jals_native::PackageSelection::of([answering_package(answer)])
     }
 
     /// Compile one Java source with the wasm backend and hand back the module.
@@ -789,11 +924,11 @@ mod tests {
     /// needs no external tool and no committed binary — which is also what lets it run in the CI
     /// cell that has neither a JVM nor a wasm engine on the host.
     fn module(text: &str) -> Vec<u8> {
-        module_with(text, jals_native::NativePackageSet::empty())
+        module_with(text, jals_native::PackageSelection::empty())
     }
 
     /// [`module`], with a native package selected.
-    fn module_with(text: &str, natives: jals_native::NativePackageSet) -> Vec<u8> {
+    fn module_with(text: &str, natives: jals_native::PackageSelection) -> Vec<u8> {
         let bytes = text.as_bytes().to_vec();
         let tree = [BackendSource {
             path: RelativePath::parse("Main.java").expect("a valid path"),
@@ -897,17 +1032,12 @@ mod tests {
             answering_selection(1),
         );
 
-        let mut wrong = jals_native::NativeRegistry::new();
-        let mut package = jals_native::NativePackage::new("test.host", 1);
-        package.source("test/host/Host.java", "package test.host;\n");
+        let mut package = jals_native::JavaPackage::new("test.host", 1);
+        package.signature("test/host/Host.java", "package test.host;\n");
         // `()J` where the declaration says `()I`: one character, and the whole difference between
         // a linked module and this.
         package.bind("test/host/Host", "answer()J", |_, _, _| Ok(()));
-        wrong.add(package);
-        let wrong = wrong
-            .select(&["test.host".to_owned()])
-            .expect("just registered")
-            .bindings();
+        let wrong = jals_native::PackageSelection::of([package]).bindings();
 
         let Err(error @ WasmRunError::UnresolvedImport { .. }) =
             run_with(&module, Some("run"), &[], &wrong)
@@ -938,8 +1068,8 @@ mod tests {
     /// written on top of.
     #[test]
     fn a_binding_reads_an_array_the_module_allocated() {
-        let mut package = jals_native::NativePackage::new("test.sum", 1);
-        package.source(
+        let mut package = jals_native::JavaPackage::new("test.sum", 1);
+        package.implementation(
             "test/sum/Sum.java",
             "package test.sum;\npublic final class Sum { public static native int of(int[] values); }\n",
         );
@@ -955,11 +1085,7 @@ mod tests {
                 Ok(())
             },
         );
-        let mut registry = jals_native::NativeRegistry::new();
-        registry.add(package);
-        let selection = registry
-            .select(&["test.sum".to_owned()])
-            .expect("just registered");
+        let selection = jals_native::PackageSelection::of([package]);
 
         let module = module_with(
             "import test.sum.Sum;\n\
@@ -979,19 +1105,15 @@ mod tests {
     /// cannot answer — never a silent zero.
     #[test]
     fn a_binding_that_refuses_traps_rather_than_answering() {
-        let mut package = jals_native::NativePackage::new("test.no", 1);
-        package.source(
+        let mut package = jals_native::JavaPackage::new("test.no", 1);
+        package.implementation(
             "test/no/No.java",
             "package test.no;\npublic final class No { public static native int answer(); }\n",
         );
         package.bind("test/no/No", "answer()I", |_, _, _| {
             Err(jals_native::NativeError::Message("said no".to_owned()))
         });
-        let mut registry = jals_native::NativeRegistry::new();
-        registry.add(package);
-        let selection = registry
-            .select(&["test.no".to_owned()])
-            .expect("just registered");
+        let selection = jals_native::PackageSelection::of([package]);
 
         let module = module_with(
             "import test.no.No;\n\

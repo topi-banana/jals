@@ -228,7 +228,7 @@ impl BackendSelection {
         staged: &StagedTree,
         inputs: &HostCompileInputs<'_>,
         assertions: crate::Assertions,
-        natives: jals_native::NativePackageSet,
+        natives: jals_native::PackageSelection,
         exec: &Exec,
     ) -> Self {
         match manifest.build.backend {
@@ -465,7 +465,7 @@ mod tests {
                 &staged,
                 &inputs,
                 crate::Assertions::Disabled,
-                jals_native::NativePackageSet::empty(),
+                jals_native::PackageSelection::empty(),
                 &Exec::inline(),
             ));
             match selection {

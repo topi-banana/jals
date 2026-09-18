@@ -38,6 +38,7 @@ jals-exec = { workspace = true, features = ["tokio"] }
 # IntelliJ's is a code-style XML.
 jals-fmt = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
+jals-platform.workspace = true
 jals-javac.workspace = true
 jals-syntax.workspace = true
 rayon.workspace = true

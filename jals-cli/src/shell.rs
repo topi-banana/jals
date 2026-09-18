@@ -410,6 +410,23 @@ impl Shell {
         })
     }
 
+    /// Bytes to stderr, unchanged — the counterpart of [`machine_bytes`](Self::machine_bytes).
+    ///
+    /// What a running program writes to `System.err`, and not line-oriented for the same reason:
+    /// a module decides where its own line breaks are, and one added here would double every line
+    /// a `println` already ended.
+    ///
+    /// The write failure is swallowed where `machine_bytes` returns it. The difference is what the
+    /// bytes *are*: a truncated formatted file is not a formatted file and the caller must know,
+    /// whereas a program's diagnostics failing to reach a closed stderr is not a reason to fail its
+    /// build.
+    pub(crate) fn plain_bytes(&self, bytes: &[u8]) {
+        self.suspend(|| {
+            let mut err = std::io::stderr().lock();
+            let _ = err.write_all(bytes);
+        });
+    }
+
     /// A label right-aligned in the verb column and painted.
     ///
     /// The lead of a line something else assembles: a bar's prefix, and `jals test`'s own

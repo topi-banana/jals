@@ -90,7 +90,7 @@ impl Cli {
 
         // The JDK is half the measurement: javac decided which files are in the corpus, and its
         // `ct.sym` supplies the signatures the analysis resolves against. Without one there is
-        // nothing to measure, so this is an error rather than a fallback onto the embedded stubs —
+        // nothing to measure, so this is an error rather than a fallback onto the platform —
         // those would report stub coverage under a compiler's name.
         let Some(jdk) = Jdk::detect() else {
             eprintln!(

@@ -3,9 +3,9 @@
 //! A `#[test]` method is an ordinary Java method with no caller. Something has to reach it from a
 //! `main`, and that something is generated here as **more Java source** — not as bytecode, and not
 //! through reflection. Both choices are forced: the lowered tree is what a backend compiles, so a
-//! harness that is Java source works under `javac` and the in-process compiler alike, and
-//! `jals-hir`'s embedded stubs carry no `java.lang.reflect`, so a reflective harness would compile
-//! on one backend and not the other.
+//! harness that is Java source works under `javac` and the in-process compiler alike, and the
+//! platform package carries no `java.lang.reflect`, so a reflective harness would compile on one
+//! backend and not the other.
 //!
 //! Two generated shapes, and the split between them is *reachability*:
 //!
