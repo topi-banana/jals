@@ -1,0 +1,24 @@
+# The platform library, as a project — so the formatter and the linter can see it.
+#
+# `jals-platform/java` is this repository's largest body of authored Java and, without this file,
+# nothing checked it: `jals fmt --check` and `jals lint` run in CI only inside `examples/`, which
+# this is not. A manifest is what gives those two commands a project to read, and CI runs them here
+# the same way it runs them for an example.
+#
+# `platform = "none"` is not a preference. These *are* `java.lang`, `java.util` and `java.io`:
+# indexing the shipped platform beside them would declare every type twice, and the second insert
+# would lose silently. With no platform selected, `java.lang.Object` and the rest resolve as what
+# they are here — the project's own sources.
+#
+# There is no `jals build` cell for this project and there must not be: `java/lang/Object.java` and
+# the types nobody has implemented are the signature tier (see `xtask/src/platform.rs`), and a
+# build compiles every source root it is given. Which files are compiled is decided by the
+# package's two lists, not by this manifest.
+[package]
+name = "jals-platform"
+version = "0.1.0"
+
+[build]
+backend = { type = "jals-wasm" }
+platform = "none"
+source-dirs = ["java"]

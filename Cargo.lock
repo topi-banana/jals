@@ -1130,6 +1130,7 @@ dependencies = [
  "jals-hir",
  "jals-javac",
  "jals-native",
+ "jals-platform",
  "jals-progress",
  "jals-storage",
  "jals-syntax",
@@ -1191,6 +1192,7 @@ dependencies = [
  "jals-frontend",
  "jals-lsp",
  "jals-native",
+ "jals-platform",
  "jals-progress",
  "jals-project",
  "jals-storage",
@@ -1228,6 +1230,8 @@ dependencies = [
  "jals-exec",
  "jals-hir",
  "jals-lint",
+ "jals-native",
+ "jals-platform",
  "jals-storage",
  "jals-syntax",
  "text-size",
@@ -1275,6 +1279,7 @@ dependencies = [
  "jals-classfile",
  "jals-decompile",
  "jals-exec",
+ "jals-platform",
  "jals-syntax",
  "proptest",
 ]
@@ -1287,6 +1292,7 @@ dependencies = [
  "jals-classfile",
  "jals-exec",
  "jals-hir",
+ "jals-platform",
  "jals-syntax",
  "tempfile",
  "zip",
@@ -1300,6 +1306,7 @@ dependencies = [
  "jals-config",
  "jals-exec",
  "jals-hir",
+ "jals-platform",
  "jals-syntax",
  "proptest",
  "serde_json",
@@ -1322,6 +1329,7 @@ dependencies = [
  "jals-fmt",
  "jals-hir",
  "jals-native",
+ "jals-platform",
  "jals-progress",
  "jals-project",
  "jals-storage",
@@ -1335,6 +1343,13 @@ dependencies = [
 [[package]]
 name = "jals-native"
 version = "0.1.0"
+
+[[package]]
+name = "jals-platform"
+version = "0.1.0"
+dependencies = [
+ "jals-native",
+]
 
 [[package]]
 name = "jals-playground"
@@ -1352,6 +1367,7 @@ dependencies = [
  "jals-frontend",
  "jals-hir",
  "jals-native",
+ "jals-platform",
  "jals-progress",
  "jals-project",
  "jals-storage",
@@ -1425,6 +1441,7 @@ dependencies = [
  "jals-fmt",
  "jals-hir",
  "jals-javac",
+ "jals-platform",
  "jals-syntax",
  "rayon",
  "similar",
