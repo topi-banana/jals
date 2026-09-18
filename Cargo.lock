@@ -1279,6 +1279,7 @@ dependencies = [
  "jals-classfile",
  "jals-decompile",
  "jals-exec",
+ "jals-native",
  "jals-platform",
  "jals-syntax",
  "proptest",

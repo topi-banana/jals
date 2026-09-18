@@ -61,6 +61,19 @@ pub struct JalsBackend {
     /// changes what comes out for unchanged input, which is exactly what
     /// [`config_digest`](Backend::config_digest) exists to fold.
     packages: PackageSelection,
+    /// Java stubs rendered from the selection's **declarations**, one per declared class.
+    ///
+    /// A package that states its API as data instead of Java still has to reach the compiler when
+    /// the target links it: the stub is the smallest Java that produces the class's struct type
+    /// and one host import per `native` method, so the existing front end lowers it with no second
+    /// path. An artifact, never a file — nothing but the compiler and its cache key sees it.
+    stubs: Vec<jals_native::JavaSource>,
+    /// Why a stub could not be rendered, reported when a compile asks for one.
+    ///
+    /// Held rather than raised at construction because the constructors are infallible and shared
+    /// with the class-file target, which never reads a stub — a declaration that only analysis can
+    /// use is not an error there.
+    stub_error: Option<String>,
 }
 
 impl JalsBackend {
@@ -92,11 +105,14 @@ impl JalsBackend {
     /// decision table in one place. Constructing it directly is what that seam replaced.
     pub(crate) fn new(release: Option<u32>, packages: PackageSelection) -> Self {
         // Java 25 when the manifest names no level, matching what `jals init` scaffolds.
+        let (stubs, stub_error) = Self::package_stubs(&packages);
         Self {
             target: Target::ClassFiles {
                 class_version: Self::major_version(release.unwrap_or(25)),
             },
             packages,
+            stubs,
+            stub_error,
         }
     }
 
@@ -107,13 +123,37 @@ impl JalsBackend {
     ///
     /// `assertions` takes the place `-ea` has on the other target: a JVM decides at start-up
     /// whether a class file's `assert` checks run, and a wasm host has no such moment.
-    pub(crate) const fn wasm(assertions: crate::Assertions, packages: PackageSelection) -> Self {
+    pub(crate) fn wasm(assertions: crate::Assertions, packages: PackageSelection) -> Self {
+        let (stubs, stub_error) = Self::package_stubs(&packages);
         Self {
             target: Target::Wasm {
                 assertions: assertions.enabled(),
             },
             packages,
+            stubs,
+            stub_error,
         }
+    }
+
+    /// Render every declaration in `packages` as a Java stub, or name the first refusal.
+    fn package_stubs(
+        packages: &PackageSelection,
+    ) -> (Vec<jals_native::JavaSource>, Option<String>) {
+        let mut stubs = Vec::new();
+        for (_, declarations) in packages.declarations() {
+            let rendered = match jals_native::DeclaredType::java_stubs(declarations) {
+                Ok(rendered) => rendered,
+                Err(error) => return (Vec::new(), Some(format!("{error}"))),
+            };
+            for (path, text) in rendered {
+                stubs.push(jals_native::JavaSource {
+                    path: path.into(),
+                    text: text.into(),
+                    kind: jals_native::SourceKind::Implementation,
+                });
+            }
+        }
+        (stubs, None)
     }
 
     /// Whether this target compiles a package's Java into its own artifact.
@@ -128,15 +168,24 @@ impl JalsBackend {
     /// The package units this compile **lowers**, each at the fidelity that follows.
     ///
     /// Empty for the class-file target: a package's `native` method is a host function supplied to
-    /// a WebAssembly module, and a class file has nowhere to put one.
+    /// a WebAssembly module, and a class file has nowhere to put one. The declarations' stubs ride
+    /// the same iterator, because to the lowering they are Java like any other.
     fn compiled_sources(
         &self,
     ) -> impl Iterator<Item = (&jals_native::JavaSource, jals_hir::LibraryFidelity)> {
-        self.links()
+        let linked = self
+            .links()
             .then(|| self.packages.link_sources())
             .into_iter()
             .flatten()
-            .map(|(_, source)| (source, jals_hir::LibraryFidelity::Complete))
+            .map(|(_, source)| (source, jals_hir::LibraryFidelity::Complete));
+        let stubs = self
+            .links()
+            .then(|| self.stubs.iter())
+            .into_iter()
+            .flatten()
+            .map(|source| (source, jals_hir::LibraryFidelity::Complete));
+        linked.chain(stubs)
     }
 
     /// The package units this compile **only indexes**: the signature tier always, and the whole
@@ -145,12 +194,21 @@ impl JalsBackend {
         &self,
     ) -> impl Iterator<Item = (&jals_native::JavaSource, jals_hir::LibraryFidelity)> {
         let links = self.links();
-        self.packages
+        let sources = self
+            .packages
             .analysis_sources()
             .filter(move |(_, source)| {
                 !links || !matches!(source.kind, jals_native::SourceKind::Implementation)
             })
-            .map(|(_, source)| (source, jals_hir::LibraryFidelity::Signatures))
+            .map(|(_, source)| (source, jals_hir::LibraryFidelity::Signatures));
+        // A declaration is a *record* for a target that does not link it, exactly as a package's
+        // Java is: the JVM that loads the output supplies the real class.
+        let stubs = (!links)
+            .then(|| self.stubs.iter())
+            .into_iter()
+            .flatten()
+            .map(|source| (source, jals_hir::LibraryFidelity::Signatures));
+        sources.chain(stubs)
     }
 
     /// Parse, index, and lower every source together, collecting the class files.
@@ -160,6 +218,11 @@ impl JalsBackend {
     /// inside this future would swallow every one of those yields — the host's current-thread
     /// runtime would sit on one compile for its whole duration.
     async fn compile_all(&self, request: &BackendRequest<'_>) -> BackendOutcome {
+        // A declaration this target cannot render is refused before anything is parsed: the module
+        // would otherwise be compiled against an API the selection never supplied.
+        if let Some(error) = &self.stub_error {
+            return BackendOutcome::failed(alloc::vec![error.clone()]);
+        }
         // One unit for the whole compile, counted in files. A per-file *line* would be the wrong
         // shape — cargo says `Compiling <package>` once, not once per module — but the bar under it
         // is what makes a hundred-file project look like progress instead of a hang.

@@ -275,11 +275,11 @@ pub struct ProjectLayout {
     pub build_features: BTreeSet<String>,
 }
 
-/// One Java compilation unit a package publishes, as the workspace receives it.
+/// One unit a package publishes, as the workspace receives it: Java text to parse, or an API
+/// stated as data.
 ///
-/// Deliberately not a [`FileKey`]: the text never came from storage and no host can open it.
-///
-/// The fields are private, which is the point: a host obtains these through
+/// Deliberately not a [`FileKey`]: neither form came from storage and no host can open it. The
+/// variant is private, which is the point: a host obtains these through
 /// [`ProjectLayout::package_sources_of`] or [`ProjectLayout::package_sources_from`] and never
 /// writes one, so the `SourceKind` + `links` rule that decides `fidelity` has exactly one place it
 /// is applied. The browser used to build one literally with the tier written in, which is a second
@@ -287,18 +287,47 @@ pub struct ProjectLayout {
 /// nothing reports when the rule it copied changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageSource {
-    /// The logical path, used for ordering and diagnostics only.
-    path: String,
-    /// The Java itself.
-    text: String,
+    kind: PackageSourceKind,
     /// Whether these declarations are the ones that will run — see [`jals_hir::LibraryFidelity`].
     ///
-    /// The host states it because it is not a property of the text: the same `String.java` is
+    /// The host states it because it is not a property of the unit: the same `String.java` is
     /// `Complete` for the build that compiles it into its own module and `Signatures` for the one
     /// that will link a real JDK instead. Getting it wrong in the lenient direction costs a missed
     /// report; in the strict direction it accuses a correct program of calling a method the
     /// standard library really has.
     fidelity: LibraryFidelity,
+}
+
+/// What a [`PackageSource`] carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackageSourceKind {
+    /// A Java compilation unit, by logical path and text.
+    Java { path: String, text: String },
+    /// The API of one package's declaration units, stated as data.
+    Declarations(Vec<jals_native::DeclaredType>),
+}
+
+impl PackageSource {
+    /// The tier this unit is indexed at.
+    const fn fidelity(&self) -> LibraryFidelity {
+        self.fidelity
+    }
+
+    /// The Java text, when this unit is Java.
+    fn text(&self) -> Option<&str> {
+        match &self.kind {
+            PackageSourceKind::Java { text, .. } => Some(text),
+            PackageSourceKind::Declarations(_) => None,
+        }
+    }
+
+    /// The declarations, when this unit states them as data.
+    fn declarations(&self) -> Option<&[jals_native::DeclaredType]> {
+        match &self.kind {
+            PackageSourceKind::Java { .. } => None,
+            PackageSourceKind::Declarations(declarations) => Some(declarations),
+        }
+    }
 }
 
 impl ProjectLayout {
@@ -315,12 +344,32 @@ impl ProjectLayout {
     /// The language server assembles its layout field by field out of a value it computed earlier,
     /// so it cannot take the `self`-consuming form. It must not grow a second lowering for that:
     /// this is the one, and both spellings go through it.
+    ///
+    /// Both publication forms are lowered here — Java units through
+    /// [`package_sources_from`](Self::package_sources_from), and each package's declarations as one
+    /// data unit — so a host needs no rule of its own for which form a package chose.
     #[must_use]
     pub fn package_sources_of(
         packages: &jals_native::PackageSelection,
         links: bool,
     ) -> Vec<PackageSource> {
-        Self::package_sources_from(packages.analysis_sources().map(|(_, source)| source), links)
+        let mut sources = Self::package_sources_from(
+            packages.analysis_sources().map(|(_, source)| source),
+            links,
+        );
+        sources.extend(
+            packages
+                .declarations()
+                .map(|(_, declarations)| PackageSource {
+                    kind: PackageSourceKind::Declarations(declarations.to_vec()),
+                    fidelity: if links {
+                        LibraryFidelity::Complete
+                    } else {
+                        LibraryFidelity::Signatures
+                    },
+                }),
+        );
+        sources
     }
 
     /// The same lowering again, over Java a host holds without a selection around it.
@@ -336,8 +385,10 @@ impl ProjectLayout {
     ) -> Vec<PackageSource> {
         sources
             .map(|source| PackageSource {
-                path: source.path.clone().into_owned(),
-                text: source.text.clone().into_owned(),
+                kind: PackageSourceKind::Java {
+                    path: source.path.clone().into_owned(),
+                    text: source.text.clone().into_owned(),
+                },
                 fidelity: match source.kind {
                     jals_native::SourceKind::Implementation if links => LibraryFidelity::Complete,
                     _ => LibraryFidelity::Signatures,
@@ -450,18 +501,23 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         let source_dep_files =
             SourceFile::read_all(&exec, &view, &spec.source_dep_sources, ExtractFacts::Plain).await;
 
-        // The packages' Java, parsed and extracted once, each at the fidelity its host stated —
-        // which is also what decides whether an implied member is recorded, so this cannot be a
-        // plain `extract_file`. Nothing is kept but the facts, because nothing else is answerable
-        // about it: no file to open and no overlay to edit.
+        // The packages' units, extracted once, each at the fidelity its host stated — which is also
+        // what decides whether an implied member is recorded, so a Java unit cannot be a plain
+        // `extract_file`. A unit stated as declarations needs no parse at all: its facts come
+        // straight from the model. Nothing is kept but the facts, because nothing else is
+        // answerable about it: no file to open and no overlay to edit.
         let mut package_facts = Vec::with_capacity(spec.package_sources.len());
         for (k, source) in spec.package_sources.iter().enumerate() {
-            let root = jals_syntax::Parse::parse(&source.text).await.syntax();
-            package_facts.push((
-                jals_hir::FileId::library(u32::try_from(k).unwrap_or(u32::MAX)),
-                source.fidelity,
-                ProjectIndex::extract_library_file(&root, source.fidelity).await,
-            ));
+            let file = jals_hir::FileId::library(u32::try_from(k).unwrap_or(u32::MAX));
+            let facts = match (source.text(), source.declarations()) {
+                (Some(text), _) => {
+                    let root = jals_syntax::Parse::parse(text).await.syntax();
+                    ProjectIndex::extract_library_file(&root, source.fidelity()).await
+                }
+                (None, Some(declarations)) => ProjectIndex::extract_declarations(declarations),
+                (None, None) => continue,
+            };
+            package_facts.push((file, source.fidelity(), facts));
         }
 
         let mut ws = Self {
@@ -695,12 +751,16 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     pub async fn set_packages(&mut self, sources: Vec<PackageSource>) {
         self.package_facts = Vec::with_capacity(sources.len());
         for (k, source) in sources.iter().enumerate() {
-            let root = jals_syntax::Parse::parse(&source.text).await.syntax();
-            self.package_facts.push((
-                jals_hir::FileId::library(u32::try_from(k).unwrap_or(u32::MAX)),
-                source.fidelity,
-                ProjectIndex::extract_library_file(&root, source.fidelity).await,
-            ));
+            let file = jals_hir::FileId::library(u32::try_from(k).unwrap_or(u32::MAX));
+            let facts = match (source.text(), source.declarations()) {
+                (Some(text), _) => {
+                    let root = jals_syntax::Parse::parse(text).await.syntax();
+                    ProjectIndex::extract_library_file(&root, source.fidelity()).await
+                }
+                (None, Some(declarations)) => ProjectIndex::extract_declarations(declarations),
+                (None, None) => continue,
+            };
+            self.package_facts.push((file, source.fidelity(), facts));
         }
         self.rebuild_index().await;
     }
@@ -1404,6 +1464,56 @@ mod tests {
             assert!(
                 !diags.iter().any(|d| d.code == Some("cannot-resolve")),
                 "Box resolves through the classpath: {diags:?}"
+            );
+        });
+    }
+
+    /// A package that states its API as data resolves with no Java text anywhere: the declaration
+    /// unit goes through `package_sources_of` and into the index exactly as parsed Java does.
+    #[test]
+    fn a_declaration_package_resolves_without_java_text() {
+        block_on_inline(async {
+            let mut package = jals_native::JavaPackage::new("demo", 1);
+            package.declare(jals_native::DeclaredType {
+                fqn: "demo.Container".into(),
+                package: "demo".into(),
+                kind: jals_native::TypeKind::Interface,
+                type_params: vec![],
+                supertypes: vec![],
+                members: vec![jals_native::Member {
+                    name: "size".into(),
+                    kind: jals_native::MemberKind::Method,
+                    ty: jals_native::TypeRef::Primitive {
+                        keyword: "int".into(),
+                        dims: 0,
+                    },
+                    params: vec![],
+                    varargs: false,
+                    type_params: vec![],
+                    throws: vec![],
+                    annotations: vec![],
+                    modifiers: jals_native::Modifiers::default(),
+                }],
+                annotations: vec![],
+            });
+            let selection = jals_native::PackageSelection::of([package]);
+            let storage = memory(&[(
+                "src/Main.java",
+                "import demo.Container;\n\
+                 class Main { int f(Container c) { return c.size(); } }",
+            )]);
+            let spec = ProjectLayout {
+                package_sources: ProjectLayout::package_sources_of(&selection, false),
+                ..ProjectLayout::new(vec![DirKey::parse("src").unwrap()])
+            };
+            let ws = Workspace::load(storage, spec).await;
+            let main = ws.file_id(&key("src/Main.java")).unwrap();
+            let diags = ws
+                .diagnostics_of(main, &jals_config::lint::Config::default())
+                .await;
+            assert!(
+                !diags.iter().any(|d| d.code == Some("cannot-resolve")),
+                "the declaration unit resolves: {diags:?}"
             );
         });
     }

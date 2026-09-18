@@ -26,6 +26,14 @@
 //! only one text. How faithfully an index should read it is the consumer's answer
 //! (`jals_hir::LibraryFidelity`), never a second enum here.
 //!
+//! A package may also state its API as data instead of Java text, through
+//! [`JavaPackage::declare`] and the [`DeclaredType`] model. That is what a unit with no bodies
+//! publishes — an interface, a container nobody implemented, a class whose every method is
+//! `native` — and it is what lets an index resolve against a package that ships no Java at all.
+//! The model is explicit by construction: what it does not list the type does not have, so an
+//! absence needs no fidelity to explain it. The two forms are alternatives on one package, not
+//! two definitions of one type.
+//!
 //! # What a binding can do
 //!
 //! Read and write Java arrays, call the module's own exports, and hold state the host's table
@@ -77,15 +85,21 @@
 
 extern crate alloc;
 
+mod declaration;
 mod host;
 mod macros;
 mod package;
 mod registry;
+mod stub;
 mod value;
 
+pub use declaration::{
+    DeclaredType, Member, MemberKind, Modifiers, Param, TypeKind, TypeParam, TypeRef,
+};
 pub use host::{HostObjects, NativeHost};
 pub use package::{JavaPackage, JavaSource, NativeClass, NativeFn, SourceKind};
 pub use registry::{NativeBindings, PackageRegistry, PackageSelection, UnknownPackage};
+pub use stub::StubError;
 pub use value::{Args, HostId, HostValue, NativeError, NativeValue, Provenance, RefSlot, Results};
 
 /// Names the declaration macro expands to, so a package author needs no `extern crate alloc`.

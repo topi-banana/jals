@@ -184,6 +184,19 @@ impl PackageSelection {
             .flat_map(|package| package.sources().iter().map(|src| (package.name(), src)))
     }
 
+    /// Every type the selection states **as data**, as `(package name, declarations)`.
+    ///
+    /// The other half of [`analysis_sources`](Self::analysis_sources): a package that ships no
+    /// Java for a unit publishes the unit's API here, and an index reads it without parsing
+    /// anything. A package may appear in both iterators — one form per unit, never two forms for
+    /// one unit.
+    pub fn declarations(&self) -> impl Iterator<Item = (&str, &[crate::DeclaredType])> {
+        self.packages
+            .iter()
+            .filter(|package| !package.declarations().is_empty())
+            .map(|package| (package.name(), package.declarations()))
+    }
+
     /// The units a linking compile **lowers**: implementation units only.
     ///
     /// A signature unit has no body to lower, and `java.lang.Object` is one of them — it is the

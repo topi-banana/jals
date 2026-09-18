@@ -988,6 +988,27 @@ impl LibraryFile {
     }
 }
 
+/// One package declaration unit to index, stated as data instead of Java text.
+///
+/// The structured counterpart of [`LibraryFile`]: the same [`LibraryFidelity`] ranking and the same
+/// [`Library`](ItemOrigin::Library) origin, reached without a CST. A package that publishes no
+/// method bodies — an interface, a container nobody implemented, a class whose every method is
+/// `native` — states itself this way, and the index then needs no Java to resolve against it.
+///
+/// The model is **explicit**: what it does not list the type does not have. That is the difference
+/// from Java source, where a class that writes no constructor has the default one — a declaration
+/// unit has no source for the language to complete, so `Signatures`-style silence is the only
+/// honest reading of it.
+#[derive(Debug, Clone)]
+pub struct DeclaredUnit<'a> {
+    /// Where this unit sits in the [`FileId`] space. See [`FileId::library`].
+    pub file: FileId,
+    /// The types this unit declares, fully qualified and in declaration order.
+    pub declarations: &'a [jals_native::DeclaredType],
+    /// Whether these declarations are the ones that will run.
+    pub fidelity: LibraryFidelity,
+}
+
 /// Fluent builder for a [`ProjectIndex`], created by [`ProjectIndex::builder`].
 ///
 /// Each `with_*` turns on one orthogonal input — a Java library the host resolved, the classpath
@@ -998,6 +1019,7 @@ pub struct ProjectIndexBuilder<'a> {
     files: &'a [(FileId, SyntaxNode)],
     source_files: &'a [(FileId, SyntaxNode)],
     library_files: &'a [LibraryFile],
+    declared: &'a [DeclaredUnit<'a>],
     classpath: Option<&'a LoweredClasspath>,
     sources: Option<&'a SourceLocations>,
     disabled: &'a [(FileId, CfgMap)],
@@ -1063,6 +1085,19 @@ impl<'a> ProjectIndexBuilder<'a> {
         self
     }
 
+    /// Index `declared` — packages that state their API as data instead of Java text — as
+    /// [`Library`](ItemOrigin::Library)-origin types, ranked by each unit's [`LibraryFidelity`]
+    /// exactly as [`with_library`](Self::with_library) ranks text.
+    ///
+    /// One input, one reading: a declaration unit is not a second copy of a Java unit beside it.
+    /// A package states each type once, in whichever form carries what it has — Java where there
+    /// are bodies to compile, declarations where the API is all there is.
+    #[must_use]
+    pub const fn with_declarations(mut self, declared: &'a [DeclaredUnit<'a>]) -> Self {
+        self.declared = declared;
+        self
+    }
+
     /// Skip each file's `cfg`-disabled hosts during extraction (see
     /// [`ProjectIndex::extract_file_with_cfg`]): a disabled type or member is not indexed, so
     /// references to it from other files resolve as they will after the compile frontend blanks
@@ -1083,6 +1118,7 @@ impl<'a> ProjectIndexBuilder<'a> {
             self.files,
             self.source_files,
             self.library_files,
+            self.declared,
             classes,
             sources,
             self.disabled,
@@ -1116,6 +1152,7 @@ impl ProjectIndex {
             files,
             source_files: &[],
             library_files: &[],
+            declared: &[],
             classpath: None,
             sources: None,
             disabled: &[],
@@ -1162,6 +1199,7 @@ impl ProjectIndex {
         files: &[(FileId, SyntaxNode)],
         source_files: &[(FileId, SyntaxNode)],
         library_files: &[LibraryFile],
+        declared: &[DeclaredUnit<'_>],
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
         disabled: &[(FileId, CfgMap)],
@@ -1186,12 +1224,21 @@ impl ProjectIndex {
         // the facts so `assemble_inner` can rank on the same value rather than on which list a
         // caller happened to put the file in.
         let mut library: Vec<(FileId, LibraryFidelity, FileFacts)> =
-            Vec::with_capacity(library_files.len());
+            Vec::with_capacity(library_files.len() + declared.len());
         for unit in library_files {
             library.push((
                 unit.file,
                 unit.fidelity,
                 Self::extract_library_file(&unit.root, unit.fidelity).await,
+            ));
+        }
+        // The structured units fold in through the same list, so fidelity ranks them by the same
+        // rule and `assemble_inner` never learns which form a declaration arrived in.
+        for unit in declared {
+            library.push((
+                unit.file,
+                unit.fidelity,
+                Self::extract_declarations(unit.declarations),
             ));
         }
         Self::assemble_inner(
@@ -1226,6 +1273,191 @@ impl ProjectIndex {
     /// them to [`assemble`](Self::assemble); it must reach the same answer this does.
     pub async fn extract_library_file(root: &SyntaxNode, fidelity: LibraryFidelity) -> FileFacts {
         Self::extract(root, &CfgMap::default(), fidelity.declarations()).await
+    }
+
+    /// Extract a **declared** unit's facts — the structured counterpart of
+    /// [`extract_library_file`](Self::extract_library_file), with no CST to walk.
+    ///
+    /// The model is explicit, so there is no [`Declarations`] mode to honour: what the unit lists
+    /// is what the type has, and an absence is not completed with a JLS default. Fidelity still
+    /// decides ranking, the checking demotion, and whether a consumer may read an empty annotation
+    /// list as the author's own — the same answers the text path gives for the same tier.
+    ///
+    /// Every [`MemberType`] is fully qualified, so the synthetic file needs no package and no
+    /// imports: a declaration unit is self-contained by construction.
+    pub fn extract_declarations(declarations: &[jals_native::DeclaredType]) -> FileFacts {
+        let mut types = Vec::with_capacity(declarations.len());
+        for (position, declaration) in declarations.iter().enumerate() {
+            // The synthetic declaration site: unique per type within this unit, because
+            // `register_file_members` maps it back to the owning item. A library item is never a
+            // navigation target, so the numbers mean nothing beyond being distinct.
+            let at = position;
+            types.push(RawType {
+                fqn: declaration.fqn.as_ref().into(),
+                kind: Self::declared_kind(declaration.kind),
+                name_range: at..at,
+                type_params: declaration
+                    .type_params
+                    .iter()
+                    .map(Self::declared_type_param)
+                    .collect(),
+                members: declaration
+                    .members
+                    .iter()
+                    .map(|member| Self::structured_member(declaration, member))
+                    .collect(),
+                raw_supertypes: declaration
+                    .supertypes
+                    .iter()
+                    .map(Self::declared_type)
+                    .collect(),
+            });
+        }
+        FileFacts {
+            // A unit's package and imports are not read: every name it holds is already qualified.
+            meta: Some(FileMeta {
+                package: None,
+                single_imports: Vec::new(),
+                on_demand: Vec::new(),
+                static_single: Vec::new(),
+                static_on_demand: Vec::new(),
+            }),
+            types,
+        }
+    }
+
+    /// The index's kind for a declared one.
+    const fn declared_kind(kind: jals_native::TypeKind) -> DefKind {
+        match kind {
+            jals_native::TypeKind::Class => DefKind::Class,
+            jals_native::TypeKind::Interface => DefKind::Interface,
+            jals_native::TypeKind::Enum => DefKind::Enum,
+            jals_native::TypeKind::Annotation => DefKind::AnnotationType,
+            jals_native::TypeKind::Record => DefKind::Record,
+        }
+    }
+
+    /// One declared member, with the implicit modifiers its owner's kind supplies folded in —
+    /// the same rules `members_of_decl` reads off the source, so both routes answer alike.
+    fn structured_member(
+        owner: &jals_native::DeclaredType,
+        member: &jals_native::Member,
+    ) -> Member {
+        use jals_native::MemberKind;
+        let mut modifiers = MemberModifiers {
+            is_static: member.modifiers.is_static,
+            is_private: member.modifiers.is_private,
+            is_public: member.modifiers.is_public,
+            is_abstract: member.modifiers.is_abstract,
+        };
+        let in_interface = matches!(
+            owner.kind,
+            jals_native::TypeKind::Interface | jals_native::TypeKind::Annotation
+        );
+        // An interface field is implicitly `public static final` (JLS §9.3) and an interface
+        // method implicitly `public` (JLS §9.4), `abstract` unless `default`, `static`, or
+        // `private` (JLS §9.4.1.1) — the three that must carry a body.
+        if in_interface {
+            match member.kind {
+                MemberKind::Field | MemberKind::EnumConstant => {
+                    modifiers.is_static = true;
+                    modifiers.is_public = true;
+                }
+                MemberKind::Method => {
+                    modifiers.is_public = true;
+                    modifiers.is_abstract |= !modifiers.is_static
+                        && !modifiers.is_private
+                        && !member.modifiers.is_default;
+                }
+                MemberKind::Constructor => {}
+            }
+        }
+        // Every enum constant is implicitly `public static final` (JLS §8.9.3).
+        if member.kind == MemberKind::EnumConstant {
+            modifiers.is_static = true;
+            modifiers.is_public = true;
+        }
+        // A constructor declares no value type and an enum constant's type is its enum — the same
+        // two shapes `members_of_decl` produces, so a consumer reads both routes alike.
+        let ty = match member.kind {
+            MemberKind::Constructor => MemberType::Unknown,
+            MemberKind::EnumConstant => MemberType::Named {
+                name: Fqn::simple_name_of(&owner.fqn).into(),
+                qualified: None,
+                dims: 0,
+                args: Vec::new(),
+            },
+            MemberKind::Field | MemberKind::Method => Self::declared_type(&member.ty),
+        };
+        Member {
+            owner: ItemId(0),
+            name: member.name.as_ref().into(),
+            kind: match member.kind {
+                MemberKind::Field => DefKind::Field,
+                MemberKind::Method => DefKind::Method,
+                MemberKind::Constructor => DefKind::Constructor,
+                MemberKind::EnumConstant => DefKind::EnumConstant,
+            },
+            file: FileId(0),
+            // Nothing declares it in a file, so there is no declaration site to point at. The
+            // member-site map skips `0..0`, which is exactly this case.
+            name_range: 0..0,
+            ty,
+            modifiers,
+            params: member
+                .params
+                .iter()
+                .map(|param| Param {
+                    name: param.name.as_ref().map(alloc::string::ToString::to_string),
+                    ty: Self::declared_type(&param.ty),
+                    annotations: param
+                        .annotations
+                        .iter()
+                        .map(alloc::string::ToString::to_string)
+                        .collect(),
+                })
+                .collect(),
+            varargs: member.varargs,
+            annotations: member
+                .annotations
+                .iter()
+                .map(alloc::string::ToString::to_string)
+                .collect(),
+            type_params: member
+                .type_params
+                .iter()
+                .map(Self::declared_type_param)
+                .collect(),
+            throws: member.throws.iter().map(Self::declared_type).collect(),
+            source_location: None,
+        }
+    }
+
+    /// A declared type reference, as the resolvable data the index keeps.
+    fn declared_type(ty: &jals_native::TypeRef) -> MemberType {
+        match ty {
+            jals_native::TypeRef::Primitive { keyword, dims } => MemberType::Primitive {
+                keyword: keyword.as_ref().into(),
+                dims: *dims,
+            },
+            jals_native::TypeRef::Void => MemberType::Void,
+            jals_native::TypeRef::Named { fqn, dims, args } => MemberType::Named {
+                name: Fqn::simple_name_of(fqn).into(),
+                // The FQN is the qualified spelling, so resolution needs no import context.
+                qualified: Some(fqn.as_ref().into()),
+                dims: *dims,
+                args: args.iter().map(Self::declared_type).collect(),
+            },
+            jals_native::TypeRef::Unknown => MemberType::Unknown,
+        }
+    }
+
+    /// One declared type parameter.
+    fn declared_type_param(param: &jals_native::TypeParam) -> TypeParamDecl {
+        TypeParamDecl {
+            name: param.name.as_ref().into(),
+            bounds: param.bounds.iter().map(Self::declared_type).collect(),
+        }
     }
 
     /// Like [`extract_file`](Self::extract_file), but skipping every `cfg`-disabled host in

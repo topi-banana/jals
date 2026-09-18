@@ -8,6 +8,10 @@ hashbrown.workspace = true
 jals-classfile.workspace = true
 jals-decompile.workspace = true
 jals-exec.workspace = true
+# The package vocabulary: a package may publish its API as declarations instead of Java text, and
+# this crate folds those into the index through `ProjectIndexBuilder::with_declarations`. The edge
+# is one-way and leaves `jals-native` dependency-free, which is what a package author's crate needs.
+jals-native.workspace = true
 jals-syntax.workspace = true
 
 [dev-dependencies]

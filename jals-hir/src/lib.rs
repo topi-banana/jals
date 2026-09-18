@@ -77,7 +77,7 @@ pub use imports::UnusedImport;
 pub use infer::{Completion, MismatchKind, Signature, SignatureHelp, TypeMismatch};
 pub use names::UnresolvedName;
 pub use project::{
-    FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LibraryFidelity, LibraryFile,
+    DeclaredUnit, FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LibraryFidelity, LibraryFile,
     LoweredClasspath, Member, MemberId, MemberModifiers, MemberType, Overrides, Param,
     ProjectIndex, ProjectIndexBuilder, SourceLocations, TypeParamDecl, TypeResolution,
     UnresolvedType,

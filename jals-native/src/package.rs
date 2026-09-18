@@ -1,5 +1,5 @@
-//! What a Java package *is*: the Java it publishes, and the Rust behind that Java's `native`
-//! methods.
+//! What a Java package *is*: the Java it publishes (or the declarations it states), and the Rust
+//! behind that Java's `native` methods.
 //!
 //! One value holds both halves, and one crate owns that value. That is the whole reason this is
 //! not a `[dependencies]` entry pointing at Java somewhere and a host table registered somewhere
@@ -78,12 +78,14 @@ pub struct JavaSource {
 pub type NativeFn =
     Rc<dyn Fn(&mut dyn NativeHost, Args<'_>, Results<'_>) -> Result<(), NativeError>>;
 
-/// A Java package: the Java it publishes, and the Rust implementing that Java's `native` methods.
+/// A Java package: the Java it publishes, the declarations it states as data, and the Rust
+/// implementing that Java's `native` methods.
 #[derive(Clone)]
 pub struct JavaPackage {
     name: String,
     version: u32,
     sources: Vec<JavaSource>,
+    declarations: Vec<crate::declaration::DeclaredType>,
     bindings: BTreeMap<(String, String), NativeFn>,
 }
 
@@ -100,6 +102,7 @@ impl JavaPackage {
             name: name.to_owned(),
             version,
             sources: Vec::new(),
+            declarations: Vec::new(),
             bindings: BTreeMap::new(),
         }
     }
@@ -135,6 +138,22 @@ impl JavaPackage {
         text: impl Into<Cow<'static, str>>,
     ) -> &mut Self {
         self.source(path, text, SourceKind::Implementation)
+    }
+
+    /// State one type's API as data, with no Java text.
+    ///
+    /// The declaration is what an index reads when this package is resolved for analysis, and it is
+    /// the package author's statement of the complete member set — an absence is an absence, not an
+    /// implied default. A unit with method bodies cannot be expressed this way; it publishes Java
+    /// through [`implementation`](Self::implementation) and the compiler lowers the bodies.
+    pub fn declare(&mut self, ty: crate::declaration::DeclaredType) -> &mut Self {
+        self.declarations.push(ty);
+        self
+    }
+
+    /// The declarations this package states, in declaration order.
+    pub(crate) fn declarations(&self) -> &[crate::declaration::DeclaredType] {
+        &self.declarations
     }
 
     /// Bind one `native` method.
@@ -202,7 +221,7 @@ impl JavaPackage {
     ///
     /// The name, the version, every source path with its kind and text, and every binding key. Not
     /// the binding *bodies* — see [`new`](Self::new) for why that is the version's job.
-    pub fn describe(&self, provenance: &mut Provenance) {
+    pub(crate) fn describe(&self, provenance: &mut Provenance) {
         provenance.field(self.name.as_bytes());
         provenance.number(self.version);
         provenance.number(u32::try_from(self.sources.len()).unwrap_or(u32::MAX));
@@ -221,6 +240,12 @@ impl JavaPackage {
             provenance.field(owner.as_bytes());
             provenance.field(signature.as_bytes());
         }
+        // The declarations are the other half of the API, and a cache key has to see them too: two
+        // packages that differ only in a declared parameter type compile to different modules.
+        provenance.number(u32::try_from(self.declarations.len()).unwrap_or(u32::MAX));
+        for declaration in &self.declarations {
+            declaration.describe(provenance);
+        }
     }
 }
 
@@ -230,6 +255,7 @@ impl core::fmt::Debug for JavaPackage {
             .field("name", &self.name)
             .field("version", &self.version)
             .field("sources", &self.sources)
+            .field("declarations", &self.declarations)
             .field("bindings", &self.bindings.keys())
             .finish()
     }
