@@ -36,12 +36,18 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   `cargo nextest`-shaped output, and `jals build` compiles none of them into the project's classes.
   `[toolchain] runtime = "wasm"` runs the same tests as WebAssembly exports on the engine compiled
   into `jals` instead — no JDK at any step.
+- **One Java library, read at two fidelities.** `java.lang`, `java.util` and `java.io` are a
+  package ([`jals-platform`](jals-platform)): the analysis hosts and the wasm backend read the
+  same text, and what differs is how faithfully — the code that will run for a build that links
+  it, a record of a JDK for one that does not. `java.util.ArrayList` is a *native class* whose
+  storage is a Rust `Vec` and whose elements are Java references the host roots, so
+  `examples/hello_world_native` prints `Hello, world!` through `System.out.println(String)`.
 - **Java packages written in Rust.** A `native` method compiles to a WebAssembly import, and a
-  **native package** is one Rust crate holding both halves of that declaration: the Java it
-  publishes and the host functions behind it. The two cannot disagree about a signature, because
-  the import's name *is* the descriptor. `jals` ships `jals.io`, which is what makes
-  `examples/hello_world_native` print `Hello, world!` from a module that still has no `String`
-  in it.
+  **package** is one Rust crate holding both halves of that declaration: the Java it publishes and
+  the host functions behind it. The two cannot disagree about a signature, because the import's
+  name *is* the descriptor, and `JavaPackage::native_class` binds a handle-carrying class to
+  `&mut T` closures — rhai's `register_type_with_name`/`register_fn` for Java. `jals` also ships
+  `jals.io`, the third-party-package demonstration, selected by `[build] native-packages`.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `test` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
@@ -76,7 +82,8 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 | [`jals-project`](jals-project)       | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts.                                                                   |
 | [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
 | [`jals-lsp`](jals-lsp)               | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only.                                                                                                                                                                                              |
-| [`jals-native`](jals-native)         | A Java package whose implementation is Rust: the Java it publishes and the host functions its `native` methods bind to, in one value. `[build] native-packages` selects one; the wasm backend turns each `native` method into an import and the runner links it. Ships `jals.io`.                                                                                                                                                                                                                       |
+| [`jals-native`](jals-native)         | A Java package whose implementation is Rust: the Java it publishes and the host functions its `native` methods bind to, in one value. `[build] platform` and `[build] native-packages` select one; the wasm backend turns each `native` method into an import and the runner links it. `JavaPackage::native_class` is the typed registration, and `NativeHost` is the per-run table a native class's state lives in.                                                                                    |
+| [`jals-platform`](jals-platform)     | The Java standard library `jals` ships — `java.lang`, `java.util` and `java.io` — as a package like any other, behind nineteen host functions. `java.util.ArrayList` is a native class backed by a Rust `Vec`; `Builtin::packages` is the one place the built-in set is written, and every host calls it.                                                                                                               |
 | [`jals-progress`](jals-progress)     | What a run is doing, as data: the event vocabulary portable crates report through, plus the timing ledger `--timings` renders as a self-contained HTML page. Draws nothing — a host decides what a fact looks like.                                                                                                                            |
 | [`jals-cli`](jals-cli)               | The `jals` command-line binary. Owns the terminal: one `Shell` writes every byte, and a cargo-shaped display turns the event stream into status lines and progress bars.                                                                                                                                                                                                                                                                                                                                                                                     |
 | [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser.                                                                                                                                                                                                                   |

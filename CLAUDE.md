@@ -103,13 +103,22 @@ filesystem reads into portable interfaces.
     `deny_unknown_fields` would let one stale name stop every *other* rule in the file from
     loading; `Config::unknown_keys` is how a host reports what it kept.
 
+  `[build] platform` names the **platform library** a project's Java is written against — a name,
+  or `none` for a module that speaks only in primitives and arrays. It defaults to `java.base`, and
+  it controls **linking, not analysis**: every project's analysis indexes the platform, because the
+  source being edited names `String` whatever the backend is, and what a linking build changes is
+  the *fidelity* those declarations are read at. `Manifest::package_names` is the one place the
+  platform name and `[build] native-packages` become one list, and `Manifest::links_packages` the
+  one place `jals-wasm` becomes "this build compiles that Java into its artifact" — no host
+  re-derives either from `[build] backend`.
+
   `[build] native-packages` names the **native packages** a project links, and `Manifest::validate`
   refuses a non-empty list under any backend but `jals-wasm` — the mirror of
   `WasmRuntimeWithoutWasmBackend`, and for the same reason: a package's implementation is a host
   function supplied to a WebAssembly module, and no other backend emits one for it to be supplied
-  to. What a name *is* is checked here (non-empty, not repeated); whether it **exists** is not — the
-  set is a property of the binary that holds the registry, so an unknown name is reported by the
-  host, with the names it does offer.
+  to. What a name *is* is checked here (non-empty, not repeated, not the platform the key above
+  already selects); whether it **exists** is not — the set is a property of the binary that holds
+  the registry, so an unknown name is reported by the host, with the names it does offer.
 
   An option is always a value with every reachable state named — never an `Option<bool>`, and never
   two exclusive rules a config could ask for both of (clippy's `print_stdout`/`print_stderr` are one
@@ -332,6 +341,13 @@ filesystem reads into portable interfaces.
     line can write: that is refused with the position that caused it, and a name that is not there
     reports the names that are — the only evidence a caller gets that two `static` methods of one
     name collided into one export.
+  - **The run owns the table a native class lives in.** `WasmRunner::invoke` builds one `HostTable`
+    beside its `Store` and every host function the module imports captures a clone, so a handle a
+    constructor minted in one call resolves in the next — and stops resolving when the run ends,
+    because the table goes with it. Rust objects sit behind `object_store`, Java references behind
+    `reference_retain` (the `RefValue` itself holds the collector's root token), and the borrow is
+    taken per access rather than held, so a binding that calls back into the module cannot deadlock
+    on it.
   - **`WasmTestLauncher` (`wasm_test.rs`) sits *over* `WasmRunner`, and is gated on `native` as well
     as `wasm-run`.** It is what `jals test` reaches under `[toolchain] runtime = "wasm"`: one export
     per test, called on a fresh `Store`, over the same `test_plan.rs` selection and the same
@@ -364,8 +380,8 @@ filesystem reads into portable interfaces.
   syntax tree and needs no relooper. It **never checks** — diagnostics are `jals-lint`'s job over
   `jals-hir` — but it does *resolve*, because emitting one `invokevirtual` needs the selected
   overload, its descriptor, and whether the owner is a class or an interface. Library signatures
-  come from `jals-hir`'s embedded stubs, not from a host `ct.sym`, so the crate stays portable; a
-  dev-only oracle checks those stubs against a real JDK.
+  come from the platform package's own Java, not from a host `ct.sym`, so the crate stays portable;
+  a dev-only oracle checks that record against a real JDK.
   - `jvm::Assembler` owns the derivations `jals-classfile` deliberately refuses (that crate keeps
     branch offsets verbatim): label resolution with the widening fixpoint, `max_stack`/`max_locals`,
     and the `StackMapTable`, which is emitted as `full_frame` only. On the wasm side the host's
@@ -385,6 +401,15 @@ filesystem reads into portable interfaces.
     spelling of a *Java signature*, and a second erasure written inside `wasm/` to avoid naming the
     module would be a fact with two implementations, arriving through the door
     `no-wasm-into-jvm-lowering` does not cover.
+  - **`Object.equals` is the one bodyless method with a lowering.** `java.lang.Object` *is* the
+    engine's `anyref`, so it has no struct and no function — and a call to `equals` through an
+    `Object`, an interface, or a type variable used to be refused as "no representation of
+    `java.lang.Object`". Java's own answer for a class that does not override it is reference
+    identity, which is exactly what `ref.eq` computes, so `call` lowers it to a narrow-then-`ref.eq`
+    and the dispatch chain in `virtual_call` uses the same comparison as its fallback. A class that
+    *does* override `equals` is one of the chain's `ref.test` arms and wins, which is what makes
+    `String.equals` compare by value — and what lets the platform's `ArrayList` write its
+    `indexOf`/`contains`/`remove(Object)` as ordinary Java loops.
   - **Both backends publish the layer beneath their entry point, and neither materializes bytes
     before `finish`.** `jvm` exports `Assembler`, which records items and resolves them in
     `finish`; `wasm` exports `Insn`/`Instr` and `Module`, which hold a body as instructions until
@@ -459,13 +484,17 @@ filesystem reads into portable interfaces.
   `Unknown` in by exclusion — `!= No`, `== Yes` — is what silently reclassifies it when a fourth
   answer is added, so the two policies have names and the `match` is exhaustive.
 
-  A **native package's** Java is folded in through `with_native_packages` as its own
-  `ItemOrigin::Native`, ranked after the project's own sources and its `git`/`path` library sources
-  and **ahead of the classpath and the stubs**: a package's Java is compiled into the same artifact
-  the project is, so where it and a stub declare one name, the one with a body is the one that will
-  run. It is *complete* rather than lenient for the same reason, and it is the one origin with no
-  file behind it at all — the text is a constant in the binary that shipped the package, so nothing
-  navigates into one.
+  A **package's** Java is folded in through `ProjectIndexBuilder::with_library` as its own
+  `ItemOrigin::Library(LibraryFidelity)`, ranked after the project's own sources and its `git`/`path`
+  library sources, with a **signature record** last: `Complete` sits ahead of the classpath, because
+  a package's implementation units are compiled into the same artifact the project is, and
+  `Signatures` sits behind it, because the real JDK is a superset of the record a `javac` build or
+  an editor reads. The same text serves both — the fidelity is the *consumer's* answer, applied
+  where a selection becomes an index input (`ProjectLayout::package_sources_of`) — which is what
+  replaced two answers to "what is in `java.lang`" with one. `is_signature_record` is the single
+  predicate behind the demotion in `Ty::is_assignable_to` and the incompleteness of
+  `member_set_complete`, and it is the one origin with no file behind it at all — the text is a
+  constant in the binary that shipped the package, so nothing navigates into one.
 
   `jals-hir` states *facts* (`DeadIf`, `UnreportedException`, `TypeMismatch` with its
   `MismatchKind`, `UnresolvedType` and its value/method sibling `UnresolvedName`, `UnusedImport`,
@@ -492,8 +521,8 @@ filesystem reads into portable interfaces.
 - `jals-native`: a **Java package whose implementation is Rust** — the Java it publishes and the
   host functions its `native` methods bind to, in one value. (`native` here is Java's keyword, not
   the Cargo feature several crates gate host I/O with; this crate has no features at all, and no
-  dependencies, so a package author's crate depends on it and on nothing else.) Three properties
-  are load-bearing.
+  dependencies, so a package author's crate depends on it and on nothing else.) Four properties are
+  load-bearing.
   - **One crate owns both halves, and there is exactly one place they are checked against each
     other.** A binding is keyed by the declaring class's internal name and the method's
     name-with-descriptor — the two strings `jals-javac`'s wasm backend writes into the import
@@ -502,21 +531,54 @@ filesystem reads into portable interfaces.
     mismatch somebody has to notice. Nothing re-derives a wasm type from a descriptor either: the
     runner defines each host function under the type **the module itself declared**, which is what
     makes the engine's own equality check the link.
+  - **`SourceKind` is a fact about the text; the fidelity is the consumer's.** `Signatures` versus
+    `Implementation` says only whether a unit carries bodies, and `PackageSelection` answers two
+    questions from the one text — `analysis_sources` (everything an index reads) and `link_sources`
+    (the units a linking compile lowers). A package author states what they wrote, never how
+    somebody else's build should read it.
   - **The `NativeHost` seam is a trait for the reason `jinja`'s `Object` is** — the engine is the
     consumer's (`jals-build`'s tinywasm, behind `wasm-run`), and a crate that named it would stop
     being a crate a package author can depend on alone. Through it a binding reads and writes Java
-    arrays and calls the module's own exports; it cannot **allocate** a Java object, because a wasm
-    embedder has no `struct.new` of its own, so a `native` method returning one calls a `static`
-    factory the package's Java declares.
+    arrays, calls the module's own exports, and holds state in a table whose lifetime is the
+    **run**'s: `object_store`/`object_take`/`object_restore` keep a Rust object behind an `int`
+    handle, and `reference_retain`/`reference_restore` root a Java reference in the engine's
+    collector so it survives the call that named it. `HostValue` is the shape a stored element
+    takes, and `HostObjects` adds the typed `put`/`take`/`put_back` on top. It cannot **allocate** a
+    Java object, because a wasm embedder has no `struct.new` of its own, so a `native` method
+    returning one calls a `static` factory the package's Java declares or returns one it was handed.
+  - **`JavaPackage::native_class` is the typed registration** — rhai's
+    `register_type_with_name`/`register_fn` for Java: the Java class owns an `int` handle, a
+    `static native int allocate()` fills it, and `allocate`/`method`/`release` bind the rest to
+    `&mut T` closures. The Java half is still written by hand; the type layer binds to it, never
+    generates it.
   - **The host supplies the state.** This crate is `no_std`, so a package that writes text is
     *constructed with* its sink — `jals-cli` passes one writing through `Shell`, the playground one
     appending to the Run pane, the tests one appending to a `String`. Bindings are therefore `!Send`
     by construction, which is why `WasmTestLauncher::run` runs its cases in order when a package is
     linked and fans out only when none is.
 
-  `NativePackage::new` takes a version and it is the **package author's**, for the reason
+  `JavaPackage::new` takes a version and it is the **package author's**, for the reason
   `FrontendCaps::version` exists: a consumer memoizes a compile against everything it observed, and
   a Rust closure's body is the one input it cannot observe.
+- `jals-platform`: the Java standard library `jals` ships, as a [`jals-native`](#) package like any
+  other — `java.lang`, `java.util` and `java.io`, behind nineteen host functions. `Builtin::packages`
+  is the one place the built-in set is written, and every host calls it (`jals build`, `jals run`,
+  `jals test`, `jals lint`, the language server, the playground), so a package added there reaches
+  all of them at once — and the same `JavaPackage` values are what an index reads, so the editor
+  beside a build sees the same definitions. `java.base` is selected implicitly by `[build] platform`;
+  `jals.io` is the third-party-package demonstration, named in `[build] native-packages`.
+  - **A native class is the `Vec`-behind-a-handle shape, and `java.util.ArrayList` is the first.**
+    Its storage is a `Vec<HostValue>` in the host's table and its elements are Java references the
+    host roots, so an object added in one native call comes back out of a later one as the same
+    object. `indexOf`/`contains`/`remove(Object)` are Java loops over `getElement`, because their
+    equality is the `Object.equals` dispatch above, and the bounds checks are Java so a bad index is
+    a catchable `IndexOutOfBoundsException` rather than a host trap. `xtask/src/platform.rs` decides
+    which units are compiled — an interface's methods have no bodies and interfaces *are* compiled,
+    while `Object` must never be — and `cargo run -p xtask -- codegen --check` fails on a `.java`
+    nobody listed or a tier that moved without regenerating `sources.rs`.
+  - **The Java is the record a `javac` build emits from**, so every public member has to be one the
+    JDK declares with the same descriptor: `jals-javac/tests/stdlib_oracle.rs` checks that against
+    `ct.sym`, with `DIVERGENCES` and `PRIVATE_TYPES` ledgers that fail in both directions.
 - `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
   configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
   publishes the registry so a consumer enumerates rules instead of restating them. **The rule name
@@ -791,6 +853,8 @@ cargo check -p jals-build --no-default-features
 cargo check -p jals-project --no-default-features
 cargo check -p jals-frontend
 cargo check -p jals-progress
+cargo check -p jals-native
+cargo check -p jals-platform
 cargo check -p jinja
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
@@ -799,6 +863,8 @@ cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unkn
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
 cargo check -p jals-progress --target wasm32-unknown-unknown
+cargo check -p jals-native --target wasm32-unknown-unknown
+cargo check -p jals-platform --target wasm32-unknown-unknown
 cargo check -p jinja --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 cargo tree -e features -p jals-classpath --no-default-features
