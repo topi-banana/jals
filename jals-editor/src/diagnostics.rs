@@ -167,7 +167,7 @@ mod tests {
         block_on_inline(async {
             let parse = jals_syntax::Parse::parse(text).await;
             let index = ProjectIndex::builder(&[(FileId(0), parse.syntax())])
-                .with_stdlib()
+                .with_library(&crate::test_support::TestPlatform::records())
                 .build()
                 .await;
             let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;
@@ -282,7 +282,7 @@ mod tests {
                 (FileId(0), parse.syntax()),
                 (FileId(1), sibling.syntax()),
             ])
-            .with_stdlib()
+            .with_library(&crate::test_support::TestPlatform::records())
             .build()
             .await;
             let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;

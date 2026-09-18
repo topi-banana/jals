@@ -410,7 +410,7 @@ impl<'a> ProjectQueries<'a> {
             ItemOrigin::Classpath => item.source_location.clone()?,
             // Neither has a file the host owns: a stub describes a JDK nobody here has, and a
             // native package's Java is a compile-time constant in the binary that shipped it.
-            ItemOrigin::Stdlib | ItemOrigin::Native => return None,
+            ItemOrigin::Library(_) => return None,
         };
         Some(FileRange { file, range })
     }
@@ -673,7 +673,10 @@ mod tests {
             for (_, root) in &roots {
                 analyses.push(FileAnalysis::of(root).await);
             }
-            let index = ProjectIndex::builder(&roots).with_stdlib().build().await;
+            let index = ProjectIndex::builder(&roots)
+                .with_library(&crate::test_support::TestPlatform::records())
+                .build()
+                .await;
             Self {
                 roots,
                 analyses,

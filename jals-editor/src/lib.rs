@@ -14,9 +14,12 @@ mod editor;
 mod folding;
 mod host;
 mod outline;
+
 mod queries;
 mod selection;
 mod semantic;
+#[cfg(test)]
+mod test_support;
 mod workspace;
 
 pub use diagnostics::{FileDiagnostic, FileDiagnostics};

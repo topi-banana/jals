@@ -1,88 +1,95 @@
 //! The four `FileId` id-spaces a [`Workspace`](super::Workspace) addresses.
 //!
 //! A [`jals_hir::FileId`] is opaque to `jals-hir` (the host assigns it; the index only compares and
-//! stores it), so the workspace partitions the single `u32` address space into four disjoint
-//! regions — the project's own `.java`, a `-sources.jar` overlay, a `git`/`path` source
-//! dependency, and the Java a native package publishes. That partition is an invariant nothing in
-//! the raw `u32` enforces;
+//! stores it) *except* at the top of the range, which that crate reserves for text no host can open
+//! — a package's Java, a classpath pseudo-file. Below that, this workspace partitions the space
+//! into three regions of its own: the project's own `.java`, a `-sources.jar` overlay, and a
+//! `git`/`path` source dependency. The partition is an invariant nothing in the raw `u32` enforces;
 //! [`WorkspaceFileId`] makes it a type: [`from_raw`](WorkspaceFileId::from_raw) /
 //! [`to_raw`](WorkspaceFileId::to_raw) are the *only* place the bit-ranges live, so allocation is
 //! a constructor and routing ([`ws_file`](super::Workspace::ws_file)) is one exhaustive match.
+//!
+//! The reserved region is **asked for, not restated**. `jals-hir` answers
+//! [`FileId::library_index`] and [`FileId::is_openable`], so there is one definition of where that
+//! region starts. A copy here would be a partition that agrees only until one side moves — which is
+//! what a fourth base of this module's own was, sitting a fixed distance below a block the other
+//! crate anchored to `u32::MAX` and grew downward.
 
 use jals_hir::FileId;
 
-/// Base [`FileId`] for extracted library source files (the `-sources.jar` overlays), far above any
-/// project file's id (a project has nowhere near 2³¹ files) and below [`SOURCE_DEP_FILE_BASE`] /
-/// `jals-hir`'s reserved stub/classfile block, so the id spaces never collide.
-const LIBRARY_FILE_BASE: u32 = 1 << 31;
+/// Base [`FileId`] for extracted `-sources.jar` overlay files, far above any project file's id (a
+/// project has nowhere near 2³¹ files) and below [`SOURCE_DEP_FILE_BASE`], so the id spaces never
+/// collide.
+const SOURCES_JAR_FILE_BASE: u32 = 1 << 31;
 
 /// Base [`FileId`] for `git`/`path` library-source files, a third id space above
-/// [`LIBRARY_FILE_BASE`], so project / `-sources.jar` / `git`-`path` ids never collide.
+/// [`SOURCES_JAR_FILE_BASE`], so project / `-sources.jar` / `git`-`path` ids never collide.
 const SOURCE_DEP_FILE_BASE: u32 = (1 << 31) + (1 << 30);
 
-/// Base [`FileId`] for the Java a native package publishes, a fourth id space above
-/// [`SOURCE_DEP_FILE_BASE`] and still below `jals-hir`'s reserved stub/classfile block near
-/// `u32::MAX`.
-const NATIVE_FILE_BASE: u32 = (1 << 31) + (1 << 30) + (1 << 29);
-
-/// Which of the workspace's three id-spaces a [`FileId`] belongs to, plus its index within that
-/// space. The partition of the raw `u32` lives entirely in [`from_raw`](Self::from_raw) /
-/// [`to_raw`](Self::to_raw); every other site allocates and routes through this type.
+/// Which id-space a [`FileId`] belongs to, plus its index within that space. The partition of the
+/// raw `u32` lives entirely in [`from_raw`](Self::from_raw) / [`to_raw`](Self::to_raw); every other
+/// site allocates and routes through this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceFileId {
     /// A project's own `.java`, indexed and linted. Id `index` (base 0).
     Project(u32),
-    /// A `-sources.jar` overlay: navigation-only library source. Id <code>[LIBRARY_FILE_BASE] + index</code>.
-    Library(u32),
+    /// A `-sources.jar` overlay: navigation-only library source. Id
+    /// <code>[SOURCES_JAR_FILE_BASE] + index</code>.
+    SourcesJar(u32),
     /// A `git`/`path` source dependency: an index input *and* a navigation target. Id
     /// <code>[SOURCE_DEP_FILE_BASE] + index</code>.
     SourceDep(u32),
-    /// A native package's Java: an index input with **no file behind it**. Its text is a
-    /// compile-time constant in the binary that shipped the package, so
+    /// One compilation unit of the Java a package publishes, or a classpath pseudo-file: an index
+    /// input with **no file behind it**. Its text is a compile-time constant in the binary that
+    /// shipped the package, or a class file that was never source, so
     /// [`ws_file`](super::Workspace::ws_file) answers `None` for one — the same answer
-    /// [`ItemOrigin::Native`](jals_hir::ItemOrigin::Native) gives a go-to-definition. Id
-    /// <code>[NATIVE_FILE_BASE] + index</code>.
-    Native(u32),
+    /// [`ItemOrigin::Library`](jals_hir::ItemOrigin::Library) gives a go-to-definition.
+    ///
+    /// Allocated by [`FileId::library`], never here: this space is `jals-hir`'s, and the index
+    /// within it is whatever that crate's allocator assigned.
+    Reserved,
 }
 
 impl WorkspaceFileId {
     /// Decode a raw [`FileId`] into its id-space. Total: every `u32` falls in exactly one space (the
     /// regions tile `[0, u32::MAX]`).
-    ///
-    /// `jals-hir` reserves the top of the `u32` range (`u32::MAX - i`) for its stub/classfile
-    /// pseudo-files, which numerically lands in [`Native`](Self::Native)'s upper end. That is
-    /// intentional and harmless: such an id decodes to `Native(huge)`, and the caller's bounds
-    /// check then yields `None` — the same "no real file" result the old range check produced,
-    /// with no special fifth case to maintain.
     #[inline]
     pub(crate) const fn from_raw(id: FileId) -> Self {
-        if id.0 >= NATIVE_FILE_BASE {
-            Self::Native(id.0 - NATIVE_FILE_BASE)
+        if !id.is_openable() {
+            Self::Reserved
         } else if id.0 >= SOURCE_DEP_FILE_BASE {
             Self::SourceDep(id.0 - SOURCE_DEP_FILE_BASE)
-        } else if id.0 >= LIBRARY_FILE_BASE {
-            Self::Library(id.0 - LIBRARY_FILE_BASE)
+        } else if id.0 >= SOURCES_JAR_FILE_BASE {
+            Self::SourcesJar(id.0 - SOURCES_JAR_FILE_BASE)
         } else {
             Self::Project(id.0)
         }
     }
 
     /// Encode an id-space + within-space index back into a raw [`FileId`] (`base + index`).
+    ///
+    /// [`Reserved`](Self::Reserved) has no encoding, and that is the point: the one way to make an
+    /// id in that space is [`FileId::library`], so a second allocator cannot exist here.
     #[inline]
-    const fn to_raw(self) -> FileId {
-        match self {
+    const fn to_raw(self) -> Option<FileId> {
+        Some(match self {
             Self::Project(i) => FileId(i),
-            Self::Library(i) => FileId(LIBRARY_FILE_BASE + i),
+            Self::SourcesJar(i) => FileId(SOURCES_JAR_FILE_BASE + i),
             Self::SourceDep(i) => FileId(SOURCE_DEP_FILE_BASE + i),
-            Self::Native(i) => FileId(NATIVE_FILE_BASE + i),
-        }
+            Self::Reserved => return None,
+        })
     }
 
     /// The raw id of the `index`-th file of `space`. A within-space index is bounded by the set
     /// of files on disk — nowhere near 2³⁰ — so the narrowing saturates only defensively.
+    ///
+    /// Callable only with a space that *has* an encoding; `Reserved` is a fieldless variant, so it
+    /// does not typecheck as the `fn(u32) -> Self` this takes.
     #[inline]
     pub(crate) fn of_index(space: fn(u32) -> Self, index: usize) -> FileId {
-        space(u32::try_from(index).unwrap_or(u32::MAX)).to_raw()
+        space(u32::try_from(index).unwrap_or(u32::MAX))
+            .to_raw()
+            .unwrap_or(FileId(u32::MAX))
     }
 }
 
@@ -101,12 +108,12 @@ mod tests {
             WorkspaceFileId::Project(7)
         );
         assert_eq!(
-            WorkspaceFileId::from_raw(FileId(LIBRARY_FILE_BASE)),
-            WorkspaceFileId::Library(0)
+            WorkspaceFileId::from_raw(FileId(SOURCES_JAR_FILE_BASE)),
+            WorkspaceFileId::SourcesJar(0)
         );
         assert_eq!(
-            WorkspaceFileId::from_raw(FileId(LIBRARY_FILE_BASE + 3)),
-            WorkspaceFileId::Library(3)
+            WorkspaceFileId::from_raw(FileId(SOURCES_JAR_FILE_BASE + 3)),
+            WorkspaceFileId::SourcesJar(3)
         );
         assert_eq!(
             WorkspaceFileId::from_raw(FileId(SOURCE_DEP_FILE_BASE)),
@@ -116,57 +123,60 @@ mod tests {
             WorkspaceFileId::from_raw(FileId(SOURCE_DEP_FILE_BASE + 5)),
             WorkspaceFileId::SourceDep(5)
         );
-        assert_eq!(
-            WorkspaceFileId::from_raw(FileId(NATIVE_FILE_BASE)),
-            WorkspaceFileId::Native(0)
-        );
-        assert_eq!(
-            WorkspaceFileId::from_raw(FileId(NATIVE_FILE_BASE + 2)),
-            WorkspaceFileId::Native(2)
-        );
     }
 
     #[test]
     fn boundaries_belong_to_the_higher_space() {
-        // The first id of each space decodes to index 0 of that space, and the last id of the space
-        // below decodes to that lower space — the regions tile without overlap.
         assert_eq!(
-            WorkspaceFileId::from_raw(FileId(LIBRARY_FILE_BASE - 1)),
-            WorkspaceFileId::Project(LIBRARY_FILE_BASE - 1)
+            WorkspaceFileId::from_raw(FileId(SOURCES_JAR_FILE_BASE - 1)),
+            WorkspaceFileId::Project(SOURCES_JAR_FILE_BASE - 1)
         );
         assert_eq!(
             WorkspaceFileId::from_raw(FileId(SOURCE_DEP_FILE_BASE - 1)),
-            WorkspaceFileId::Library(SOURCE_DEP_FILE_BASE - 1 - LIBRARY_FILE_BASE)
+            WorkspaceFileId::SourcesJar(SOURCE_DEP_FILE_BASE - 1 - SOURCES_JAR_FILE_BASE)
+        );
+    }
+
+    #[test]
+    fn round_trips_in_every_encodable_space() {
+        for id in [
+            WorkspaceFileId::Project(0),
+            WorkspaceFileId::Project(41),
+            WorkspaceFileId::SourcesJar(0),
+            WorkspaceFileId::SourcesJar(9),
+            WorkspaceFileId::SourceDep(0),
+            WorkspaceFileId::SourceDep(2),
+        ] {
+            let raw = id.to_raw().expect("an encodable space");
+            assert_eq!(WorkspaceFileId::from_raw(raw), id);
+        }
+    }
+
+    /// Both spaces `jals-hir` reserves decode to the one variant that has no file, and neither can
+    /// be mistaken for an id this workspace handed out.
+    ///
+    /// The regression: the reserved block used to be anchored to `u32::MAX` and grown *downward*,
+    /// while this module's fourth base was a fixed constant — so how far down the block reached
+    /// depended on how many library units were indexed, and nothing said where it had to stop.
+    #[test]
+    fn every_reserved_id_decodes_to_the_fileless_space() {
+        assert_eq!(
+            WorkspaceFileId::from_raw(FileId::library(0)),
+            WorkspaceFileId::Reserved
         );
         assert_eq!(
-            WorkspaceFileId::from_raw(FileId(NATIVE_FILE_BASE - 1)),
-            WorkspaceFileId::SourceDep(NATIVE_FILE_BASE - 1 - SOURCE_DEP_FILE_BASE)
+            WorkspaceFileId::from_raw(FileId::library(4_000)),
+            WorkspaceFileId::Reserved
         );
-    }
-
-    #[test]
-    fn round_trips_in_every_space() {
-        for wfid in [
-            WorkspaceFileId::Project(0),
-            WorkspaceFileId::Project(42),
-            WorkspaceFileId::Library(0),
-            WorkspaceFileId::Library(99),
-            WorkspaceFileId::SourceDep(0),
-            WorkspaceFileId::SourceDep(1234),
-            WorkspaceFileId::Native(0),
-            WorkspaceFileId::Native(7),
-        ] {
-            assert_eq!(WorkspaceFileId::from_raw(wfid.to_raw()), wfid);
-        }
-    }
-
-    #[test]
-    fn reserved_block_decodes_to_native_out_of_range() {
-        // A `jals-hir` reserved stub/classfile id (top of the u32 range) decodes into Native with
-        // an index far past any real entry — and `ws_file` answers `None` for that space anyway.
-        match WorkspaceFileId::from_raw(FileId(u32::MAX)) {
-            WorkspaceFileId::Native(i) => assert_eq!(i, u32::MAX - NATIVE_FILE_BASE),
-            other => panic!("expected Native, got {other:?}"),
-        }
+        assert_eq!(
+            WorkspaceFileId::from_raw(FileId(u32::MAX)),
+            WorkspaceFileId::Reserved
+        );
+        assert_eq!(WorkspaceFileId::Reserved.to_raw(), None);
+        assert_eq!(FileId::library(0).library_index(), Some(0));
+        assert_eq!(FileId::library(12).library_index(), Some(12));
+        assert_eq!(FileId(SOURCE_DEP_FILE_BASE).library_index(), None);
+        assert!(FileId(SOURCE_DEP_FILE_BASE).is_openable());
+        assert!(!FileId::library(0).is_openable());
     }
 }

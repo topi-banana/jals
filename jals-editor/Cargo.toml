@@ -13,8 +13,12 @@ jals-exec.workspace = true
 jals-storage.workspace = true
 jals-hir.workspace = true
 jals-lint.workspace = true
+jals-native.workspace = true
 jals-syntax.workspace = true
 text-size.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+jals-platform.workspace = true

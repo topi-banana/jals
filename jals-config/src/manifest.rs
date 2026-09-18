@@ -1698,7 +1698,32 @@ pub struct Build {
     /// Only [`BackendKind::JalsWasm`] can take one in, and [`Manifest::validate`] says so: a
     /// package's implementation is a host function an embedder supplies, and a class file has
     /// nowhere to put one.
-    pub native_packages: Vec<String>,
+    ///
+    /// Read through [`Manifest::package_names`], never by a host matching on it.
+    native_packages: Vec<String>,
+    /// Which **platform library** this project's Java is written against.
+    ///
+    /// The name of the package supplying `java.lang` and `java.io`, or [`Platform::None`].
+    ///
+    /// This key controls **linking, not analysis**. Every project's analysis indexes the platform,
+    /// because the source being edited names `String` whatever the backend is; what a linking build
+    /// changes is the *fidelity* those declarations are read at — see `jals_hir::LibraryFidelity`.
+    /// The three reachable states:
+    ///
+    /// | backend | this key | analysis reads the platform as | linked |
+    /// | --- | --- | --- | --- |
+    /// | `jals-wasm` | a name (the default) | the code that will run | yes |
+    /// | `jals-wasm` | `none` | — nothing is indexed at all | no |
+    /// | `javac` / `jals` | anything | a record; the real JDK is a superset | no |
+    ///
+    /// `none` is for a module that speaks only in primitives and arrays — the smallest thing this
+    /// backend produces, and a real configuration rather than a degraded one. It removes the
+    /// platform from *both* answers, because a project that will not link `java.lang` should not be
+    /// offered completions for it either.
+    ///
+    /// Read through [`Manifest::package_names`] and [`Manifest::links_packages`], never by a host
+    /// matching on it — which is why it is private to this module and the type with it.
+    platform: Platform,
     /// Optional post-compile step: **reobfuscate** the compiled classes and package them as a
     /// distributable jar.
     ///
@@ -2107,6 +2132,71 @@ pub struct Bin {
     pub main_class: String,
 }
 
+/// Which platform library a project's Java is written against — `[build] platform`.
+///
+/// A name, or the absence of one. The default is the platform `jals` ships, which is what makes a
+/// fresh project's `String` resolve without anybody writing a line of configuration.
+///
+/// Deserialized from a bare string (`platform = "java.base"`, `platform = "none"`) rather than a
+/// tagged table, because there are exactly two states and one of them is a name. `"none"` is
+/// therefore a name a platform may not have, which is stated here rather than discovered by a
+/// resolver: a package called `none` would be one nobody could select.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Platform {
+    /// The package named here supplies `java.lang` and `java.io`.
+    Named(String),
+    /// No platform at all: a module that speaks only in primitives and arrays.
+    ///
+    /// Not a degraded state. It is the smallest artifact this toolchain produces, and a project
+    /// that chooses it is analysed without `java.lang` too — offering completions for a library the
+    /// build will not link is offering completions for code that cannot compile.
+    None,
+}
+
+impl Platform {
+    /// The name `[build] platform = "none"` spells.
+    const NONE: &'static str = "none";
+
+    /// The platform `jals` ships, and every project's default.
+    const DEFAULT: &'static str = "java.base";
+
+    /// The package name to resolve, or `None`.
+    #[must_use]
+    const fn name(&self) -> Option<&str> {
+        match self {
+            Self::Named(name) => Some(name.as_str()),
+            Self::None => None,
+        }
+    }
+}
+
+impl Default for Platform {
+    fn default() -> Self {
+        Self::Named(String::from(Self::DEFAULT))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Platform {
+    fn deserialize<D: serde::de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        if name == Self::NONE {
+            return Ok(Self::None);
+        }
+        if name.is_empty() {
+            return Err(serde::de::Error::custom(
+                "`[build] platform` is a package name or `none`, not an empty string",
+            ));
+        }
+        Ok(Self::Named(name))
+    }
+}
+
+impl serde::Serialize for Platform {
+    fn serialize<S: serde::ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name().unwrap_or(Self::NONE))
+    }
+}
+
 impl Default for Build {
     fn default() -> Self {
         Self {
@@ -2123,6 +2213,7 @@ impl Default for Build {
             classpath: Vec::new(),
             javac_flags: Vec::new(),
             native_packages: Vec::new(),
+            platform: Platform::default(),
             remap: None,
         }
     }
@@ -2623,17 +2714,57 @@ impl Manifest {
         // A name that is empty, or declared twice. Both are decidable here; whether a name *exists*
         // is not — the set is a property of the binary that holds the registry, so an unknown name
         // is reported there, with the names it does offer.
+        // The platform's own name joins the set first, so `platform = "x"` beside
+        // `native-packages = ["x"]` is refused as what it is rather than as a duplicate — and only
+        // one of them is visible in the list. `platform` *defaults* to `java.base`, so
+        // `native-packages = ["java.base"]` under no `platform` key at all is the same mistake.
         let mut seen = BTreeSet::new();
+        if let Some(platform) = self.build.platform.name() {
+            seen.insert(platform);
+        }
         for name in &self.build.native_packages {
             if name.is_empty() {
                 return Err(ValidationError::InvalidNativePackage { name: name.clone() });
             }
             if !seen.insert(name.as_str()) {
+                if self.build.platform.name() == Some(name.as_str()) {
+                    return Err(ValidationError::NativePackageIsThePlatform { name: name.clone() });
+                }
                 return Err(ValidationError::DuplicateNativePackage { name: name.clone() });
             }
         }
 
         Ok(())
+    }
+
+    /// Whether this build **links** the packages it selected.
+    ///
+    /// `jals-wasm` is the one backend that compiles a package's Java into the artifact and emits a
+    /// host import per `native` method, so it is the one where a package's implementation units are
+    /// the code that will run. Every other backend reads the same Java as a record of a library it
+    /// obtains elsewhere — the real JDK — which is the fidelity `jals_hir::LibraryFidelity` names.
+    #[must_use]
+    pub const fn links_packages(&self) -> bool {
+        matches!(self.build.backend, BackendKind::JalsWasm {})
+    }
+
+    /// Every package name this project resolves: its platform, then `[build] native-packages`.
+    ///
+    /// The platform comes first so that a diagnostic listing what was asked for reads in the order
+    /// a manifest is written. A selection is sorted by name afterwards, so this order decides
+    /// nothing about *which* package a name denotes. A [`Platform::None`] project contributes no
+    /// name, which is what makes its analysis have no `java.lang` at all.
+    #[must_use]
+    pub fn package_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .build
+            .platform
+            .name()
+            .map(String::from)
+            .into_iter()
+            .collect();
+        names.extend(self.build.native_packages.iter().cloned());
+        names
     }
 
     /// Check that a `remap` reference names a declared `[mappings]` key.
@@ -3109,6 +3240,11 @@ pub enum ValidationError {
         /// The repeated name.
         name: String,
     },
+    /// A `[build] native-packages` name is the one `[build] platform` already selects.
+    NativePackageIsThePlatform {
+        /// The repeated name.
+        name: String,
+    },
     /// A `[dependencies]` or `[dev-dependencies]` entry could not be classified — an empty `jar`, an
     /// unsupported URL scheme, or conflicting git refs. Wraps the classification [`DependencyError`]
     /// so the two layers share a single message and the variant set never drifts apart.
@@ -3300,6 +3436,13 @@ impl fmt::Display for ValidationError {
             Self::DuplicateNativePackage { name } => write!(
                 f,
                 "`[build] native-packages` lists `{name}` twice: a package is selected or it is not"
+            ),
+            Self::NativePackageIsThePlatform { name } => write!(
+                f,
+                "`[build] native-packages` names `{name}`, which `[build] platform` already \
+                 selects — and `platform` defaults to `{}`, so a manifest that never writes the \
+                 key still selects it. Drop the entry, or name a different platform.",
+                Platform::DEFAULT
             ),
             Self::Dependency(err) => write!(f, "{err}"),
             Self::DuplicateDependency { name } => write!(
@@ -4449,6 +4592,73 @@ mod tests {
             alloc::vec!["jals.io".to_owned()]
         );
         assert!(Manifest::default().build.native_packages.is_empty());
+    }
+
+    /// `[build] platform` is a bare package name or `none`, and its absence is the platform `jals`
+    /// ships — which is what makes a fresh project's `String` resolve with no configuration.
+    #[test]
+    fn platform_parses_as_a_name_or_none() {
+        let manifest: Manifest = "[build]
+platform = \"acme.base\"\n"
+            .parse()
+            .expect("a valid manifest");
+        assert_eq!(
+            manifest.build.platform,
+            Platform::Named("acme.base".to_owned())
+        );
+        assert_eq!(manifest.build.platform.name(), Some("acme.base"));
+
+        let manifest: Manifest = "[build]
+platform = \"none\"\n"
+            .parse()
+            .expect("a valid manifest");
+        assert_eq!(manifest.build.platform, Platform::None);
+        assert_eq!(manifest.build.platform.name(), None);
+
+        assert_eq!(
+            Manifest::default().build.platform,
+            Platform::Named("java.base".to_owned())
+        );
+
+        // An empty name is refused at parse time: there is no package it could denote, and
+        // `none` is how a manifest says there is no platform.
+        assert!(toml::from_str::<Manifest>("[build]\nplatform = \"\"\n").is_err());
+    }
+
+    /// The platform's name is what a project resolves first, and `none` contributes nothing.
+    #[test]
+    fn package_names_is_the_platform_then_the_native_packages() {
+        let mut m = Manifest::default();
+        assert_eq!(m.package_names(), alloc::vec!["java.base".to_owned()]);
+
+        m.build.native_packages = alloc::vec!["jals.io".to_owned()];
+        assert_eq!(
+            m.package_names(),
+            alloc::vec!["java.base".to_owned(), "jals.io".to_owned()]
+        );
+
+        m.build.platform = Platform::None;
+        assert_eq!(m.package_names(), alloc::vec!["jals.io".to_owned()]);
+
+        // Linking is the backend's answer, and only the wasm backend links.
+        assert!(!Manifest::default().links_packages());
+        m.build.backend = BackendKind::JalsWasm {};
+        assert!(m.links_packages());
+    }
+
+    /// A native package name the platform already selects is refused as that, not as a duplicate:
+    /// the platform key may not even be written, since it defaults to `java.base`.
+    #[test]
+    fn validate_rejects_a_native_package_that_is_the_platform() {
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        m.build.native_packages = alloc::vec!["java.base".to_owned()];
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::NativePackageIsThePlatform {
+                name: "java.base".to_owned()
+            })
+        );
     }
 
     /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.
