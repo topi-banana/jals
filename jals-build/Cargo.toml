@@ -46,6 +46,7 @@ tinywasm = { workspace = true, optional = true }
 toml.workspace = true
 
 [dev-dependencies]
+jals-platform.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 tempfile = "3"
 

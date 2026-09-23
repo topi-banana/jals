@@ -12,7 +12,7 @@
 //! ```
 //!
 //! It resolves against the host JDK's `ct.sym`, which is what `jals-compile` does and what makes a
-//! corpus case reproduce here; `--stdlib` uses the embedded stubs instead, which is what
+//! corpus case reproduce here; `--stdlib` uses the platform package instead, which is what
 //! `jals-javac`'s own tests resolve against. An example rather than a binary: it is a development
 //! aid, so it stays out of the four the README's table is about.
 
@@ -57,7 +57,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             None => {
-                eprintln!("error: no JDK on this host; pass --stdlib to use the embedded stubs");
+                eprintln!("error: no JDK on this host; pass --stdlib to use the platform package");
                 return ExitCode::FAILURE;
             }
         }
@@ -120,14 +120,17 @@ fn main() -> ExitCode {
     }
 }
 
-/// The index the file is bound against: the host JDK's own signatures, or the embedded stubs.
+/// The index the file is bound against: the host JDK's own signatures, or the platform library.
 fn build_index(
     roots: &[(FileId, SyntaxNode)],
     classpath: Option<&LoweredClasspath>,
 ) -> ProjectIndex {
     let builder = ProjectIndex::builder(roots);
+    let platform = jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ));
     jals_exec::block_on_inline(match classpath {
         Some(classpath) => builder.with_classpath(classpath).build(),
-        None => builder.with_stdlib().build(),
+        None => builder.with_library(&platform).build(),
     })
 }

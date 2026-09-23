@@ -57,6 +57,7 @@ serde_json.workspace = true
 # The native packages this binary offers: a Java package whose `native` methods are implemented
 # in Rust. `[build] native-packages` selects out of the set `natives.rs` registers.
 jals-native.workspace = true
+jals-platform.workspace = true
 jals-lsp.workspace = true
 jals-progress.workspace = true
 jals-project = { workspace = true, features = ["native"] }

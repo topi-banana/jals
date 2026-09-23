@@ -25,6 +25,17 @@ use jals_javac::wasm::{CompileWasm, ExportKind, Instr, Module, WasmOptions};
 use jals_syntax::SyntaxNode;
 use std::fmt::Write as _;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Compile every source as one module — which is what "the whole project" means for a target with
 /// no dynamic loading and no classpath — and stop at the module rather than at its bytes.
 fn module_of(sources: &[&str]) -> Module {
@@ -52,7 +63,11 @@ fn module_of_parts(sources: &[&str], libraries: &[&str], options: WasmOptions) -
             )
         })
         .collect();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&roots)
+            .with_library(&platform())
+            .build(),
+    );
 
     let analyses: Vec<FileAnalysis> = roots
         .iter()
@@ -92,10 +107,11 @@ fn body_of(module: &Module, export: &str) -> String {
             .collect();
         panic!("no exported function `{export}`; the module exports {names:?}")
     };
-    // The function index space starts with the imports, so a defined function's place in
-    // `module.funcs` is its index minus their count.
-    let defined =
-        usize::try_from(*index).expect("a function index that fits") - module.imports.len();
+    // The function index space starts with the *function* imports, so a defined function's place
+    // in `module.funcs` is its index minus their count — `func_index(0)` is that count, since it
+    // names where the first defined function would sit.
+    let defined = usize::try_from(*index).expect("a function index that fits")
+        - usize::try_from(module.func_index(0)).expect("a function import count that fits");
     let func = &module.funcs[defined];
 
     let mut rendered = String::new();
@@ -561,7 +577,7 @@ public class Arg {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -705,7 +721,7 @@ public class Missing {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -777,7 +793,7 @@ public class S {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -785,11 +801,16 @@ public class S {
     let typed = jals_exec::block_on_inline(semantics.typed());
     let error = CompileWasm::module(&[typed], &[], &index, WasmOptions { assertions: true })
         .expect_err("the condition is compiled now, and it names a library type");
+    let message = error.to_string();
+    // The type, and the expression it came from. The second half is what makes the report usable
+    // on a library input, where every body is lowered rather than only the reachable ones.
     assert!(
-        error
-            .to_string()
-            .contains("`String` has no wasm representation"),
+        message.contains("`String") && message.contains("has no wasm representation"),
         "the report names what it could not lower: {error}"
+    );
+    assert!(
+        message.contains(r#""x""#),
+        "the report names the expression it came from: {error}"
     );
 }
 
@@ -896,4 +917,187 @@ fn the_super_constructor_search_continues_past_an_ancestor_that_declares_none() 
         calls, 1,
         "`C()` calls `G`'s initialiser through the constructor-less `P`"
     );
+}
+
+// --- the three refusals a `java.base` in the library slot found ------------------------------
+
+/// An `int` literal past `i32::MAX` denotes its low 32 bits, and every legal spelling of one is
+/// past it.
+///
+/// `Integer.MIN_VALUE` is written `-2147483648`, whose *literal* is `2147483648` — JLS §3.10.1
+/// admits that spelling only as the operand of a unary minus, and the negation wraps it back to
+/// itself. `0xFFFFFFFF` is the same shape without the minus. Both were refused as out of range
+/// until a `java.lang` that has to declare `Integer.MIN_VALUE` reached them.
+#[test]
+fn an_int_literal_past_i32_max_is_its_low_thirty_two_bits() {
+    let module = module_of(&["public class A {\n\
+         \x20   public static int floor() { return -2147483648; }\n\
+         \x20   public static int all() { return 0xFFFFFFFF; }\n\
+         }"]);
+    // `0 - 2147483648`, because a unary minus is a subtraction here — and the subtraction wraps,
+    // which is exactly what makes this spelling denote `Integer.MIN_VALUE` rather than overflow.
+    expect![[r"
+        locals: []
+        I32Const(0)
+        I32Const(-2147483648)
+        Numeric(Sub, I32)
+        Return
+        Unreachable
+    "]]
+    .assert_eq(&body_of(&module, "floor"));
+    expect![[r"
+        locals: []
+        I32Const(-1)
+        Return
+        Unreachable
+    "]]
+    .assert_eq(&body_of(&module, "all"));
+}
+
+/// `==` over two references narrows to `eqref` first, because that is what `ref.eq` takes.
+///
+/// An `Object`-typed, interface-typed or type-variable-typed value is held at `anyref`, which sits
+/// one step *above* `eqref`. Pushing two of them at `ref.eq` produced a module the validator
+/// rejects — "expected subtype of eqref, found anyref" — which is what
+/// `String.equals(Object other) { if (other == this) … }` compiles to.
+#[test]
+fn a_reference_comparison_narrows_an_anyref_to_eqref() {
+    let module = module_of(&["public class A {\n\
+         \x20   public static boolean same(Object left, Object right) { return left == right; }\n\
+         }"]);
+    expect![[r"
+        locals: []
+        LocalGet(0)
+        RefCast(Eq, true)
+        LocalGet(1)
+        RefCast(Eq, true)
+        RefEq
+        Return
+        Unreachable
+    "]]
+    .assert_eq(&body_of(&module, "same"));
+}
+
+/// A `==` with a **primitive on one side** is numeric equality, whichever side that is.
+///
+/// JLS §15.21 makes `==` reference equality only when both operands are reference types; with a
+/// primitive on one side it is numeric equality with an unboxing conversion. Asking the left
+/// operand alone committed to `ref.eq` and then pushed a struct reference and an `i32` at it — a
+/// module no engine loads, emitted after the compile reported success — while the mirror spelling
+/// took the arithmetic path and refused by name. The legal Java that reaches it is
+/// `Integer i = Integer.valueOf(n); i == 1` under a *linking* build, where `Integer` is a struct
+/// this backend laid out; the witness here is the same shape with a project class, because the
+/// lowering never checks legality (that is the linter's job) and a signature-fidelity `Integer` is
+/// refused one step earlier for having no representation at all.
+///
+/// Both spellings refuse now, with the same words: the operand-order asymmetry was the bug, and a
+/// refusal a caller can read is the answer until the backend unboxes.
+#[test]
+fn a_comparison_with_a_primitive_operand_is_not_reference_equality() {
+    for expression in ["b == 1", "1 == b"] {
+        let source = format!(
+            "public class A {{\n\
+             \x20   static class Box {{ int v; }}\n\
+             \x20   public static boolean eq(Box b) {{ return {expression}; }}\n\
+             }}"
+        );
+        let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(&source)).syntax();
+        let index = jals_exec::block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root.clone())])
+                .with_library(&platform())
+                .build(),
+        );
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+        let semantics = analysis.in_project(&index, FileId(0));
+        let typed = jals_exec::block_on_inline(semantics.typed());
+        let error = CompileWasm::module(&[typed], &[], &index, WasmOptions::default())
+            .expect_err("a refusal, not a module the validator rejects");
+        assert!(
+            error.to_string().contains("has no wasm representation"),
+            "expected the arithmetic-path refusal for `{expression}`, got {error}"
+        );
+    }
+
+    // The control: two references still compare by identity, and a `null` on either side still
+    // reaches `ref.is_null` rather than being read as a primitive.
+    let module = module_of(&["public class A {\n\
+         \x20   public static boolean same(Object l, Object r) { return l == r; }\n\
+         \x20   public static boolean gone(Object l) { return null == l; }\n\
+         }"]);
+    assert!(
+        body_of(&module, "same").contains("RefEq"),
+        "two references still compare by identity"
+    );
+    assert!(
+        body_of(&module, "gone").contains("RefIsNull"),
+        "a `null` operand still asks the null question"
+    );
+}
+
+/// A method with many overriders is ordered by depth, and the ordering terminates.
+///
+/// The predicate this replaces compared two candidates with `is_subtype`, which is not a total
+/// order — three classes where one extends another and the third is unrelated compare as
+/// `a < b`, `b == c`, `a == c` — so Rust's sort detected the intransitivity and panicked. It went
+/// unnoticed until a dispatch had enough overriders to reach the check, which a `java.lang` with
+/// two dozen exception classes overriding one method does. The assertion is that this compiles at
+/// all; the ordering itself is asserted by `an_inherited_implementation_is_dispatched_to`.
+#[test]
+fn a_dispatch_over_many_unrelated_overriders_orders_without_panicking() {
+    let mut sources = vec![
+        "public class Base { public int tag() { return 0; } }".to_owned(),
+        "public class Deep extends Sub0 { public int tag() { return 99; } }".to_owned(),
+    ];
+    for at in 0..12 {
+        sources.push(format!(
+            "public class Sub{at} extends Base {{ public int tag() {{ return {at}; }} }}"
+        ));
+    }
+    sources.push("public class A { public static int ask(Base b) { return b.tag(); } }".to_owned());
+    let borrowed: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let module = module_of(&borrowed);
+    assert!(
+        module.exports.iter().any(|(name, _, _)| name == "ask"),
+        "the dispatch compiled"
+    );
+}
+
+// --- `Object.equals`, the one bodyless method with a defined lowering --------------------------
+
+/// A class that overrides nothing compares by identity: `Object.equals` is `ref.eq`.
+///
+/// `Object` is the engine's own `anyref`, so it has no struct and no function — and every call to
+/// `equals` through an `Object`, an interface, or a type variable used to be refused as "no
+/// representation of `java.lang.Object`". Java's own definition for such a receiver is reference
+/// identity, which is exactly what `ref.eq` computes.
+#[test]
+fn an_unoverridden_equals_is_reference_identity() {
+    let module = module_of(&[
+        "public class A { public static boolean same(Object a, Object b) { return a.equals(b); } }",
+    ]);
+    let body = body_of(&module, "same");
+    // Both operands are held at `anyref`, so each is narrowed to `eqref` before the comparison
+    // `ref.eq` takes.
+    assert!(body.contains("RefCast(Eq, true)"), "{body}");
+    assert!(body.contains("RefEq"), "{body}");
+    assert!(!body.contains("RefTest"), "{body}");
+}
+
+/// A class that *does* override `equals` wins by the dispatch chain, and the identity comparison
+/// is only the fallback — which is what makes `String.equals` compare by value.
+#[test]
+fn an_overridden_equals_is_dispatched_before_the_identity_fallback() {
+    let module = module_of_parts(
+        &[
+            "public class A { public static boolean same(Object a, Thing b) { return a.equals(b); } }",
+        ],
+        &[
+            "public class Thing extends Object { public boolean equals(Object other) { return true; } }",
+        ],
+        WasmOptions::default(),
+    );
+    let body = body_of(&module, "same");
+    assert!(body.contains("RefTest"), "{body}");
+    assert!(body.contains("RefEq"), "{body}");
+    assert!(body.contains("Call("), "{body}");
 }

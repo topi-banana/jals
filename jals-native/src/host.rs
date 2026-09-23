@@ -15,11 +15,22 @@
 //! Anything else a reference names — a class instance — is **opaque**. Its field indices are the
 //! backend's own layout, and a package that read one would be reading a fact no declaration
 //! states.
+//!
+//! # What outlives one call
+//!
+//! A [`RefSlot`] dies with the call that issued it, so a package that must keep something longer —
+//! the `Vec` behind a native container, a Java object an element names — asks the host to hold it
+//! in a table of its own. [`object_store`](NativeHost::object_store) and
+//! [`reference_retain`](NativeHost::reference_retain) put entries in; the `take`/`restore` pairs
+//! read them back. The table's lifetime is the run's: it lives exactly as long as the module
+//! instance, so nothing can go stale, and it is dropped whole when the run ends.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::any::Any;
 
-use crate::value::{NativeError, NativeValue, RefSlot};
+use crate::value::{HostId, NativeError, NativeValue, RefSlot};
 
 /// What a native function may ask of the module it was called from.
 pub trait NativeHost {
@@ -49,6 +60,36 @@ pub trait NativeHost {
         args: &[NativeValue],
         results: &mut [NativeValue],
     ) -> Result<(), NativeError>;
+
+    /// Move a Rust object into the host's table and hand back the id a Java field can carry.
+    ///
+    /// This is what lets a `native` class hold state the JVM side never sees — the `Vec` behind a
+    /// native `ArrayList` is the first such object. The table's lifetime is the *run*'s, not the
+    /// call's: an entry made while one native method runs is still there when the next one is
+    /// called, and is dropped when the run is.
+    fn object_store(&mut self, object: Box<dyn Any>) -> Result<HostId, NativeError>;
+
+    /// Take the object out of its slot. It is the caller's until
+    /// [`object_restore`](Self::object_restore) puts it back; taking the same id again while it is
+    /// out reports [`NativeError::UnknownHandle`].
+    fn object_take(&mut self, id: HostId) -> Result<Box<dyn Any>, NativeError>;
+
+    /// Put an object back at its own id — the other half of a take/mutate/restore.
+    fn object_restore(&mut self, id: HostId, object: Box<dyn Any>) -> Result<(), NativeError>;
+
+    /// Drop the object. Java has no finalisation on this target, so this is called by whatever
+    /// Java method releases the state, or not at all — the whole table is dropped with the run
+    /// either way.
+    fn object_drop(&mut self, id: HostId) -> Result<(), NativeError>;
+
+    /// Root the reference `slot` names so it survives this call, and hand back a durable id.
+    fn reference_retain(&mut self, slot: RefSlot) -> Result<HostId, NativeError>;
+
+    /// A slot of the *current* call naming the retained reference `id`.
+    fn reference_restore(&mut self, id: HostId) -> Result<RefSlot, NativeError>;
+
+    /// Let the retained reference go.
+    fn reference_release(&mut self, id: HostId) -> Result<(), NativeError>;
 
     /// Every element of an `int`-shaped array, in order.
     ///
@@ -102,3 +143,45 @@ pub trait NativeHost {
         Ok(String::from_utf16_lossy(&units))
     }
 }
+
+/// The typed face of the host's table.
+///
+/// [`NativeHost`] cannot carry generic methods — it is used as `&mut dyn NativeHost`, and a generic
+/// method is not object-safe — so the erased methods above are the trait's, and this blanket trait
+/// adds the typed vocabulary on top of whichever implementor is in hand. `take::<T>` is a
+/// downcast: the wrong type is a refusal naming both, never a silent reinterpretation.
+///
+/// Implemented for every [`NativeHost`], `?Sized` included, so a binding holding
+/// `&mut dyn NativeHost` calls `take::<Vec<_>>` directly.
+pub trait HostObjects: NativeHost {
+    /// Store `value` and hand back its id.
+    fn put<T: 'static>(&mut self, value: T) -> Result<HostId, NativeError> {
+        self.object_store(Box::new(value))
+    }
+
+    /// Take the object at `id` out, typed.
+    ///
+    /// A downcast that fails puts the object back before reporting: the type is the caller's
+    /// mistake, and losing the state over it would turn a misnamed Rust type into a trap about
+    /// nothing.
+    fn take<T: 'static>(&mut self, id: HostId) -> Result<T, NativeError> {
+        let object = self.object_take(id)?;
+        match object.downcast::<T>() {
+            Ok(object) => Ok(*object),
+            Err(object) => {
+                self.object_restore(id, object)?;
+                Err(NativeError::HostKind {
+                    expected: core::any::type_name::<T>(),
+                    found: "a different Rust type",
+                })
+            }
+        }
+    }
+
+    /// Put `value` back at `id` — the restore half of a take.
+    fn put_back<T: 'static>(&mut self, id: HostId, value: T) -> Result<(), NativeError> {
+        self.object_restore(id, Box::new(value))
+    }
+}
+
+impl<H: NativeHost + ?Sized> HostObjects for H {}

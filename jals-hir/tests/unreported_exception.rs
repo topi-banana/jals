@@ -5,12 +5,23 @@
 
 use jals_hir::{FileAnalysis, FileId, ProjectIndex, UnreportedException};
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// The simple names of the exceptions reported unreported in `src`, index built over the whole file.
 fn reported(src: &str) -> Vec<String> {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -202,7 +213,7 @@ fn the_finding_names_the_exception() {
     .syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .build(),
     );
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));

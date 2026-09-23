@@ -8,6 +8,17 @@ use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::AstNode;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// A single-file project with the embedded stdlib stubs folded in so `System.out.println`
 /// resolves. Owns what a binding borrows.
 struct Fixture {
@@ -22,7 +33,7 @@ impl Fixture {
         let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
         let index = jals_exec::block_on_inline(
             ProjectIndex::builder(&[(FileId(0), node.clone())])
-                .with_stdlib()
+                .with_library(&platform())
                 .build(),
         );
         Self {

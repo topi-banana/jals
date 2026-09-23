@@ -58,6 +58,8 @@ extern crate alloc;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 mod facts;
+#[cfg(test)]
+mod test_support;
 
 pub mod desc;
 pub mod jvm;

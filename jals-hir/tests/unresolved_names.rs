@@ -11,6 +11,17 @@ use jals_hir::{FileAnalysis, FileId, Namespace, ProjectIndex};
 use jals_syntax::SyntaxNode;
 use jals_syntax::cfg::CfgMap;
 
+/// The platform library at **signature** fidelity — what every host but a linking wasm build
+/// indexes, and what the embedded stubs used to be.
+///
+/// One text, read as a record: the real JDK behind a `javac` build is a superset of it, so a
+/// member it omits is a gap in the record rather than an absence in the program.
+fn platform() -> Vec<jals_hir::LibraryFile> {
+    jals_exec::block_on_inline(jals_hir::LibraryFile::parse_tiers(
+        &jals_platform::JavaBase::tiers(false),
+    ))
+}
+
 /// Parses each source, keeping the nodes alive, in input order.
 fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
     sources
@@ -29,7 +40,11 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
 /// method, in file then offset order.
 fn reported(sources: &[&str]) -> Vec<String> {
     let nodes = nodes(sources);
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_stdlib().build());
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_library(&platform())
+            .build(),
+    );
     let mut out = Vec::new();
     for (file, root) in &nodes {
         let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));
@@ -256,7 +271,7 @@ fn reported_with_features(src: &str, features: &[&str]) -> Vec<String> {
     let disabled = [(FileId(0), cfg.clone())];
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
-            .with_stdlib()
+            .with_library(&platform())
             .with_disabled(&disabled)
             .build(),
     );
