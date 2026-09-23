@@ -737,7 +737,7 @@ fn linked_module() -> Module {
 }
 
 #[test]
-fn a_module_that_imports_a_librarys_values_validates() {
+fn a_module_that_imports_a_libraries_values_validates() {
     validate(
         &linked_module()
             .finish()

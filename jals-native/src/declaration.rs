@@ -159,7 +159,6 @@ pub struct Param {
 // and six accessors saying the same thing. The `is_` prefix is what makes each field read as the
 // predicate it is, which is also why the names are not shortened.
 #[allow(clippy::struct_excessive_bools)]
-#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Modifiers {
     /// Declared `static`.
