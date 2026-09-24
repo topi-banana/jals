@@ -167,6 +167,7 @@ impl Execute {
             // The browser playground has no filesystem to resolve a `wasm` dependency from, so a
             // project that links one is a host-only arrangement for now.
             libraries: &[],
+            foreign: &[],
             progress: &jals_progress::Progress::SILENT,
         };
         let outcome = WasmRunner::run(&request).map_err(|error| error.to_string())?;

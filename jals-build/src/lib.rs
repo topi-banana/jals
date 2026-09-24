@@ -122,7 +122,8 @@ pub use toolchain::{BuildOutcome, JdkInstall, Runtime, ToolchainError, Toolchain
 pub use jals_javac::wasm::LibraryAbi;
 #[cfg(feature = "wasm-run")]
 pub use wasm_run::{
-    WasmLibrary, WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner, WasmValue,
+    WasmForeignModule, WasmLibrary, WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner,
+    WasmValue,
 };
 #[cfg(all(feature = "native", feature = "wasm-run"))]
 pub use wasm_test::{WasmTestEntry, WasmTestLauncher};

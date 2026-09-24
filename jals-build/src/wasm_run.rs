@@ -51,6 +51,19 @@ pub struct WasmLibrary<'a> {
     pub bytes: &'a [u8],
 }
 
+/// A core module that provides implementations for the project's `native` declarations.
+///
+/// Not a linked library: a foreign module has no `jals.library` section and none of the Java
+/// types. Each export whose name is a canonical member key (`owner#name+descriptor`) satisfies the
+/// project's import of that member — the shape a Rust library generated through a WIT interface
+/// hits, where the interface's functions *are* the module's exports. Scalars only for now: a
+/// reference to a GC object is not something a core module can hold, so a signature that has one
+/// links against nothing.
+pub struct WasmForeignModule<'a> {
+    /// The module's bytes.
+    pub bytes: &'a [u8],
+}
+
 /// What to run, and what to call in it.
 pub struct WasmRunRequest<'a> {
     /// The module, as the backend emitted it.
@@ -82,6 +95,10 @@ pub struct WasmRunRequest<'a> {
     /// cannot import another library — an ordering *edge* would have to exist before the order
     /// could matter.
     pub libraries: &'a [WasmLibrary<'a>],
+    /// The foreign modules that satisfy the project's `native` imports by canonical key, in order.
+    /// Their exports are searched only for imports nothing else supplies — see
+    /// [`WasmForeignModule`].
+    pub foreign: &'a [WasmForeignModule<'a>],
     /// Where the run reports what it is doing.
     pub progress: &'a Progress,
 }
@@ -472,9 +489,11 @@ impl WasmRunner {
         Self::reporting(request.progress, request.invoke, || {
             let module = Self::parse(request.module)?;
             let libraries = Self::parse_libraries(request.libraries)?;
+            let foreign = Self::parse_foreign(request.foreign)?;
             Self::invoke(
                 &module,
                 &libraries,
+                &foreign,
                 request.invoke,
                 request.args,
                 request.natives,
@@ -490,14 +509,31 @@ impl WasmRunner {
     pub(crate) fn run_parsed(
         module: &ParsedModule,
         libraries: &[(String, ParsedModule)],
+        foreign: &[ParsedModule],
         invoke: Option<&str>,
         args: &[String],
         natives: &NativeBindings,
         progress: &Progress,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         Self::reporting(progress, invoke, || {
-            Self::invoke(module, libraries, invoke, args, natives)
+            Self::invoke(module, libraries, foreign, invoke, args, natives)
         })
+    }
+
+    /// Decode every foreign module once, in order.
+    pub(crate) fn parse_foreign(
+        modules: &[WasmForeignModule<'_>],
+    ) -> Result<Vec<ParsedModule>, WasmRunError> {
+        let mut parsed = Vec::with_capacity(modules.len());
+        for (position, module) in modules.iter().enumerate() {
+            parsed.push(
+                Self::parse(module.bytes).map_err(|error| WasmRunError::Library {
+                    name: alloc::format!("foreign module {}", position + 1),
+                    message: alloc::format!("{error}"),
+                })?,
+            );
+        }
+        Ok(parsed)
     }
 
     /// Decode every library once, in the order given, against the name it links under.
@@ -570,12 +606,13 @@ impl WasmRunner {
     fn invoke(
         module: &ParsedModule,
         libraries: &[(String, ParsedModule)],
+        foreign: &[ParsedModule],
         invoke: Option<&str>,
         args: &[String],
         natives: &NativeBindings,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         let module = &module.0;
-        let mut imports = Self::link(module, natives, libraries)?;
+        let (mut imports, deferred) = Self::link(module, natives, libraries)?;
         let mut store = Store::default();
         // The libraries first, in the order given: a project's imports are resolved when it is
         // instantiated, so everything it imports has to exist by then. Each library links against
@@ -597,6 +634,55 @@ impl WasmRunner {
                     name: name.clone(),
                     message: error.to_string(),
                 })?;
+        }
+        // A foreign module is instantiated so its exports exist, and only then can the project's
+        // deferred imports be matched against them — by canonical key, because a foreign module
+        // knows nothing of this project's module names.
+        let mut foreign_instances = Vec::with_capacity(foreign.len());
+        for (position, library) in foreign.iter().enumerate() {
+            let instance =
+                ModuleInstance::instantiate_no_start(&mut store, &library.0, Some(&imports))
+                    .map_err(|error| WasmRunError::Library {
+                        name: alloc::format!("foreign module {}", position + 1),
+                        message: error.to_string(),
+                    })?;
+            instance
+                .start(&mut store)
+                .map_err(Self::execution_failure)?;
+            foreign_instances.push(instance);
+        }
+        for (owner, name) in &deferred {
+            let key = alloc::format!("{owner}#{name}");
+            let found = foreign_instances.iter().find_map(|instance| {
+                instance
+                    .exports()
+                    .find(|(exported, item)| {
+                        *exported == key.as_str() && matches!(item, ExternItem::Func(_))
+                    })
+                    .and_then(|(_, item)| match item {
+                        ExternItem::Func(function) => Some(function),
+                        _ => None,
+                    })
+            });
+            let Some(function) = found else {
+                // What *was* bound, from both halves: the selection's keys, then every foreign
+                // module's exports. A key spelled two ways is the failure this list exists for.
+                let mut available: Vec<String> = natives
+                    .keys()
+                    .map(|(owner, signature)| alloc::format!("{owner}.{signature}"))
+                    .collect();
+                available.extend(foreign_instances.iter().flat_map(|instance| {
+                    instance.exports().filter_map(|(exported, item)| {
+                        matches!(item, ExternItem::Func(_)).then(|| exported.to_owned())
+                    })
+                }));
+                return Err(WasmRunError::UnresolvedImport {
+                    module: owner.clone(),
+                    name: name.clone(),
+                    available,
+                });
+            };
+            imports.define(owner, name, function);
         }
         // Instantiating in two halves rather than through `instantiate`, which is exactly these
         // two calls. Only the first is *linking* — a malformed module, an unknown import, a
@@ -685,47 +771,105 @@ impl WasmRunner {
         module: &tinywasm::Module,
         natives: &NativeBindings,
         libraries: &[(String, ParsedModule)],
-    ) -> Result<Imports, WasmRunError> {
+    ) -> Result<(Imports, Vec<(String, String)>), WasmRunError> {
         let mut imports = Imports::new();
-        let library_imports = libraries
-            .iter()
-            .flat_map(|(_, library)| library.0.imports());
-        for import in module.imports().chain(library_imports) {
-            // A library import is not a host function: it is satisfied when the library instance
-            // is registered under its name, after it has been instantiated. Its type check happens
-            // there, against the type both modules replayed.
-            if libraries
-                .iter()
-                .any(|(name, _)| name.as_str() == &*import.module)
-            {
-                continue;
-            }
-            let ImportType::Func(signature) = import.ty else {
-                // The backend emits function imports and nothing else. A module carrying another
-                // kind did not come from it, and guessing at one is worse than saying so.
-                return Err(WasmRunError::UnresolvedImport {
-                    module: import.module.to_owned(),
-                    name: import.name.to_owned(),
-                    available: natives.keys().map(|(o, s)| format!("{o}.{s}")).collect(),
-                });
-            };
-            let Some(binding) = natives.get(import.module, import.name) else {
-                return Err(WasmRunError::UnresolvedImport {
-                    module: import.module.to_owned(),
-                    name: import.name.to_owned(),
-                    available: natives.keys().map(|(o, s)| format!("{o}.{s}")).collect(),
-                });
-            };
-            let binding = binding.clone();
-            imports.define(
-                import.module,
-                import.name,
-                HostFunction::from_untyped(signature, move |ctx, args, results| {
-                    Self::dispatch(&binding, ctx, args, results)
-                }),
-            );
+        let mut deferred = Vec::new();
+        // The project's own imports first: one the selection does not answer may still be an
+        // export of a foreign module, so it is deferred rather than refused, and `invoke` checks
+        // every deferral against those exports before anything instantiates.
+        for import in module.imports() {
+            Self::define_import(
+                &mut imports,
+                &import,
+                natives,
+                libraries,
+                Some(&mut deferred),
+            )?;
         }
-        Ok(imports)
+        // Every *library*'s import section is swept too. A library is a module of its own: a
+        // `native` method its Java declares is an import there whether or not the project ever
+        // calls it, and the project's own table says nothing about it — so a library whose
+        // embedder supplies a host function could never be instantiated. `define` overwrites, so
+        // an import both modules carry is bound once.
+        //
+        // Nothing defers a library's imports. A library is instantiated before any foreign module,
+        // and a foreign export is only known after instantiation, so a library import is either a
+        // selected binding or an unresolved import — and saying so now is what keeps the library's
+        // `static` initialisers from running for a link that cannot complete.
+        for import in libraries
+            .iter()
+            .flat_map(|(_, library)| library.0.imports())
+        {
+            Self::define_import(&mut imports, &import, natives, libraries, None)?;
+        }
+        Ok((imports, deferred))
+    }
+
+    /// Define one import's host function, deferring an unbound *project* import for a foreign
+    /// export.
+    ///
+    /// `deferred` is `Some` exactly for the project's own imports. Every other unbound import is
+    /// refused here, with the same error the deferred check produces, so both halves of the link
+    /// report a missing import in the same vocabulary.
+    fn define_import(
+        imports: &mut Imports,
+        import: &tinywasm::types::ModuleImport<'_>,
+        natives: &NativeBindings,
+        libraries: &[(String, ParsedModule)],
+        deferred: Option<&mut Vec<(String, String)>>,
+    ) -> Result<(), WasmRunError> {
+        // A library import is not a host function: it is satisfied when the library instance is
+        // registered under its name, after it has been instantiated. Its type check happens there,
+        // against the type both modules replayed.
+        if libraries
+            .iter()
+            .any(|(name, _)| name.as_str() == import.module)
+        {
+            return Ok(());
+        }
+        let ImportType::Func(signature) = import.ty else {
+            // The backend emits function imports and nothing else. A module carrying another kind
+            // did not come from it, and guessing at one is worse than saying so.
+            return Err(Self::unresolved(import, natives));
+        };
+        let Some(binding) = natives.get(import.module, import.name) else {
+            // Nothing in the selection supplies it. A foreign module may: the project's import is
+            // deferred until those are instantiated and their exports are known.
+            return deferred.map_or_else(
+                || Err(Self::unresolved(import, natives)),
+                |deferred| {
+                    deferred.push((import.module.to_owned(), import.name.to_owned()));
+                    Ok(())
+                },
+            );
+        };
+        let binding = binding.clone();
+        imports.define(
+            import.module,
+            import.name,
+            HostFunction::from_untyped(signature, move |ctx, args, results| {
+                Self::dispatch(&binding, ctx, args, results)
+            }),
+        );
+        Ok(())
+    }
+
+    /// The import nothing binds, as the error that lists the selection's keys instead.
+    ///
+    /// The foreign exports that can also answer an import are added where they are known — see
+    /// [`WasmRunError::UnresolvedImport`].
+    fn unresolved(
+        import: &tinywasm::types::ModuleImport<'_>,
+        natives: &NativeBindings,
+    ) -> WasmRunError {
+        WasmRunError::UnresolvedImport {
+            module: import.module.to_owned(),
+            name: import.name.to_owned(),
+            available: natives
+                .keys()
+                .map(|(owner, signature)| format!("{owner}.{signature}"))
+                .collect(),
+        }
     }
 
     /// One call into a native binding: decode the arguments, run it, encode what it wrote back.
@@ -941,6 +1085,7 @@ mod tests {
     ) -> Result<WasmRunOutcome, WasmRunError> {
         WasmRunner::run(&WasmRunRequest {
             libraries: &[],
+            foreign: &[],
             module,
             invoke,
             args,
