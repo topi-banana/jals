@@ -131,6 +131,13 @@ pub enum HeapType {
     /// `(ref null none)` is a subtype of *every* nullable reference — so it fits wherever the literal
     /// does without the target type having to be known first.
     None,
+    /// The function-reference hierarchy, which is what a linked dispatch slot holds.
+    ///
+    /// The one heap type here that names no Java type: a library's dispatch slots are function
+    /// references the consumer fills in, and the receiver of a call through one is an argument like
+    /// any other rather than part of the value. `call_ref` names the function type both sides agreed
+    /// on, and the group replay is what makes that agreement canonical.
+    Func,
 }
 
 impl HeapType {
@@ -143,6 +150,7 @@ impl HeapType {
             // is what keeps them apart from an index.
             Self::Any => out.byte(0x6E),
             Self::None => out.byte(0x71),
+            Self::Func => out.byte(0x70),
         };
     }
 }
@@ -446,6 +454,11 @@ pub struct Module {
     /// `static` initialiser lives: a global's own initialiser is a constant expression and cannot
     /// compute anything.
     pub start: Option<u32>,
+    /// Custom sections, written after the code section.
+    ///
+    /// A linked library carries its ABI in one — an artifact that travels as one file is an
+    /// artifact whose halves cannot drift.
+    custom: Vec<(String, Vec<u8>)>,
 }
 
 /// A module-level mutable variable, which is what a Java `static` field is.
@@ -470,6 +483,7 @@ impl Module {
             globals: Vec::new(),
             exports: Vec::new(),
             start: None,
+            custom: Vec::new(),
         }
     }
 
@@ -610,6 +624,15 @@ impl Module {
         u32::try_from(self.tag_import_count().saturating_sub(1)).unwrap_or(u32::MAX)
     }
 
+    /// Append a custom section, by name and contents.
+    ///
+    /// The name is written as the format spells it — a length-prefixed UTF-8 string — so a reader
+    /// finds the section by the same bytes the ABI names it with. Custom sections are emitted after
+    /// the code section, which is where a linked library's ABI travels.
+    pub fn add_custom_section(&mut self, name: String, contents: Vec<u8>) {
+        self.custom.push((name, contents));
+    }
+
     /// How many of the imports are functions, which is where the function index space starts.
     fn func_import_count(&self) -> usize {
         self.imports
@@ -666,6 +689,35 @@ impl Module {
     /// The index the `defined`-th defined tag has, past any imported tags.
     pub fn tag_index(&self, defined: usize) -> u32 {
         u32::try_from(self.tag_import_count().saturating_add(defined)).unwrap_or(u32::MAX)
+    }
+
+    /// Every function index a body or global initialiser names with `ref.func`, in first-use order.
+    ///
+    /// `ref.func` is only valid for a function the module has *declared* a reference to, and a
+    /// declarative element segment is where that is spelled. Collected by reading the module's own
+    /// instructions back rather than tracked at each `ref.func` site: an emitter that had to
+    /// remember would be a second place the set lives, and the encoder is the one place that cannot
+    /// go stale.
+    fn declared_functions(&self) -> Vec<u32> {
+        let mut declared: Vec<u32> = Vec::new();
+        let mut record = |instruction: &Instr| {
+            if let Instr::RefFunc(index) = instruction
+                && !declared.contains(index)
+            {
+                declared.push(*index);
+            }
+        };
+        for global in &self.globals {
+            for instruction in &global.init {
+                record(instruction);
+            }
+        }
+        for func in &self.funcs {
+            for instruction in &func.body {
+                record(instruction);
+            }
+        }
+        declared
     }
 
     /// Encode the whole module, or `None` when a length did not fit the `u32` the format spells it
@@ -810,6 +862,23 @@ impl Module {
             Self::section(&mut out, 8, &section);
         }
 
+        // Functions a body takes a reference to have to be declared before any validator accepts
+        // the `ref.func` that names them, and a *declarative* element segment is the spelling.
+        // One segment listing every such index: the format has no ordering requirement on them,
+        // and one segment is one length instead of one per function.
+        let declared = self.declared_functions();
+        if !declared.is_empty() {
+            let mut section = Bytes::new();
+            section.count(1);
+            // Flags 3 is a declarative segment: elemkind, then the function indices. 0x00 is that
+            // elemkind — `funcref`, the only one there is.
+            section.byte(0x03).byte(0x00).count(declared.len());
+            for index in declared {
+                section.u32(index);
+            }
+            Self::section(&mut out, 9, &section);
+        }
+
         if !self.funcs.is_empty() {
             let mut section = Bytes::new();
             section.count(self.funcs.len());
@@ -828,6 +897,12 @@ impl Module {
                 section.append(&body);
             }
             Self::section(&mut out, 10, &section);
+        }
+
+        for (name, contents) in &self.custom {
+            let mut section = Bytes::new();
+            section.name(name).raw(contents);
+            Self::section(&mut out, 0, &section);
         }
 
         (!out.overflow).then(|| out.into_vec())
@@ -897,6 +972,11 @@ mod tests {
         assert_eq!(
             encode(ValType::Ref(RefType::nullable(HeapType::Concrete(64)))),
             [0x63, 0xC0, 0x00]
+        );
+        // The function-reference hierarchy, whose encoding is an abstract heap type like `any`.
+        assert_eq!(
+            encode(ValType::Ref(RefType::nullable(HeapType::Func))),
+            [0x63, 0x70]
         );
     }
 }
