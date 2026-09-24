@@ -12,6 +12,7 @@
 //! needs the whole project's types resolved. Compiling file-by-file would mean each file seeing an
 //! index that does not contain its siblings.
 
+use alloc::borrow::ToOwned as _;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
