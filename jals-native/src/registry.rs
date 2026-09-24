@@ -130,7 +130,20 @@ impl NativePackageSet {
     pub fn sources(&self) -> impl Iterator<Item = (&str, &NativeSource)> {
         self.packages
             .iter()
+            // A wasm-route package's Java travels in its module's ABI section, not here: lowering
+            // it into the consumer would be a second copy of code the module already has.
+            .filter(|package| package.wasm_library().is_none())
             .flat_map(|package| package.sources().iter().map(|src| (package.name(), src)))
+    }
+
+    /// Every precompiled module the selection ships, as `(package name, bytes)`.
+    ///
+    /// The package name is the link name: the module's imports are spelled with it, so the two
+    /// cannot disagree about which library is which.
+    pub fn libraries(&self) -> impl Iterator<Item = (&str, &'static [u8])> {
+        self.packages
+            .iter()
+            .filter_map(|package| package.wasm_library().map(|bytes| (package.name(), bytes)))
     }
 
     /// The binding table the runner links a module's imports against.
