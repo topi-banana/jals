@@ -58,6 +58,16 @@
 //! export of a name wins and the second is dropped, a package method could silently take a project
 //! method's export away from it.
 //!
+//! A **linked** library is the other kind, and the opposite arrangement: [`CompileWasm::library`]
+//! emits it as a module of its own — canonical member keys, a factory per constructor, accessor
+//! pairs for `static` fields, and a `jals.library` section describing the types and exports — and
+//! [`CompileWasm::project_linked`] replays that section's type groups into the consumer, imports
+//! each member the consumer can name, and leaves the library's bodies where they are. The two
+//! modules then meet in one store at instantiation. What is not yet routed is a call the *library*
+//! makes on an object the project defines: the library's dispatch chain was compiled before the
+//! project existed, so reaching a project override needs a link-time dispatch object — the realm
+//! `$jals$link` exists for, and the next step of this seam.
+//!
 //! That layer is public for the same reason [`jvm`](crate::jvm) publishes its assembler — a
 //! generator's derivations deserve to be asserted apart from the lowering that feeds them, and a
 //! module that only ever appears as bytes can be asked nothing at all. It matters more here than
@@ -81,10 +91,10 @@ mod lower;
 /// because it is what [`Insn::convert`] takes. [`jvm`](crate::jvm) re-exports it for the same
 /// reason, so that neither backend's seam sends a caller to the other one for a name it needs.
 pub use crate::facts::Numeric;
-pub use abi::{AbiError, CUSTOM_SECTION, ClassType, LibraryAbi, Source};
+pub use abi::{AbiError, CUSTOM_SECTION, ClassType, ExportType, LibraryAbi, Source};
 pub use encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Import, ImportKind, Module, RefType,
     StorageType, SubType, ValType,
 };
 pub use insn::{Insn, Instr, NumOp};
-pub use lower::{CompileWasm, WasmError, WasmOptions};
+pub use lower::{CompileWasm, LinkedLibrary, WasmError, WasmOptions};
