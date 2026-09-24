@@ -412,11 +412,9 @@ fn realm_library() -> Module {
         ExportKind::Func,
         module.func_index(0),
     ));
-    module.exports.push((
-        "invoke".to_owned(),
-        ExportKind::Func,
-        module.func_index(1),
-    ));
+    module
+        .exports
+        .push(("invoke".to_owned(), ExportKind::Func, module.func_index(1)));
     module
 }
 
@@ -466,11 +464,9 @@ fn realm_project() -> Module {
         locals: Vec::new(),
         body: run.into_body(),
     });
-    module.exports.push((
-        "run".to_owned(),
-        ExportKind::Func,
-        module.func_index(1),
-    ));
+    module
+        .exports
+        .push(("run".to_owned(), ExportKind::Func, module.func_index(1)));
     module
 }
 
