@@ -2314,35 +2314,6 @@ struct ResolvedWasmLibrary {
 /// A dependency whose module carries no `jals.library` section is refused here, with the path that
 /// was read: it is the wrong kind of module, and a link failure at run time would say so in the
 /// engine's vocabulary rather than the project's.
-fn wasm_libraries(
-    root: &Path,
-    manifest: &Manifest,
-    features: &ResolvedBuildFeatures,
-) -> Result<Vec<ResolvedWasmLibrary>> {
-    let mut libraries = Vec::new();
-    for (name, dependency) in manifest.active_dependencies(DependencyScope::Build, features) {
-        let Dependency::Wasm(wasm) = dependency else {
-            continue;
-        };
-        let path = root.join(&wasm.wasm);
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("reading wasm dependency `{name}` at `{}`", path.display()))?;
-        let abi = jals_build::LibraryAbi::of_module(&bytes).map_err(|error| {
-            anyhow!(
-                "`{}` (wasm dependency `{name}`) is not a linked library: {error}",
-                path.display()
-            )
-        })?;
-        libraries.push(ResolvedWasmLibrary {
-            bytes,
-            library: jals_build::BackendLibrary {
-                name: name.clone(),
-                abi,
-            },
-        });
-    }
-    Ok(libraries)
-}
 
 /// The compile step, selected and ready to run.
 ///
@@ -2412,7 +2383,7 @@ impl CompilePlan {
         .await;
         match selection {
             jals_build::BackendSelection::Available(backend) => {
-                let (libraries, library_bytes) = wasm_libraries(root, manifest, features)?
+                let (libraries, library_bytes) = Self::wasm_libraries(root, manifest, features)?
                     .into_iter()
                     .map(|library| (library.library, library.bytes))
                     .unzip();
@@ -2444,6 +2415,37 @@ impl CompilePlan {
             libraries: &self.libraries,
             options: &self.options,
         }
+    }
+
+    fn wasm_libraries(
+        root: &Path,
+        manifest: &Manifest,
+        features: &ResolvedBuildFeatures,
+    ) -> Result<Vec<ResolvedWasmLibrary>> {
+        let mut libraries = Vec::new();
+        for (name, dependency) in manifest.active_dependencies(DependencyScope::Build, features) {
+            let Dependency::Wasm(wasm) = dependency else {
+                continue;
+            };
+            let path = root.join(&wasm.wasm);
+            let bytes = std::fs::read(&path).with_context(|| {
+                format!("reading wasm dependency `{name}` at `{}`", path.display())
+            })?;
+            let abi = jals_build::LibraryAbi::of_module(&bytes).map_err(|error| {
+                anyhow!(
+                    "`{}` (wasm dependency `{name}`) is not a linked library: {error}",
+                    path.display()
+                )
+            })?;
+            libraries.push(ResolvedWasmLibrary {
+                bytes,
+                library: jals_build::BackendLibrary {
+                    name: name.clone(),
+                    abi,
+                },
+            });
+        }
+        Ok(libraries)
     }
 }
 
