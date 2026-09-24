@@ -702,7 +702,7 @@ impl Module {
     ///
     /// Exposed for the library ABI, which writes its own types as data: a consumer replays them
     /// rather than decoding the module, which this crate has no reader for.
-    pub fn types(&self) -> &[SubType] {
+    pub(crate) fn types(&self) -> &[SubType] {
         &self.types
     }
 
@@ -711,7 +711,7 @@ impl Module {
     /// A trailing boundary is meaningful here even though [`finish`](Self::finish) emits no group
     /// for it: it is where a consumer replaying these types adds its own, so the project's types
     /// land in a group of their own. The *section* only counts groups with something in them.
-    pub fn groups(&self) -> &[usize] {
+    pub(crate) fn groups(&self) -> &[usize] {
         &self.groups
     }
 
