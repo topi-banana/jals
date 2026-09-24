@@ -226,6 +226,14 @@ pub struct WasmDependency {
     /// A `.wasm` location, relative to the manifest directory. Read by the host, never here: the
     /// module's ABI, not its path, is what a compile consumes.
     pub wasm: String,
+    /// Whether the module is a **foreign** one: a core module this workspace's backend did not
+    /// emit, without a `jals.library` section.
+    ///
+    /// A foreign module provides implementations for the project's `native` declarations, matched
+    /// by the canonical key `owner#name+descriptor` on each export — the WIT-and-Rust side of the
+    /// same seam, where the library route is the Java side. Its boundary is scalars for now: a
+    /// function reference to a GC object is not something a core module can hold.
+    pub foreign: Option<bool>,
     /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
     /// See [`Dependency::is_optional`].
     optional: Option<bool>,
@@ -4474,6 +4482,7 @@ mod tests {
                 "demo".to_owned(),
                 Dependency::Wasm(WasmDependency {
                     wasm: "../demo/demo.wasm".to_owned(),
+                    foreign: None,
                     optional: None,
                 }),
             );
@@ -4493,6 +4502,7 @@ mod tests {
                 "demo".to_owned(),
                 Dependency::Wasm(WasmDependency {
                     wasm: "../demo/demo.wasm".to_owned(),
+                    foreign: None,
                     optional: None,
                 }),
             );
@@ -4512,6 +4522,7 @@ mod tests {
             "demo".to_owned(),
             Dependency::Wasm(WasmDependency {
                 wasm: "../demo/demo.wasm".to_owned(),
+                foreign: None,
                 optional: None,
             }),
         );

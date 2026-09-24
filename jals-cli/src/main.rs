@@ -1230,8 +1230,13 @@ impl RunArgs {
                 .libraries()
                 .map(|(name, bytes)| jals_build::WasmLibrary { name, bytes }),
         );
+        let foreign: Vec<jals_build::WasmForeignModule<'_>> = plan
+            .foreign
+            .iter()
+            .map(|bytes| jals_build::WasmForeignModule { bytes })
+            .collect();
         let (Some(runtime), Some(run_request)) = (&runtime, &run_request) else {
-            return self.run_module(session, &outcome, &natives, &linked, &package);
+            return self.run_module(session, &outcome, &natives, &linked, &foreign, &package);
         };
         let running = package.begin(jals_progress::Activity::Run, run_request.main_class);
         // The child owns this terminal from here on and never gives it back, so the display comes
@@ -1267,6 +1272,7 @@ impl RunArgs {
         outcome: &jals_build::BackendOutcome,
         natives: &jals_native::NativePackageSet,
         libraries: &[jals_build::WasmLibrary<'_>],
+        foreign: &[jals_build::WasmForeignModule<'_>],
         progress: &jals_progress::Progress,
     ) -> Result<ExitCode> {
         let module = outcome
@@ -1288,6 +1294,7 @@ impl RunArgs {
             // The `wasm` dependencies this project links, loaded from where the manifest declared
             // them. A project that declared none links an empty list, which is the ordinary run.
             libraries,
+            foreign,
             progress,
         };
         match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {
@@ -1474,9 +1481,20 @@ impl TestArgs {
                     .libraries()
                     .map(|(name, bytes)| jals_build::WasmLibrary { name, bytes }),
             );
+            let foreign: Vec<jals_build::WasmForeignModule<'_>> = plan
+                .foreign
+                .iter()
+                .map(|bytes| jals_build::WasmForeignModule { bytes })
+                .collect();
             Launcher::Wasm(
-                jals_build::WasmTestLauncher::resolve(module, entries, natives.bindings(), &linked)
-                    .map_err(|e| anyhow!("{e}"))?,
+                jals_build::WasmTestLauncher::resolve(
+                    module,
+                    entries,
+                    natives.bindings(),
+                    &linked,
+                    &foreign,
+                )
+                .map_err(|e| anyhow!("{e}"))?,
             )
         } else {
             // The frontend generates no harness for a project that declares no test, so there is
@@ -2332,6 +2350,9 @@ struct CompilePlan {
     /// The same libraries' bytes, aligned with [`libraries`](Self::libraries), for the run step —
     /// which needs the module the compile only described.
     library_bytes: Vec<Vec<u8>>,
+    /// The foreign modules this run satisfies `native` imports from: no ABI, no compile input, and
+    /// only the run consumes them. See [`jals_build::WasmForeignModule`].
+    foreign: Vec<Vec<u8>>,
     options: jals_build::BackendOptions,
     /// Attributed to the package being compiled, so an in-process backend's per-file counting lands
     /// under the same name the `Compiling` line carries.
@@ -2386,16 +2407,18 @@ impl CompilePlan {
         .await;
         match selection {
             jals_build::BackendSelection::Available(backend) => {
-                let (libraries, library_bytes) =
-                    Self::wasm_libraries(root, manifest, features, lowering.dependency_scope())?
-                        .into_iter()
-                        .map(|library| (library.library, library.bytes))
-                        .unzip();
+                let (resolved, foreign) =
+                    Self::wasm_libraries(root, manifest, features, lowering.dependency_scope())?;
+                let (libraries, library_bytes) = resolved
+                    .into_iter()
+                    .map(|library| (library.library, library.bytes))
+                    .unzip();
                 Ok(Self {
                     backend,
                     tree,
                     libraries,
                     library_bytes,
+                    foreign,
                     options: jals_build::BackendOptions::from_manifest(manifest),
                     progress,
                 })
@@ -2436,8 +2459,9 @@ impl CompilePlan {
         manifest: &Manifest,
         features: &ResolvedBuildFeatures,
         scope: DependencyScope,
-    ) -> Result<Vec<ResolvedWasmLibrary>> {
+    ) -> Result<(Vec<ResolvedWasmLibrary>, Vec<Vec<u8>>)> {
         let mut libraries = Vec::new();
+        let mut foreign = Vec::new();
         for (name, dependency) in manifest.active_dependencies(scope, features) {
             let Dependency::Wasm(wasm) = dependency else {
                 continue;
@@ -2446,6 +2470,12 @@ impl CompilePlan {
             let bytes = std::fs::read(&path).with_context(|| {
                 format!("reading wasm dependency `{name}` at `{}`", path.display())
             })?;
+            // A foreign module has no ABI to read: the project's own `native` declarations are
+            // its API, and its exports are matched to them by canonical key at run time.
+            if wasm.foreign.unwrap_or(false) {
+                foreign.push(bytes);
+                continue;
+            }
             let abi = jals_build::LibraryAbi::of_module(&bytes).map_err(|error| {
                 anyhow!(
                     "`{}` (wasm dependency `{name}`) is not a linked library: {error}",
@@ -2460,7 +2490,7 @@ impl CompilePlan {
                 },
             });
         }
-        Ok(libraries)
+        Ok((libraries, foreign))
     }
 }
 
@@ -3545,10 +3575,11 @@ mod tests {
         .expect("the manifest parses and validates");
         let features = ResolvedBuildFeatures::default();
         let root = Path::new("/project");
-        let libraries =
+        let (libraries, foreign) =
             CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Build)
                 .expect("the build scope resolves no wasm dependency");
         assert!(libraries.is_empty());
+        assert!(foreign.is_empty());
         let error = CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Test)
             .err()
             .expect("the test scope reads the development dependency");
