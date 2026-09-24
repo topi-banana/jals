@@ -452,3 +452,76 @@ fn the_runner_links_a_librarys_host_imports() {
         jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(42)])
     );
 }
+
+/// One frontend-published source, the shape a backend request takes.
+fn backend_source(path: &str, text: &str) -> jals_build::BackendSource {
+    let bytes = text.as_bytes().to_vec();
+    jals_build::BackendSource {
+        path: jals_storage::RelativePath::parse(path).expect("a valid path"),
+        key: jals_storage::CacheKey::new(
+            jals_storage::CacheNamespace::FrontendOutput,
+            jals_storage::ContentDigest::of(b"test"),
+            jals_storage::ContentDigest::of(&bytes),
+        ),
+        bytes,
+    }
+}
+
+/// A package that ships its Java as a precompiled module instead of sources: the same program,
+/// with the library arriving through `[build] native-packages` rather than a `wasm` dependency.
+#[test]
+fn a_package_can_ship_its_java_as_a_module() {
+    let (library_bytes, _) = compiled_pair(PROJECT, &[("demo/Counter.java", LIBRARY)]);
+    // A package's module is compiled into the binary that ships it, so its bytes are `'static`;
+    // a test hands its own over the same way `include_bytes!` would.
+    let library_bytes: &'static [u8] = Box::leak(library_bytes.into_boxed_slice());
+
+    let mut package = jals_native::NativePackage::new("lib", 1);
+    package.library(library_bytes);
+    let mut registry = jals_native::NativeRegistry::new();
+    registry.add(package);
+    let selection = registry
+        .select(&["lib".to_owned()])
+        .expect("the package is registered");
+
+    let tree = [backend_source("Main.java", PROJECT)];
+    let options = jals_build::BackendOptions::default();
+    let request = jals_build::BackendRequest {
+        progress: &jals_progress::Progress::SILENT,
+        tree: &tree,
+        classpath: &[],
+        libraries: &[],
+        options: &options,
+    };
+    let selected = jals_build::BackendSelection::in_process(
+        jals_config::BackendKind::JalsWasm {},
+        None,
+        jals_build::Assertions::Disabled,
+        selection.clone(),
+    );
+    let jals_build::BackendSelection::Available(backend) = selected else {
+        panic!("the in-process wasm backend is available on every host");
+    };
+    let outcome = jals_exec::block_on_inline(backend.compile(&request)).expect("the compile runs");
+    assert!(outcome.success(), "messages: {:?}", outcome.messages);
+    let project_bytes = outcome
+        .artifact(jals_build::JalsBackend::WASM_MODULE)
+        .expect("the compile produced a module");
+
+    let outcome = jals_build::WasmRunner::run(&jals_build::WasmRunRequest {
+        module: project_bytes,
+        invoke: Some("run"),
+        args: &[],
+        natives: &selection.bindings(),
+        libraries: &[jals_build::WasmLibrary {
+            name: "lib",
+            bytes: library_bytes,
+        }],
+        progress: &jals_progress::Progress::SILENT,
+    })
+    .expect("the run links and executes");
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(52)])
+    );
+}

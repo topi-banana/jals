@@ -49,6 +49,15 @@ pub struct NativePackage {
     name: String,
     version: u32,
     sources: Vec<NativeSource>,
+    /// The precompiled module this package's Java runs from, when it ships one instead of the
+    /// Java being lowered into the consumer.
+    ///
+    /// The two routes are alternatives on one package, not two definitions of one type: a package
+    /// whose Java is compiled by its consumer (`sources`) and a package whose Java was compiled
+    /// once into a module (`library`) are two answers to "where does the implementation run", and
+    /// the package's *bindings* stay regardless — a module's `native` methods still reach the
+    /// host through the same table.
+    library: Option<&'static [u8]>,
     bindings: BTreeMap<(String, String), NativeFn>,
 }
 
@@ -65,8 +74,29 @@ impl NativePackage {
             name: name.to_owned(),
             version,
             sources: Vec::new(),
+            library: None,
             bindings: BTreeMap::new(),
         }
+    }
+
+    /// Ship the package's Java as a **precompiled module** instead of sources.
+    ///
+    /// The bytes are the whole artifact: a module the wasm backend emitted, carrying the
+    /// `jals.library` section that states its API and its types. A consumer indexes the Java the
+    /// section publishes, replays the types, and links the module at instantiation — so the
+    /// package's `sources` are not lowered, and a package that ships a library should declare
+    /// none (the section's text is the API).
+    ///
+    /// `'static` for the same reason [`NativeSource`] is: the module is compiled into the binary
+    /// that ships it, so there is no I/O and nothing to fail.
+    pub const fn library(&mut self, bytes: &'static [u8]) -> &mut Self {
+        self.library = Some(bytes);
+        self
+    }
+
+    /// The precompiled module, when this package ships one.
+    pub const fn wasm_library(&self) -> Option<&'static [u8]> {
+        self.library
     }
 
     /// Publish one Java compilation unit.
@@ -129,6 +159,17 @@ impl NativePackage {
             provenance.field(owner.as_bytes());
             provenance.field(signature.as_bytes());
         }
+        // A module's bytes are an input like a source's text: a different module is a different
+        // artifact, down to the link.
+        match self.library {
+            Some(bytes) => {
+                provenance.number(1);
+                provenance.field(bytes);
+            }
+            None => {
+                provenance.number(0);
+            }
+        }
     }
 }
 
@@ -139,6 +180,12 @@ impl core::fmt::Debug for NativePackage {
             .field("version", &self.version)
             .field("sources", &self.sources)
             .field("bindings", &self.bindings.keys())
+            .field(
+                "library",
+                &self
+                    .library
+                    .map(|bytes| alloc::format!("{} bytes", bytes.len())),
+            )
             .finish()
     }
 }

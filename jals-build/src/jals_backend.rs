@@ -145,13 +145,31 @@ impl JalsBackend {
             let file = FileId(u32::try_from(project_files + offset).unwrap_or(u32::MAX));
             roots.push((file, Parse::parse(source.text).await.syntax()));
         }
+        // Every linked library — a `wasm` dependency or a selected package that shipped a module
+        // instead of sources — decoded from the ABI its own section carries. Decoding once is also
+        // the check: a module that is not a linked library fails here, under the name it was
+        // selected by, rather than at instantiation in the engine's vocabulary.
+        let mut linked: Vec<(String, jals_javac::wasm::LibraryAbi)> = Vec::new();
+        for (name, bytes) in self.natives.libraries() {
+            match jals_javac::wasm::LibraryAbi::of_module(bytes) {
+                Ok(abi) => linked.push((name.to_owned(), abi)),
+                Err(error) => messages.push(format!("native package `{name}`: {error}")),
+            }
+        }
+        for library in request.libraries {
+            linked.push((library.name.clone(), library.abi.clone()));
+        }
+        if !messages.is_empty() {
+            report.finish(Outcome::Failed);
+            return BackendOutcome::failed(messages);
+        }
         // A linked library's published Java, indexed but never lowered: the code is already in the
         // library's own module, and what the project needs from the text is resolution. The text
         // is the same Java the library compiled, so the API the index reads and the code that runs
         // cannot drift.
         let mut library_roots: Vec<(FileId, SyntaxNode)> = Vec::new();
-        for library in request.libraries {
-            for source in &library.abi.sources {
+        for (_, abi) in &linked {
+            for source in &abi.sources {
                 let file =
                     FileId(u32::try_from(roots.len() + library_roots.len()).unwrap_or(u32::MAX));
                 library_roots.push((file, Parse::parse(&source.text).await.syntax()));
@@ -200,13 +218,9 @@ impl JalsBackend {
                 // returns past the `finish` below. Ending the unit here is what keeps a green
                 // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
                 let options = jals_javac::wasm::WasmOptions { assertions };
-                let linked: Vec<jals_javac::wasm::LinkedLibrary<'_>> = request
-                    .libraries
+                let linked: Vec<jals_javac::wasm::LinkedLibrary<'_>> = linked
                     .iter()
-                    .map(|library| jals_javac::wasm::LinkedLibrary {
-                        name: &library.name,
-                        abi: &library.abi,
-                    })
+                    .map(|(name, abi)| jals_javac::wasm::LinkedLibrary { name, abi })
                     .collect();
                 let outcome = match CompileWasm::project_linked(
                     typed_project,
