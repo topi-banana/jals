@@ -438,8 +438,11 @@ impl NativeProjectPlan {
                 }
             };
             match dependency {
-                // Lowered by `add_jar_dependencies` above.
-                Dependency::Jar(_) => {}
+                // Lowered by `add_jar_dependencies` above. A precompiled module contributes no
+                // classpath entry and no `.java` source either: what it needs is a link at
+                // instantiation, which is the compile's and the runner's business, not the
+                // resolver's.
+                Dependency::Jar(_) | Dependency::Wasm(_) => {}
                 Dependency::Path(path) => match Self::project_path_root(path, project_root, view) {
                     Ok(Some(key)) => result.plan.source_dependency_roots.push(key),
                     // Outside the project root: scanned from the host filesystem by
@@ -530,7 +533,7 @@ impl NativeProjectPlan {
                         scopes.push(NativeScope::extension(relative, "java"));
                     }
                 }
-                Dependency::Git(_) => {}
+                Dependency::Git(_) | Dependency::Wasm(_) => {}
             }
         }
         scopes
