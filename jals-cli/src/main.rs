@@ -2309,12 +2309,6 @@ struct ResolvedWasmLibrary {
     library: jals_build::BackendLibrary,
 }
 
-/// Every active `wasm` dependency of `manifest`, read and decoded in declaration order.
-///
-/// A dependency whose module carries no `jals.library` section is refused here, with the path that
-/// was read: it is the wrong kind of module, and a link failure at run time would say so in the
-/// engine's vocabulary rather than the project's.
-
 /// The compile step, selected and ready to run.
 ///
 /// Owns what a [`BackendRequest`](jals_build::BackendRequest) borrows, which is the whole reason it
@@ -2417,6 +2411,11 @@ impl CompilePlan {
         }
     }
 
+    /// Every active `wasm` dependency of `manifest`, read and decoded in declaration order.
+    ///
+    /// A dependency whose module carries no `jals.library` section is refused here, with the path
+    /// that was read: it is the wrong kind of module, and a link failure at run time would say so
+    /// in the engine's vocabulary rather than the project's.
     fn wasm_libraries(
         root: &Path,
         manifest: &Manifest,
