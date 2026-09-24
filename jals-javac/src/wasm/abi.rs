@@ -72,9 +72,9 @@ pub struct ClassType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportType {
     /// The export name — a member key, or an ABI name like `$jals$tag`.
-    pub name: String,
+    pub(crate) name: String,
     /// The function type's local index into [`LibraryAbi::types`].
-    pub type_index: u32,
+    pub(crate) type_index: u32,
 }
 
 /// What a linked library states about itself.
@@ -89,7 +89,7 @@ pub struct LibraryAbi {
     /// Every class the module declared and where its struct sits.
     pub classes: Vec<ClassType>,
     /// Every function the module exports and the type its signature occupies.
-    pub functions: Vec<ExportType>,
+    pub(crate) functions: Vec<ExportType>,
     /// The type index each declared recursive group starts at — the boundaries a consumer must
     /// reproduce *exactly*.
     pub(crate) groups: Vec<usize>,
@@ -99,7 +99,7 @@ pub struct LibraryAbi {
 
 impl LibraryAbi {
     /// The *local* type index the function exported under `name` occupies.
-    pub fn export_type(&self, name: &str) -> Option<u32> {
+    pub(crate) fn export_type(&self, name: &str) -> Option<u32> {
         self.functions
             .iter()
             .find(|export| export.name == name)
