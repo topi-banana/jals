@@ -27,6 +27,11 @@
 //! Library types are out of scope by design — there is no `java.base` on a wasm host, and supplying
 //! one is a separate decision from compiling. So no `String` and no boxing.
 //!
+//! The exception is a **linked library**: a package that was itself compiled by this backend,
+//! whose types are replayed and whose members are imports (see [`LinkedLibrary`]). It is not a
+//! `java.base` supplied at run time by the host; it is the same compiler's output, linked at
+//! instantiation rather than merged into the module.
+//!
 //! # Where wasm and the JVM genuinely differ
 //!
 //! Most of the two backends' disagreements are spellings. Three are not:
@@ -55,7 +60,7 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 use crate::desc::Descriptor;
 use crate::facts::{ArmLabels, Facts, Literal};
 use crate::facts::{Numeric, Operator, Unary};
-use crate::wasm::abi::{self, ClassType, LibraryAbi, Source};
+use crate::wasm::abi::{self, ClassType, ExportType, LibraryAbi, Source};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -196,6 +201,19 @@ enum Surface {
     Library,
 }
 
+/// A library a project links against: what to call it and what it said about itself.
+///
+/// The ABI is carried by the module's own `jals.library` section, decoded by the host — a
+/// `no_std` compiler has no wasm parser, and the section is written by the compile that encoded
+/// the very types a consumer replays.
+#[derive(Debug, Clone, Copy)]
+pub struct LinkedLibrary<'a> {
+    /// The link name, which every import from this library is spelled with.
+    pub name: &'a str,
+    /// What the library's `jals.library` section said.
+    pub abi: &'a LibraryAbi,
+}
+
 impl CompileWasm {
     /// Emit the module's bytes. `index` must have been built over exactly `inputs` and
     /// `libraries`.
@@ -251,7 +269,8 @@ impl CompileWasm {
         index: &ProjectIndex,
         options: WasmOptions,
     ) -> Result<Module> {
-        Self::build(inputs, libraries, index, options, Surface::Project).map(|(module, _)| module)
+        Self::build(inputs, libraries, &[], index, options, Surface::Project)
+            .map(|(module, _)| module)
     }
 
     /// Compile a package as a **linked library**: the module another compile links against.
@@ -286,12 +305,14 @@ impl CompileWasm {
         version: u32,
         sources: Vec<Source>,
     ) -> Result<(Module, LibraryAbi)> {
-        let (mut module, classes) = Self::build(inputs, &[], index, options, Surface::Library)?;
+        let (mut module, (classes, functions)) =
+            Self::build(inputs, &[], &[], index, options, Surface::Library)?;
         let abi = LibraryAbi {
             package: package.to_owned(),
             version,
             sources,
             classes,
+            functions,
             groups: module.groups().to_vec(),
             types: module.types().to_vec(),
         };
@@ -299,13 +320,34 @@ impl CompileWasm {
         Ok((module, abi))
     }
 
+    /// Compile a project that links against precompiled libraries.
+    ///
+    /// `index` must have been built over `inputs` **and** the libraries' published Java, because
+    /// resolution reads the same declarations the library compiled. Each library's types are
+    /// replayed into the module before the project's own — canonicalisation is per group, so the
+    /// two modules meet only where the declarations are identical — and every member the project
+    /// can name becomes an import from the library's link name.
+    pub fn project_linked(
+        inputs: &[TypedFile<'_>],
+        libraries: &[TypedFile<'_>],
+        linked: &[LinkedLibrary<'_>],
+        index: &ProjectIndex,
+        options: WasmOptions,
+    ) -> Result<Vec<u8>> {
+        Self::build(inputs, libraries, linked, index, options, Surface::Project)?
+            .0
+            .finish()
+            .ok_or(WasmError::TooLarge)
+    }
+
     fn build(
         inputs: &[TypedFile<'_>],
         libraries: &[TypedFile<'_>],
+        linked: &[LinkedLibrary<'_>],
         index: &ProjectIndex,
         options: WasmOptions,
         surface: Surface,
-    ) -> Result<(Module, Vec<ClassType>)> {
+    ) -> Result<(Module, (Vec<ClassType>, Vec<ExportType>))> {
         // Everything below reads one list. A library class is laid out, has its bodies lowered and
         // is called exactly as a project class is — the *only* thing the two lists decide is which
         // declarations reach the export section, which is what `exported` carries into
@@ -325,6 +367,13 @@ impl CompileWasm {
             ..Layout::default()
         };
 
+        // A linked library's types are replayed *first*, in the groups its own compile declared:
+        // canonicalisation is per group, so the two modules meet only where the declarations are
+        // identical. Everything the project declares then goes after a boundary of its own.
+        for library in linked {
+            Self::replay_library(library, index, &mut module, &mut layout)?;
+        }
+
         // Pass 1: every class *reserves* a struct type index, in an order where a supertype comes
         // first so its field prefix is known when the subtype is laid out. Only the index is fixed
         // here — the body waits, because a field of array type needs an array type index and an
@@ -339,6 +388,25 @@ impl CompileWasm {
             &mut inner_items,
             &mut captured_items,
         )?;
+        // A project class may not extend a linked library's class: the constructor chain would
+        // have to call the library's factory *as a super constructor*, and the factory allocates
+        // — there is no `this` to pass. Reported here, where the class is, rather than at the
+        // `super()` that would fail with a call the library never exported.
+        for &item in &classes {
+            let mut seen = BTreeSet::new();
+            let mut parent = index.direct_superclass(item);
+            while let Some(ancestor) = parent {
+                if layout.external_classes.contains_key(&ancestor) {
+                    return Err(WasmError::Unsupported(
+                        "a class extending a linked library's class",
+                    ));
+                }
+                if !seen.insert(ancestor) {
+                    break;
+                }
+                parent = index.direct_superclass(ancestor);
+            }
+        }
         for (item, enclosing) in inner_items {
             layout.inner.insert(item, enclosing);
         }
@@ -390,6 +458,10 @@ impl CompileWasm {
         for input in inputs {
             Self::collect_imports(input, index, &mut layout, &mut module)?;
         }
+        // Then every member a linked library exports that the project could call. Imports occupy
+        // the function index space before the first defined function, so — like a `native`
+        // declaration — they are all declared before any index is handed out.
+        Self::collect_linked_imports(linked, index, &mut layout, &mut module)?;
         // Now every index is known, so the struct bodies can name array types and vice versa.
         for &item in &classes {
             layout.fill_class(item, index, &mut module)?;
@@ -515,13 +587,13 @@ impl CompileWasm {
         // A linked library's surface is added last: its factories and accessors are functions the
         // lowering above knows nothing about, and they may only be pushed once every index they
         // name exists.
-        let classes = match surface {
-            Surface::Project => Vec::new(),
+        let (classes, functions) = match surface {
+            Surface::Project => (Vec::new(), Vec::new()),
             Surface::Library => {
                 Self::export_library(&classes, &compiled, index, &layout, &mut module)?
             }
         };
-        Ok((module, classes))
+        Ok((module, (classes, functions)))
     }
 
     /// Add the entry points a linked library's consumers call.
@@ -544,8 +616,9 @@ impl CompileWasm {
         index: &ProjectIndex,
         layout: &Layout,
         module: &mut Module,
-    ) -> Result<Vec<ClassType>> {
+    ) -> Result<(Vec<ClassType>, Vec<ExportType>)> {
         let first_defined = module.func_index(0);
+        let mut functions = Vec::new();
 
         for (&member, &function) in &layout.functions {
             let info = index.member(member);
@@ -556,17 +629,30 @@ impl CompileWasm {
             match info.kind {
                 DefKind::Method => {
                     let key = Self::member_key(owner, member, index)?;
-                    module.exports.push((key, ExportKind::Func, function));
+                    let type_index = Self::defined_type_index(module, function, first_defined)?;
+                    module
+                        .exports
+                        .push((key.clone(), ExportKind::Func, function));
+                    functions.push(ExportType {
+                        name: key,
+                        type_index,
+                    });
                 }
                 DefKind::Constructor => {
                     let Some(&structure) = layout.structs.get(&owner) else {
                         continue;
                     };
-                    let factory = Self::constructor_factory(
+                    let (factory, type_index) = Self::constructor_factory(
                         member, function, structure, layout, module, index,
                     )?;
                     let key = Self::member_key(owner, member, index)?;
-                    module.exports.push((key, ExportKind::Func, factory));
+                    module
+                        .exports
+                        .push((key.clone(), ExportKind::Func, factory));
+                    functions.push(ExportType {
+                        name: key,
+                        type_index,
+                    });
                 }
                 _ => {}
             }
@@ -615,7 +701,13 @@ impl CompileWasm {
                 },
             )?;
             let key = Self::member_key(item, member, index)?;
-            module.exports.push((key, ExportKind::Func, factory));
+            module
+                .exports
+                .push((key.clone(), ExportKind::Func, factory));
+            functions.push(ExportType {
+                name: key,
+                type_index: factory_ty,
+            });
         }
 
         // A `static` field is module state; the surface is a getter and a setter.
@@ -651,11 +743,14 @@ impl CompileWasm {
                     body: get.into_body(),
                 },
             )?;
-            module.exports.push((
-                alloc::format!("{owner_name}#{name}#get"),
-                ExportKind::Func,
-                get_index,
-            ));
+            let get_key = alloc::format!("{owner_name}#{name}#get");
+            module
+                .exports
+                .push((get_key.clone(), ExportKind::Func, get_index));
+            functions.push(ExportType {
+                name: get_key,
+                type_index: get_ty,
+            });
 
             let put_ty = module.add_type(SubType::plain(CompType::Func {
                 params: alloc::vec![ty],
@@ -675,11 +770,14 @@ impl CompileWasm {
                     body: put.into_body(),
                 },
             )?;
-            module.exports.push((
-                alloc::format!("{owner_name}#{name}#put"),
-                ExportKind::Func,
-                put_index,
-            ));
+            let put_key = alloc::format!("{owner_name}#{name}#put");
+            module
+                .exports
+                .push((put_key.clone(), ExportKind::Func, put_index));
+            functions.push(ExportType {
+                name: put_key,
+                type_index: put_ty,
+            });
         }
 
         // One tag covers every Java throw in the module, so one export lets a consumer catch them
@@ -700,7 +798,20 @@ impl CompileWasm {
                 });
             }
         }
-        Ok(map)
+        Ok((map, functions))
+    }
+
+    /// The type index a defined function carries, which is what an export entry records.
+    fn defined_type_index(module: &Module, function: u32, first_defined: u32) -> Result<u32> {
+        let defined = usize::try_from(function.saturating_sub(first_defined))
+            .map_err(|_| WasmError::TooLarge)?;
+        module
+            .funcs
+            .get(defined)
+            .map(|func| func.type_index)
+            .ok_or(WasmError::Unsupported(
+                "an exported member with no function",
+            ))
     }
 
     /// A constructor as a consumer can call it: allocate, run the constructor, return the object.
@@ -715,14 +826,8 @@ impl CompileWasm {
         layout: &Layout,
         module: &mut Module,
         index: &ProjectIndex,
-    ) -> Result<u32> {
-        let defined = usize::try_from(function.saturating_sub(module.func_index(0)))
-            .map_err(|_| WasmError::TooLarge)?;
-        let type_index = module
-            .funcs
-            .get(defined)
-            .ok_or(WasmError::Unsupported("a constructor with no function"))?
-            .type_index;
+    ) -> Result<(u32, u32)> {
+        let type_index = Self::defined_type_index(module, function, module.func_index(0))?;
         let Some(SubType {
             comp: CompType::Func { params, .. },
             ..
@@ -761,7 +866,7 @@ impl CompileWasm {
                 body: insn.into_body(),
             },
         )?;
-        Ok(factory)
+        Ok((factory, factory_ty))
     }
 
     /// `owner#name+descriptor`, the one spelling a linked member is exported and imported under.
@@ -781,6 +886,181 @@ impl CompileWasm {
             Descriptor::method_descriptor(member, index, info.kind == DefKind::Constructor)
                 .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
         Ok(alloc::format!("{owner}#{name}{descriptor}"))
+    }
+
+    /// Replay a library's declared groups verbatim and record where its classes landed.
+    ///
+    /// The group boundaries are reproduced exactly, because they are the identity: two modules
+    /// share a type only when both declared the same *group*, so a consumer that merged the
+    /// library's types into a group of its own would have the same declarations and still link
+    /// against nothing. The consumer's own types go after a boundary this leaves behind.
+    fn replay_library(
+        library: &LinkedLibrary<'_>,
+        index: &ProjectIndex,
+        module: &mut Module,
+        layout: &mut Layout,
+    ) -> Result<()> {
+        let base = u32::try_from(module.types().len()).map_err(|_| WasmError::TooLarge)?;
+        module.begin_group();
+        let mut next = 1usize;
+        for (local, ty) in library.abi.types.iter().enumerate() {
+            if library.abi.groups.get(next) == Some(&local) {
+                module.begin_group();
+                next += 1;
+            }
+            module.add_type(Self::rebase(ty, base));
+        }
+        module.begin_group();
+        for class in &library.abi.classes {
+            let Some(item) = index.item_by_fqn(&Self::fqn_of_internal(&class.name)) else {
+                continue;
+            };
+            layout
+                .structs
+                .insert(item, base.saturating_add(class.index));
+            layout
+                .external_classes
+                .insert(item, library.name.to_owned());
+        }
+        Ok(())
+    }
+
+    /// A declared type with every concrete index shifted by the replay's base.
+    fn rebase(ty: &SubType, base: u32) -> SubType {
+        let comp = match &ty.comp {
+            CompType::Func { params, results } => CompType::Func {
+                params: params
+                    .iter()
+                    .copied()
+                    .map(|ty| Self::rebase_val(ty, base))
+                    .collect(),
+                results: results
+                    .iter()
+                    .copied()
+                    .map(|ty| Self::rebase_val(ty, base))
+                    .collect(),
+            },
+            CompType::Struct(fields) => CompType::Struct(
+                fields
+                    .iter()
+                    .map(|field| Self::rebase_field(field, base))
+                    .collect(),
+            ),
+            CompType::Array(element) => CompType::Array(Self::rebase_field(element, base)),
+        };
+        SubType {
+            is_final: ty.is_final,
+            supertype: ty.supertype.map(|supertype| supertype.saturating_add(base)),
+            comp,
+        }
+    }
+
+    const fn rebase_field(field: &FieldType, base: u32) -> FieldType {
+        let StorageType::Val(value) = field.storage;
+        FieldType {
+            storage: StorageType::Val(Self::rebase_val(value, base)),
+            mutable: field.mutable,
+        }
+    }
+
+    const fn rebase_val(ty: ValType, base: u32) -> ValType {
+        match ty {
+            ValType::Ref(reference) => ValType::Ref(RefType {
+                nullable: reference.nullable,
+                heap: match reference.heap {
+                    HeapType::Concrete(index) => HeapType::Concrete(index.saturating_add(base)),
+                    heap => heap,
+                },
+            }),
+            primitive => primitive,
+        }
+    }
+
+    /// `demo/Outer$Inner` as the index spells a fully-qualified name: `demo.Outer.Inner`.
+    fn fqn_of_internal(name: &str) -> String {
+        name.replace(['/', '$'], ".")
+    }
+
+    /// Declare an import for every member a linked library exports and the project can name.
+    ///
+    /// The whole surface is imported in one sweep, because imports occupy the function index space
+    /// *before* every defined function: discovering a call while lowering a body would be too late
+    /// to give it an index. What the library does not export — a private member, an abstract
+    /// method, a `native` declaration only its own embedder implements — has no import, and the
+    /// call site that names it fails where it is written.
+    fn collect_linked_imports(
+        libraries: &[LinkedLibrary<'_>],
+        index: &ProjectIndex,
+        layout: &mut Layout,
+        module: &mut Module,
+    ) -> Result<()> {
+        let mut base = 0u32;
+        for library in libraries {
+            for class in &library.abi.classes {
+                let Some(item) = index.item_by_fqn(&Self::fqn_of_internal(&class.name)) else {
+                    continue;
+                };
+                for &member in index.own_members(item) {
+                    let info = index.member(member);
+                    if info.modifiers.is_private {
+                        continue;
+                    }
+                    match info.kind {
+                        DefKind::Method => {
+                            let key = Self::member_key(item, member, index)?;
+                            let Some(local) = library.abi.export_type(&key) else {
+                                continue;
+                            };
+                            let function = module.add_shared_import(
+                                library.name.to_owned(),
+                                key,
+                                local.saturating_add(base),
+                            );
+                            layout.functions.insert(member, function);
+                        }
+                        DefKind::Constructor => {
+                            let key = Self::member_key(item, member, index)?;
+                            let Some(local) = library.abi.export_type(&key) else {
+                                continue;
+                            };
+                            let function = module.add_shared_import(
+                                library.name.to_owned(),
+                                key,
+                                local.saturating_add(base),
+                            );
+                            layout.external_constructors.insert(member, function);
+                        }
+                        DefKind::Field if info.modifiers.is_static => {
+                            let owner = Descriptor::internal_name_of(item, index);
+                            let get_key = alloc::format!("{owner}#{}#get", info.name);
+                            let put_key = alloc::format!("{owner}#{}#put", info.name);
+                            let (Some(get), Some(put)) = (
+                                library.abi.export_type(&get_key),
+                                library.abi.export_type(&put_key),
+                            ) else {
+                                continue;
+                            };
+                            let get_index = module.add_shared_import(
+                                library.name.to_owned(),
+                                get_key,
+                                get.saturating_add(base),
+                            );
+                            let put_index = module.add_shared_import(
+                                library.name.to_owned(),
+                                put_key,
+                                put.saturating_add(base),
+                            );
+                            layout
+                                .external_statics
+                                .insert(member, (get_index, put_index));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            base = base.saturating_add(u32::try_from(library.abi.types.len()).unwrap_or(u32::MAX));
+        }
+        Ok(())
     }
 
     /// Give every class with static state a function index and a "has run" flag.
@@ -1599,6 +1879,14 @@ struct Layout {
     /// `(element type, array type index)`. A `Vec` because `ValType` has no ordering and a program
     /// has a handful of distinct element types.
     arrays: Vec<(ValType, u32)>,
+    /// The classes a linked library declares, by item, with the library's link name. Their structs
+    /// are already replayed into [`structs`](Self::structs), so `reserve_class` leaves them alone
+    /// and a value of the type is a concrete reference rather than `anyref`.
+    external_classes: BTreeMap<ItemId, String>,
+    /// A linked library's constructors: the factory import that allocates and runs one.
+    external_constructors: BTreeMap<MemberId, u32>,
+    /// A linked library's `static` fields: the accessor imports a read and a write call.
+    external_statics: BTreeMap<MemberId, (u32, u32)>,
 }
 
 /// One value a call site pushes.
@@ -4201,6 +4489,12 @@ impl Lowering<'_> {
             let ty = self
                 .layout
                 .val_type(&self.index.resolved_member_ty(member))?;
+            // A linked library's `static` field is reached through its accessor, which also runs
+            // the class's initialiser — the same thing `ensure_initialised` would do here.
+            if let Some(&(get, _)) = self.layout.external_statics.get(&member) {
+                insn.call(get);
+                return Ok(ty);
+            }
             let global = self.layout.statics.get(&member).ok_or_else(unresolved)?;
             self.ensure_initialised(member, insn);
             insn.global_get(*global);
@@ -4342,6 +4636,12 @@ impl Lowering<'_> {
             let ty = self
                 .layout
                 .val_type(&self.index.resolved_member_ty(member))?;
+            // A linked library's `static` field is reached through its accessor, which also runs
+            // the class's initialiser — the same thing `ensure_initialised` would do here.
+            if let Some(&(get, _)) = self.layout.external_statics.get(&member) {
+                insn.call(get);
+                return Ok(ty);
+            }
             let global = self
                 .layout
                 .statics
@@ -5039,6 +5339,9 @@ impl Lowering<'_> {
                 }
                 let (owner, member) = self.field_target(access)?;
                 if self.index.member(member).modifiers.is_static {
+                    if let Some(&(get, put)) = self.layout.external_statics.get(&member) {
+                        return Ok(Place::External { get, put, ty });
+                    }
                     let global =
                         *self.layout.statics.get(&member).ok_or_else(|| {
                             WasmError::Unresolved(access.field().unwrap_or_default())
@@ -5084,6 +5387,9 @@ impl Lowering<'_> {
                 };
                 let member = member.ok_or_else(unresolved)?;
                 if self.index.member(member).modifiers.is_static {
+                    if let Some(&(get, put)) = self.layout.external_statics.get(&member) {
+                        return Ok(Place::External { get, put, ty });
+                    }
                     let global = *self.layout.statics.get(&member).ok_or_else(unresolved)?;
                     self.ensure_initialised(member, insn);
                     return Ok(Place::Global { index: global, ty });
@@ -5282,6 +5588,37 @@ impl Lowering<'_> {
             .find_map(ast::ArgList::cast)
             .map(|list| list.args().collect())
             .unwrap_or_default();
+        // A linked library's class is built by the library: its constructor's in-module shape
+        // leads with a `this` no consumer has, so the export is a factory that allocates, runs
+        // the constructor and returns the object. Nothing here lays the struct out.
+        if self.layout.external_classes.contains_key(&item) {
+            let selected = self
+                .input
+                .call_target_of(Facts::span(new.syntax()))
+                .filter(|&member| self.index.member(member).kind == DefKind::Constructor);
+            let member = selected
+                .or_else(|| {
+                    self.index
+                        .own_members(item)
+                        .iter()
+                        .copied()
+                        .find(|&member| self.index.member(member).kind == DefKind::Constructor)
+                })
+                .ok_or(WasmError::Unsupported(
+                    "a linked library class with no constructor",
+                ))?;
+            let factory = self
+                .layout
+                .external_constructors
+                .get(&member)
+                .copied()
+                .ok_or(WasmError::Unsupported(
+                    "a constructor a linked library does not export",
+                ))?;
+            self.push_arguments(member, &arguments, insn)?;
+            insn.call(factory);
+            return self.layout.class_ref(item);
+        }
         // Which constructor, read from the index rather than re-picked here. Matching on argument
         // *count* alone took the first of any same-arity pair, and a second selection free to
         // disagree with the analysis is the drift `call_target_of` exists to prevent.
@@ -6052,6 +6389,13 @@ enum Place {
         index: u32,
         ty: ValType,
     },
+    /// A `static` field of a linked library, reached through its accessor imports: a global in
+    /// another module is not a name a Java signature can spell.
+    External {
+        get: u32,
+        put: u32,
+        ty: ValType,
+    },
     /// An element of the array in local `array` at the index in local `index`.
     Element {
         array: u32,
@@ -6066,6 +6410,7 @@ impl Place {
         match self {
             Self::Local { ty, .. }
             | Self::Global { ty, .. }
+            | Self::External { ty, .. }
             | Self::Field { ty, .. }
             | Self::Element { ty, .. } => ty,
         }
@@ -6074,7 +6419,8 @@ impl Place {
     /// Push the operands [`store`](Self::store) needs *below* the value.
     fn address(self, insn: &mut Insn) {
         match self {
-            Self::Local { .. } | Self::Global { .. } => {}
+            // The value on the stack *is* the argument an accessor call takes.
+            Self::Local { .. } | Self::Global { .. } | Self::External { .. } => {}
             Self::Field { receiver, .. } => {
                 insn.local_get(receiver);
             }
@@ -6092,6 +6438,9 @@ impl Place {
             }
             Self::Global { index, .. } => {
                 insn.global_get(index);
+            }
+            Self::External { get, .. } => {
+                insn.call(get);
             }
             Self::Field {
                 receiver,
@@ -6130,6 +6479,12 @@ impl Place {
             // having neither threads nor volatile fields.
             Self::Global { index, .. } => {
                 insn.global_set(index);
+                if keep {
+                    self.read(insn);
+                }
+            }
+            Self::External { put, .. } => {
+                insn.call(put);
                 if keep {
                     self.read(insn);
                 }

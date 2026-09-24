@@ -63,6 +63,20 @@ pub struct ClassType {
     pub index: u32,
 }
 
+/// One exported function and the type index its signature occupies.
+///
+/// A consumer cannot derive the index: the function's type lives inside a replayed group, and an
+/// import that declared a structurally-equal type of its own would canonicalise somewhere else and
+/// link against nothing. So the library states which of its types is which export's, and the
+/// consumer imports at that index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportType {
+    /// The export name — a member key, or an ABI name like `$jals$tag`.
+    pub name: String,
+    /// The function type's local index into [`LibraryAbi::types`].
+    pub type_index: u32,
+}
+
 /// What a linked library states about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryAbi {
@@ -74,11 +88,23 @@ pub struct LibraryAbi {
     pub sources: Vec<Source>,
     /// Every class the module declared and where its struct sits.
     pub classes: Vec<ClassType>,
+    /// Every function the module exports and the type its signature occupies.
+    pub functions: Vec<ExportType>,
     /// The type index each declared recursive group starts at — the boundaries a consumer must
     /// reproduce *exactly*.
     pub(crate) groups: Vec<usize>,
     /// Every declared type, flattened across the groups.
     pub types: Vec<SubType>,
+}
+
+impl LibraryAbi {
+    /// The *local* type index the function exported under `name` occupies.
+    pub fn export_type(&self, name: &str) -> Option<u32> {
+        self.functions
+            .iter()
+            .find(|export| export.name == name)
+            .map(|export| export.type_index)
+    }
 }
 
 /// Why a `jals.library` section was not read.
@@ -135,6 +161,10 @@ impl LibraryAbi {
         for class in &self.classes {
             out.name(&class.name).u32(class.index);
         }
+        out.count(self.functions.len());
+        for export in &self.functions {
+            out.name(&export.name).u32(export.type_index);
+        }
         out.count(self.groups.len());
         for &start in &self.groups {
             out.u32(u32::try_from(start).unwrap_or(u32::MAX));
@@ -172,6 +202,13 @@ impl LibraryAbi {
                 index: reader.u32()?,
             });
         }
+        let mut functions = Vec::new();
+        for _ in 0..reader.u32()? {
+            functions.push(ExportType {
+                name: reader.string()?,
+                type_index: reader.u32()?,
+            });
+        }
         let mut groups = Vec::new();
         for _ in 0..reader.u32()? {
             groups.push(usize::try_from(reader.u32()?).unwrap_or(usize::MAX));
@@ -185,6 +222,7 @@ impl LibraryAbi {
             version,
             sources,
             classes,
+            functions,
             groups,
             types,
         })
@@ -443,6 +481,10 @@ mod tests {
             classes: alloc::vec![ClassType {
                 name: "demo/Counter".to_owned(),
                 index: 1,
+            }],
+            functions: alloc::vec![ExportType {
+                name: "demo/Counter#twice(I)I".to_owned(),
+                type_index: 0,
             }],
             groups: alloc::vec![0, 3],
             types: alloc::vec![
