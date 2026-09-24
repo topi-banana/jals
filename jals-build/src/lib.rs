@@ -116,10 +116,11 @@ pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]
 pub use toolchain::{BuildOutcome, JdkInstall, Runtime, ToolchainError, ToolchainFuture};
 
-#[cfg(feature = "wasm-run")]
 /// The ABI a linked library carries in its `jals.library` section, re-exported for the host that
 /// reads one out of a module's bytes and hands the decoded value back as a [`BackendLibrary`].
+#[cfg(feature = "wasm-run")]
 pub use jals_javac::wasm::LibraryAbi;
+#[cfg(feature = "wasm-run")]
 pub use wasm_run::{
     WasmLibrary, WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner, WasmValue,
 };
