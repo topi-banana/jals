@@ -145,6 +145,18 @@ impl JalsBackend {
             let file = FileId(u32::try_from(project_files + offset).unwrap_or(u32::MAX));
             roots.push((file, Parse::parse(source.text).await.syntax()));
         }
+        // A linked library's published Java, indexed but never lowered: the code is already in the
+        // library's own module, and what the project needs from the text is resolution. The text
+        // is the same Java the library compiled, so the API the index reads and the code that runs
+        // cannot drift.
+        let mut library_roots: Vec<(FileId, SyntaxNode)> = Vec::new();
+        for library in request.libraries {
+            for source in &library.abi.sources {
+                let file =
+                    FileId(u32::try_from(roots.len() + library_roots.len()).unwrap_or(u32::MAX));
+                library_roots.push((file, Parse::parse(&source.text).await.syntax()));
+            }
+        }
 
         // Each file's own analysis first: it needs no index, so it is the half that could be
         // computed before one exists.
@@ -161,6 +173,7 @@ impl JalsBackend {
         let (project_roots, native_roots) = roots.split_at(project_files);
         let index = ProjectIndex::builder(project_roots)
             .with_native_packages(native_roots)
+            .with_source_deps(&library_roots)
             .with_stdlib()
             .build()
             .await;
@@ -187,14 +200,27 @@ impl JalsBackend {
                 // returns past the `finish` below. Ending the unit here is what keeps a green
                 // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
                 let options = jals_javac::wasm::WasmOptions { assertions };
-                let outcome =
-                    match CompileWasm::project(typed_project, typed_natives, &index, options) {
-                        Ok(module) => match RelativePath::parse(Self::WASM_MODULE) {
-                            Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
-                            Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
-                        },
-                        Err(error) => BackendOutcome::failed(alloc::vec![format!("{error}")]),
-                    };
+                let linked: Vec<jals_javac::wasm::LinkedLibrary<'_>> = request
+                    .libraries
+                    .iter()
+                    .map(|library| jals_javac::wasm::LinkedLibrary {
+                        name: &library.name,
+                        abi: &library.abi,
+                    })
+                    .collect();
+                let outcome = match CompileWasm::project_linked(
+                    typed_project,
+                    typed_natives,
+                    &linked,
+                    &index,
+                    options,
+                ) {
+                    Ok(module) => match RelativePath::parse(Self::WASM_MODULE) {
+                        Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
+                        Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
+                    },
+                    Err(error) => BackendOutcome::failed(alloc::vec![format!("{error}")]),
+                };
                 report.finish(if outcome.success() {
                     Outcome::Completed
                 } else {
@@ -269,6 +295,13 @@ impl Backend for JalsBackend {
             // nothing can observe one — which is why a package carries an author-set version and
             // that version is in here.
             .bytes(&self.natives.provenance());
+        // A linked library is an input like a source file: its published API, its types, and the
+        // module it will run from. The ABI's own encoding is deterministic, so folding it is
+        // folding exactly what the compile read.
+        for library in request.libraries {
+            fold.bytes(library.name.as_bytes())
+                .bytes(&library.abi.write());
+        }
         fold.finish()
     }
 
@@ -328,6 +361,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
+            libraries: &[],
             options: &options,
         };
 
@@ -363,6 +397,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
+            libraries: &[],
             options: &options,
         };
 
@@ -403,6 +438,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
+            libraries: &[],
             options: &options,
         };
         assert_ne!(

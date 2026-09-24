@@ -22,7 +22,7 @@ use jals_build::{ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
 use jals_config::{
-    DependencyScope, DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeatures,
+    Dependency, DependencyScope, DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeatures,
 };
 use jals_exec::Exec;
 use jals_storage::{DirKey, FileKey, Name, NativeScope, NativeStorage, RelativePath};
@@ -982,6 +982,7 @@ impl BuildArgs {
             Lowering::Build,
             natives::Natives::select(session.shell(), &manifest)?,
             exec,
+            &features,
             session.for_package(App::package_ref(&manifest)),
         )
         .await?;
@@ -1165,6 +1166,7 @@ impl RunArgs {
             Lowering::Build,
             natives.clone(),
             exec,
+            &features,
             session.for_package(App::package_ref(&manifest)),
         )
         .await?;
@@ -1212,8 +1214,17 @@ impl RunArgs {
 
         // The two are built together, so one without the other cannot happen; the module arm is
         // what the `else` is.
+        let linked: Vec<jals_build::WasmLibrary<'_>> = plan
+            .libraries
+            .iter()
+            .zip(&plan.library_bytes)
+            .map(|(library, bytes)| jals_build::WasmLibrary {
+                name: &library.name,
+                bytes,
+            })
+            .collect();
         let (Some(runtime), Some(run_request)) = (&runtime, &run_request) else {
-            return self.run_module(session, &outcome, &natives, &package);
+            return self.run_module(session, &outcome, &natives, &linked, &package);
         };
         let running = package.begin(jals_progress::Activity::Run, run_request.main_class);
         // The child owns this terminal from here on and never gives it back, so the display comes
@@ -1248,6 +1259,7 @@ impl RunArgs {
         session: &Session,
         outcome: &jals_build::BackendOutcome,
         natives: &jals_native::NativePackageSet,
+        libraries: &[jals_build::WasmLibrary<'_>],
         progress: &jals_progress::Progress,
     ) -> Result<ExitCode> {
         let module = outcome
@@ -1266,6 +1278,9 @@ impl RunArgs {
             // imports none links against an empty table, which is what every project that selected
             // no package produces.
             natives: &natives.bindings(),
+            // The `wasm` dependencies this project links, loaded from where the manifest declared
+            // them. A project that declared none links an empty list, which is the ordinary run.
+            libraries,
             progress,
         };
         match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {
@@ -1388,6 +1403,7 @@ impl TestArgs {
             lowering,
             natives.clone(),
             exec,
+            &features,
             session.for_package(App::package_ref(&manifest)),
         )
         .await?;
@@ -1437,8 +1453,17 @@ impl TestArgs {
                     should_fail: test.should_fail,
                 })
                 .collect();
+            let linked: Vec<jals_build::WasmLibrary<'_>> = plan
+                .libraries
+                .iter()
+                .zip(&plan.library_bytes)
+                .map(|(library, bytes)| jals_build::WasmLibrary {
+                    name: &library.name,
+                    bytes,
+                })
+                .collect();
             Launcher::Wasm(
-                jals_build::WasmTestLauncher::resolve(module, entries, natives.bindings())
+                jals_build::WasmTestLauncher::resolve(module, entries, natives.bindings(), &linked)
                     .map_err(|e| anyhow!("{e}"))?,
             )
         } else {
@@ -2272,6 +2297,53 @@ impl HostProjectInputs {
     }
 }
 
+/// One `wasm` dependency, resolved: the module's bytes and the ABI it published.
+///
+/// Two halves with two destinations and one source: the compile reads the ABI (and the Java it
+/// carries), and the run needs the bytes. Resolving once keeps the two from disagreeing about
+/// which file was meant.
+struct ResolvedWasmLibrary {
+    /// The module's bytes.
+    bytes: Vec<u8>,
+    /// The decoded `jals.library` section, with the name the entry declared.
+    library: jals_build::BackendLibrary,
+}
+
+/// Every active `wasm` dependency of `manifest`, read and decoded in declaration order.
+///
+/// A dependency whose module carries no `jals.library` section is refused here, with the path that
+/// was read: it is the wrong kind of module, and a link failure at run time would say so in the
+/// engine's vocabulary rather than the project's.
+fn wasm_libraries(
+    root: &Path,
+    manifest: &Manifest,
+    features: &ResolvedBuildFeatures,
+) -> Result<Vec<ResolvedWasmLibrary>> {
+    let mut libraries = Vec::new();
+    for (name, dependency) in manifest.active_dependencies(DependencyScope::Build, features) {
+        let Dependency::Wasm(wasm) = dependency else {
+            continue;
+        };
+        let path = root.join(&wasm.wasm);
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("reading wasm dependency `{name}` at `{}`", path.display()))?;
+        let abi = jals_build::LibraryAbi::of_module(&bytes).map_err(|error| {
+            anyhow!(
+                "`{}` (wasm dependency `{name}`) is not a linked library: {error}",
+                path.display()
+            )
+        })?;
+        libraries.push(ResolvedWasmLibrary {
+            bytes,
+            library: jals_build::BackendLibrary {
+                name: name.clone(),
+                abi,
+            },
+        });
+    }
+    Ok(libraries)
+}
+
 /// The compile step, selected and ready to run.
 ///
 /// Owns what a [`BackendRequest`](jals_build::BackendRequest) borrows, which is the whole reason it
@@ -2280,6 +2352,12 @@ impl HostProjectInputs {
 struct CompilePlan {
     backend: Box<dyn jals_build::Backend>,
     tree: Vec<jals_build::BackendSource>,
+    /// The `wasm` dependencies this compile links, in declaration order, as the request borrows
+    /// them.
+    libraries: Vec<jals_build::BackendLibrary>,
+    /// The same libraries' bytes, aligned with [`libraries`](Self::libraries), for the run step —
+    /// which needs the module the compile only described.
+    library_bytes: Vec<Vec<u8>>,
     options: jals_build::BackendOptions,
     /// Attributed to the package being compiled, so an in-process backend's per-file counting lands
     /// under the same name the `Compiling` line carries.
@@ -2305,6 +2383,7 @@ impl CompilePlan {
         lowering: Lowering,
         natives: jals_native::NativePackageSet,
         exec: &Exec,
+        features: &ResolvedBuildFeatures,
         progress: jals_progress::Progress,
     ) -> Result<Self> {
         let selection = jals_build::BackendSelection::for_host(
@@ -2332,12 +2411,20 @@ impl CompilePlan {
         )
         .await;
         match selection {
-            jals_build::BackendSelection::Available(backend) => Ok(Self {
-                backend,
-                tree,
-                options: jals_build::BackendOptions::from_manifest(manifest),
-                progress,
-            }),
+            jals_build::BackendSelection::Available(backend) => {
+                let (libraries, library_bytes) = wasm_libraries(root, manifest, features)?
+                    .into_iter()
+                    .map(|library| (library.library, library.bytes))
+                    .unzip();
+                Ok(Self {
+                    backend,
+                    tree,
+                    libraries,
+                    library_bytes,
+                    options: jals_build::BackendOptions::from_manifest(manifest),
+                    progress,
+                })
+            }
             jals_build::BackendSelection::Absent { id, reason } => {
                 bail!("`[build] backend` selects `{id}`, but {reason}")
             }
@@ -2354,6 +2441,7 @@ impl CompilePlan {
             // against them. The `javac` adapter takes the real classpath as a host input instead,
             // because its entries are paths and this request is portable.
             classpath: &[],
+            libraries: &self.libraries,
             options: &self.options,
         }
     }

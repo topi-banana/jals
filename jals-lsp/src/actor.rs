@@ -2141,6 +2141,13 @@ impl AssembledWorkspace {
                     }
                 }
                 Dependency::Git(_) => {}
+                // A precompiled module is a watch input like a jar's bytes: a change to it is a
+                // change to what the project links.
+                Dependency::Wasm(wasm) => {
+                    if let Some(path) = local_path(root, &wasm.wasm) {
+                        reassemble_inputs.push(path);
+                    }
+                }
             }
         }
         reassemble_inputs.extend(graph_watch_paths.iter().cloned());
