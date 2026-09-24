@@ -223,7 +223,10 @@ fn a_constructor_is_exported_as_a_factory() {
     // `struct.new_default`, then the object into a local, then `this` and the parameter, then the
     // constructor, then the object back out.
     assert!(
-        matches!(func.body.first(), Some(jals_javac::wasm::Instr::StructNewDefault(_))),
+        matches!(
+            func.body.first(),
+            Some(jals_javac::wasm::Instr::StructNewDefault(_))
+        ),
         "the factory allocates: {:?}",
         func.body.first()
     );

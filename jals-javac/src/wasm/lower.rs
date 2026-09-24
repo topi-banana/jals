@@ -546,8 +546,9 @@ impl CompileWasm {
                     let Some(&structure) = layout.structs.get(&owner) else {
                         continue;
                     };
-                    let factory =
-                        Self::constructor_factory(member, function, structure, layout, module, index)?;
+                    let factory = Self::constructor_factory(
+                        member, function, structure, layout, module, index,
+                    )?;
                     let key = Self::member_key(owner, member, index)?;
                     module.exports.push((key, ExportKind::Func, factory));
                 }
@@ -667,7 +668,9 @@ impl CompileWasm {
             .types()
             .get(usize::try_from(type_index).map_err(|_| WasmError::TooLarge)?)
         else {
-            return Err(WasmError::Unsupported("a constructor whose type is no function"));
+            return Err(WasmError::Unsupported(
+                "a constructor whose type is no function",
+            ));
         };
         let params = params.get(1..).unwrap_or_default().to_vec();
         let result = layout.class_ref(index.member(member).owner)?;
@@ -712,8 +715,9 @@ impl CompileWasm {
         } else {
             info.name.clone()
         };
-        let descriptor = Descriptor::method_descriptor(member, index, info.kind == DefKind::Constructor)
-            .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
+        let descriptor =
+            Descriptor::method_descriptor(member, index, info.kind == DefKind::Constructor)
+                .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
         Ok(alloc::format!("{owner}#{name}{descriptor}"))
     }
 

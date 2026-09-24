@@ -23,9 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::encode::{
-    Bytes, CompType, FieldType, HeapType, RefType, StorageType, SubType, ValType,
-};
+use super::encode::{Bytes, CompType, FieldType, HeapType, RefType, StorageType, SubType, ValType};
 
 /// The custom section's name, as it is written into the module.
 pub const CUSTOM_SECTION: &str = "jals.library";
@@ -78,7 +76,7 @@ pub struct LibraryAbi {
     pub classes: Vec<ClassType>,
     /// The type index each declared recursive group starts at — the boundaries a consumer must
     /// reproduce *exactly*.
-    pub groups: Vec<usize>,
+    pub(crate) groups: Vec<usize>,
     /// Every declared type, flattened across the groups.
     pub types: Vec<SubType>,
 }
@@ -105,7 +103,9 @@ impl fmt::Display for AbiError {
         match self {
             Self::Absent => write!(f, "the module carries no `{CUSTOM_SECTION}` section"),
             Self::Truncated => f.write_str("the library ABI section ended early"),
-            Self::Unknown(tag) => write!(f, "the library ABI section states an unknown shape ({tag})"),
+            Self::Unknown(tag) => {
+                write!(f, "the library ABI section states an unknown shape ({tag})")
+            }
             Self::Text => f.write_str("the library ABI section holds text that is not UTF-8"),
             Self::Version(version) => write!(
                 f,
@@ -136,7 +136,7 @@ impl LibraryAbi {
         }
         out.count(self.types.len());
         for ty in &self.types {
-            write_subtype(&mut out, ty);
+            Self::write_subtype(&mut out, ty);
         }
         out.into_vec()
     }
@@ -173,7 +173,7 @@ impl LibraryAbi {
         }
         let mut types = Vec::new();
         for _ in 0..reader.u32()? {
-            types.push(read_subtype(&mut reader)?);
+            types.push(Self::read_subtype(&mut reader)?);
         }
         Ok(Self {
             package,
@@ -210,152 +210,152 @@ impl LibraryAbi {
         }
         Err(AbiError::Absent)
     }
-}
 
-/// One declared type, tag-first.
-fn write_subtype(out: &mut Bytes, ty: &SubType) {
-    out.byte(u8::from(ty.is_final));
-    match ty.supertype {
-        Some(supertype) => {
-            out.byte(1).u32(supertype);
-        }
-        None => {
-            out.byte(0);
-        }
-    }
-    match &ty.comp {
-        CompType::Func { params, results } => {
-            out.byte(0).count(params.len());
-            for param in params {
-                write_val(out, *param);
+    /// One declared type, tag-first.
+    fn write_subtype(out: &mut Bytes, ty: &SubType) {
+        out.byte(u8::from(ty.is_final));
+        match ty.supertype {
+            Some(supertype) => {
+                out.byte(1).u32(supertype);
             }
-            out.count(results.len());
-            for result in results {
-                write_val(out, *result);
+            None => {
+                out.byte(0);
             }
         }
-        CompType::Struct(fields) => {
-            out.byte(1).count(fields.len());
-            for field in fields {
-                write_field(out, field);
-            }
-        }
-        CompType::Array(element) => {
-            out.byte(2);
-            write_field(out, element);
-        }
-    }
-}
-
-fn read_subtype(reader: &mut Reader<'_>) -> Result<SubType, AbiError> {
-    let is_final = reader.byte()? != 0;
-    let supertype = match reader.byte()? {
-        0 => None,
-        1 => Some(reader.u32()?),
-        other => return Err(AbiError::Unknown(other)),
-    };
-    let comp = match reader.byte()? {
-        0 => {
-            let mut params = Vec::new();
-            for _ in 0..reader.u32()? {
-                params.push(read_val(reader)?);
-            }
-            let mut results = Vec::new();
-            for _ in 0..reader.u32()? {
-                results.push(read_val(reader)?);
-            }
-            CompType::Func { params, results }
-        }
-        1 => {
-            let mut fields = Vec::new();
-            for _ in 0..reader.u32()? {
-                fields.push(read_field(reader)?);
-            }
-            CompType::Struct(fields)
-        }
-        2 => CompType::Array(read_field(reader)?),
-        other => return Err(AbiError::Unknown(other)),
-    };
-    Ok(SubType {
-        is_final,
-        supertype,
-        comp,
-    })
-}
-
-fn write_field(out: &mut Bytes, field: &FieldType) {
-    let StorageType::Val(ty) = field.storage;
-    out.byte(0);
-    write_val(out, ty);
-    out.byte(u8::from(field.mutable));
-}
-
-fn read_field(reader: &mut Reader<'_>) -> Result<FieldType, AbiError> {
-    match reader.byte()? {
-        0 => {}
-        other => return Err(AbiError::Unknown(other)),
-    }
-    let ty = read_val(reader)?;
-    let mutable = reader.byte()? != 0;
-    Ok(FieldType {
-        storage: StorageType::Val(ty),
-        mutable,
-    })
-}
-
-fn write_val(out: &mut Bytes, ty: ValType) {
-    match ty {
-        ValType::I32 => {
-            out.byte(0);
-        }
-        ValType::I64 => {
-            out.byte(1);
-        }
-        ValType::F32 => {
-            out.byte(2);
-        }
-        ValType::F64 => {
-            out.byte(3);
-        }
-        ValType::Ref(reference) => {
-            out.byte(4).byte(u8::from(reference.nullable));
-            match reference.heap {
-                HeapType::Concrete(index) => {
-                    out.byte(0).u32(index);
+        match &ty.comp {
+            CompType::Func { params, results } => {
+                out.byte(0).count(params.len());
+                for param in params {
+                    Self::write_val(out, *param);
                 }
-                HeapType::Any => {
-                    out.byte(1);
+                out.count(results.len());
+                for result in results {
+                    Self::write_val(out, *result);
                 }
-                HeapType::None => {
-                    out.byte(2);
+            }
+            CompType::Struct(fields) => {
+                out.byte(1).count(fields.len());
+                for field in fields {
+                    Self::write_field(out, field);
                 }
-                HeapType::Func => {
-                    out.byte(3);
-                }
+            }
+            CompType::Array(element) => {
+                out.byte(2);
+                Self::write_field(out, element);
             }
         }
     }
-}
 
-fn read_val(reader: &mut Reader<'_>) -> Result<ValType, AbiError> {
-    Ok(match reader.byte()? {
-        0 => ValType::I32,
-        1 => ValType::I64,
-        2 => ValType::F32,
-        3 => ValType::F64,
-        4 => {
-            let nullable = reader.byte()? != 0;
-            let heap = match reader.byte()? {
-                0 => HeapType::Concrete(reader.u32()?),
-                1 => HeapType::Any,
-                2 => HeapType::None,
-                3 => HeapType::Func,
-                other => return Err(AbiError::Unknown(other)),
-            };
-            ValType::Ref(RefType { nullable, heap })
+    fn read_subtype(reader: &mut Reader<'_>) -> Result<SubType, AbiError> {
+        let is_final = reader.byte()? != 0;
+        let supertype = match reader.byte()? {
+            0 => None,
+            1 => Some(reader.u32()?),
+            other => return Err(AbiError::Unknown(other)),
+        };
+        let comp = match reader.byte()? {
+            0 => {
+                let mut params = Vec::new();
+                for _ in 0..reader.u32()? {
+                    params.push(Self::read_val(reader)?);
+                }
+                let mut results = Vec::new();
+                for _ in 0..reader.u32()? {
+                    results.push(Self::read_val(reader)?);
+                }
+                CompType::Func { params, results }
+            }
+            1 => {
+                let mut fields = Vec::new();
+                for _ in 0..reader.u32()? {
+                    fields.push(Self::read_field(reader)?);
+                }
+                CompType::Struct(fields)
+            }
+            2 => CompType::Array(Self::read_field(reader)?),
+            other => return Err(AbiError::Unknown(other)),
+        };
+        Ok(SubType {
+            is_final,
+            supertype,
+            comp,
+        })
+    }
+
+    fn write_field(out: &mut Bytes, field: &FieldType) {
+        let StorageType::Val(ty) = field.storage;
+        out.byte(0);
+        Self::write_val(out, ty);
+        out.byte(u8::from(field.mutable));
+    }
+
+    fn read_field(reader: &mut Reader<'_>) -> Result<FieldType, AbiError> {
+        match reader.byte()? {
+            0 => {}
+            other => return Err(AbiError::Unknown(other)),
         }
-        other => return Err(AbiError::Unknown(other)),
-    })
+        let ty = Self::read_val(reader)?;
+        let mutable = reader.byte()? != 0;
+        Ok(FieldType {
+            storage: StorageType::Val(ty),
+            mutable,
+        })
+    }
+
+    fn write_val(out: &mut Bytes, ty: ValType) {
+        match ty {
+            ValType::I32 => {
+                out.byte(0);
+            }
+            ValType::I64 => {
+                out.byte(1);
+            }
+            ValType::F32 => {
+                out.byte(2);
+            }
+            ValType::F64 => {
+                out.byte(3);
+            }
+            ValType::Ref(reference) => {
+                out.byte(4).byte(u8::from(reference.nullable));
+                match reference.heap {
+                    HeapType::Concrete(index) => {
+                        out.byte(0).u32(index);
+                    }
+                    HeapType::Any => {
+                        out.byte(1);
+                    }
+                    HeapType::None => {
+                        out.byte(2);
+                    }
+                    HeapType::Func => {
+                        out.byte(3);
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_val(reader: &mut Reader<'_>) -> Result<ValType, AbiError> {
+        Ok(match reader.byte()? {
+            0 => ValType::I32,
+            1 => ValType::I64,
+            2 => ValType::F32,
+            3 => ValType::F64,
+            4 => {
+                let nullable = reader.byte()? != 0;
+                let heap = match reader.byte()? {
+                    0 => HeapType::Concrete(reader.u32()?),
+                    1 => HeapType::Any,
+                    2 => HeapType::None,
+                    3 => HeapType::Func,
+                    other => return Err(AbiError::Unknown(other)),
+                };
+                ValType::Ref(RefType { nullable, heap })
+            }
+            other => return Err(AbiError::Unknown(other)),
+        })
+    }
 }
 
 /// A cursor over section bytes, refusing to read past the end rather than returning zeroes.
