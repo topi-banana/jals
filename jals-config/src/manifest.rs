@@ -218,8 +218,13 @@ pub enum Dependency {
     Wasm(WasmDependency),
 }
 
-/// The `wasm` form of a [`Dependency`]: a module this workspace's own wasm backend (or a foreign
-/// one that speaks the same ABI) emitted.
+/// The `wasm` form of a [`Dependency`]: a precompiled core module.
+///
+/// [`foreign`](WasmDependency::foreign) picks between its two kinds. The ordinary one is a
+/// **linked library**: a module this workspace's wasm backend emitted, whose `jals.library`
+/// section the compile reads so the project can call into it. A `foreign = true` module was
+/// emitted by something else and carries no ABI: the project's own `native` declarations are the
+/// interface, and the module's exports satisfy them at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WasmDependency {
