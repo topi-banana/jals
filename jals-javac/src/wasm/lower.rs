@@ -55,6 +55,7 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 use crate::desc::Descriptor;
 use crate::facts::{ArmLabels, Facts, Literal};
 use crate::facts::{Numeric, Operator, Unary};
+use crate::wasm::abi::{self, ClassType, LibraryAbi, Source};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -180,6 +181,21 @@ pub struct WasmOptions {
     pub assertions: bool,
 }
 
+/// What the module being built *is*.
+///
+/// The two surfaces differ in exactly two things: which declarations reach the export section,
+/// and whether the compile has to synthesize the entry points a consumer needs — a constructor
+/// factory, a `static` field's accessor pair — because the in-module shape of those (a `this`
+/// parameter, a global) is not callable from outside. Everything else — every type, every body —
+/// is the same work either way, which is why this is a parameter and not a second lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    /// The module a `jals run` executes: bare-name exports for `static` methods, no factories.
+    Project,
+    /// The module another compile links against: canonical member keys, factories, accessors.
+    Library,
+}
+
 impl CompileWasm {
     /// Emit the module's bytes. `index` must have been built over exactly `inputs` and
     /// `libraries`.
@@ -235,6 +251,61 @@ impl CompileWasm {
         index: &ProjectIndex,
         options: WasmOptions,
     ) -> Result<Module> {
+        Self::build(inputs, libraries, index, options, Surface::Project).map(|(module, _)| module)
+    }
+
+    /// Compile a package as a **linked library**: the module another compile links against.
+    ///
+    /// The code is the same code [`module`](Self::module) would emit — every type, every body —
+    /// and what differs is the surface and the artifact:
+    ///
+    /// - Every non-private method and constructor is exported under a canonical key derived from
+    ///   its declaration alone (`owner#name+descriptor`), so a consumer can name it without a
+    ///   lookup table.
+    /// - A constructor is exported as a *factory*, because the in-module shape — a `this`
+    ///   parameter and a `void` result — is not callable from outside. The factory allocates,
+    ///   runs the constructor (or the class's initialisers, for the constructor the language gives
+    ///   a class that declares none), and returns the object.
+    /// - A `static` field is exported as an accessor pair, because the in-module shape is a
+    ///   global and a global's name is not a Java signature.
+    /// - The module's exception tag is exported, so a consumer can catch what the library throws.
+    /// - The [`LibraryAbi`] travels in a custom section beside the code: the type groups a
+    ///   consumer must replay, the class-to-struct map, and the package's Java for the index.
+    ///
+    /// One boundary is stated rather than discovered: a consumer class cannot extend a library
+    /// class through this surface. `super(...)` needs a `(this, params) -> ()` constructor, and a
+    /// factory allocates its own receiver, so no exported shape can be passed a consumer's `this`.
+    ///
+    /// `sources` is the same Java that was compiled, and it is the package's API: a consumer's
+    /// index reads the text, not a copy of it.
+    pub fn library(
+        inputs: &[TypedFile<'_>],
+        index: &ProjectIndex,
+        options: WasmOptions,
+        package: &str,
+        version: u32,
+        sources: Vec<Source>,
+    ) -> Result<(Module, LibraryAbi)> {
+        let (mut module, classes) = Self::build(inputs, &[], index, options, Surface::Library)?;
+        let abi = LibraryAbi {
+            package: package.to_owned(),
+            version,
+            sources,
+            classes,
+            groups: module.groups().to_vec(),
+            types: module.types().to_vec(),
+        };
+        module.add_custom_section(abi::CUSTOM_SECTION.to_owned(), abi.write());
+        Ok((module, abi))
+    }
+
+    fn build(
+        inputs: &[TypedFile<'_>],
+        libraries: &[TypedFile<'_>],
+        index: &ProjectIndex,
+        options: WasmOptions,
+        surface: Surface,
+    ) -> Result<(Module, Vec<ClassType>)> {
         // Everything below reads one list. A library class is laid out, has its bodies lowered and
         // is called exactly as a project class is — the *only* thing the two lists decide is which
         // declarations reach the export section, which is what `exported` carries into
@@ -274,9 +345,18 @@ impl CompileWasm {
         for (item, captured) in captured_items {
             layout.captures.insert(item, captured);
         }
+        // What the library surface gates on is "was this item compiled here", and that is every type
+        // declaration — interfaces included. `classes` alone is the wrong set: it deliberately
+        // excludes interfaces, which have no struct, and gating on it silently dropped every
+        // interface's `default`/`static` method and implicitly-static field out of the surface.
+        let compiled: BTreeSet<ItemId> = classes
+            .iter()
+            .chain(interface_items.iter())
+            .copied()
+            .collect();
         // An interface has no struct type, so it is registered before any class is laid out: a field or
         // a parameter of interface type has to resolve to *something* while the structs are built.
-        for item in interface_items {
+        for &item in &interface_items {
             layout.interfaces.insert(item);
         }
         // One tag, declared whether or not anything throws: an unused tag costs three bytes and saves
@@ -337,7 +417,7 @@ impl CompileWasm {
             Self::collect_methods(
                 input,
                 position,
-                position < project_inputs,
+                surface == Surface::Project && position < project_inputs,
                 index,
                 &mut layout,
                 &mut module,
@@ -432,7 +512,275 @@ impl CompileWasm {
             });
             module.start = Some(start);
         }
-        Ok(module)
+        // A linked library's surface is added last: its factories and accessors are functions the
+        // lowering above knows nothing about, and they may only be pushed once every index they
+        // name exists.
+        let classes = match surface {
+            Surface::Project => Vec::new(),
+            Surface::Library => {
+                Self::export_library(&classes, &compiled, index, &layout, &mut module)?
+            }
+        };
+        Ok((module, classes))
+    }
+
+    /// Add the entry points a linked library's consumers call.
+    ///
+    /// The keys are derived from the declaration alone — the owner's internal name, the member's
+    /// name, the JVM descriptor — so neither side of a link needs a lookup table and neither can
+    /// drift from the other. Two shapes are not direct exports:
+    ///
+    /// - A **constructor** takes a `this` and returns nothing, which no consumer can call. A
+    ///   factory is synthesized beside it: allocate, run the constructor, hand back the object.
+    /// - A **`static` field** is a wasm global in this module, and a global's name is not a Java
+    ///   signature. An accessor pair is synthesized instead, each triggering the class's
+    ///   initialiser first — the same thing an in-module read does.
+    ///
+    /// Host imports (a `native` method's function) are skipped: they are what the library's own
+    /// embedder supplies, not what the library defines.
+    fn export_library(
+        classes: &[ItemId],
+        compiled: &BTreeSet<ItemId>,
+        index: &ProjectIndex,
+        layout: &Layout,
+        module: &mut Module,
+    ) -> Result<Vec<ClassType>> {
+        let first_defined = module.func_index(0);
+
+        for (&member, &function) in &layout.functions {
+            let info = index.member(member);
+            let owner = info.owner;
+            if !compiled.contains(&owner) || info.modifiers.is_private || function < first_defined {
+                continue;
+            }
+            match info.kind {
+                DefKind::Method => {
+                    let key = Self::member_key(owner, member, index)?;
+                    module.exports.push((key, ExportKind::Func, function));
+                }
+                DefKind::Constructor => {
+                    let Some(&structure) = layout.structs.get(&owner) else {
+                        continue;
+                    };
+                    let factory = Self::constructor_factory(
+                        member, function, structure, layout, module, index,
+                    )?;
+                    let key = Self::member_key(owner, member, index)?;
+                    module.exports.push((key, ExportKind::Func, factory));
+                }
+                _ => {}
+            }
+        }
+
+        // A class that writes no constructor still has one — the default JLS §8.8.9 gives it — and
+        // the index synthesises the member. Nothing lowered a *function* for it, so the factory is
+        // built here: allocate, run the class's initialisers when it has any, return. This is the
+        // common Java shape (`class Counter { private int count = 3; }`), and without it a consumer
+        // finds the class in the map and no way to construct one.
+        //
+        // The receiver reaches the stack only for an initialiser to consume: pushing it before the
+        // `if` leaves a second value behind for a class with nothing to run, and the module is then
+        // one no validator accepts.
+        for &item in classes {
+            if layout.constructors(index, item).next().is_some() {
+                continue;
+            }
+            let Some(member) = index.own_members(item).iter().copied().find(|&member| {
+                index.member(member).kind == DefKind::Constructor
+                    && index.member(member).params.is_empty()
+            }) else {
+                continue;
+            };
+            let Some(&structure) = layout.structs.get(&item) else {
+                continue;
+            };
+            let result = layout.class_ref(item)?;
+            let factory_ty = module.add_type(SubType::plain(CompType::Func {
+                params: Vec::new(),
+                results: alloc::vec![result],
+            }));
+            let mut insn = Insn::new();
+            insn.struct_new_default(structure).local_set(0);
+            if let Some(&init) = layout.default_constructors.get(&item) {
+                insn.local_get(0).call(init);
+            }
+            insn.local_get(0);
+            let factory = module.func_index(module.funcs.len());
+            Self::push_func(
+                module,
+                Func {
+                    type_index: factory_ty,
+                    locals: alloc::vec![result],
+                    body: insn.into_body(),
+                },
+            )?;
+            let key = Self::member_key(item, member, index)?;
+            module.exports.push((key, ExportKind::Func, factory));
+        }
+
+        // A `static` field is module state; the surface is a getter and a setter.
+        for (&member, &global) in &layout.statics {
+            let info = index.member(member);
+            if info.kind != DefKind::Field
+                || !info.modifiers.is_static
+                || info.modifiers.is_private
+                || !compiled.contains(&info.owner)
+            {
+                continue;
+            }
+            let ty = layout.val_type(&index.resolved_member_ty(member))?;
+            let owner_name = Descriptor::internal_name_of(info.owner, index);
+            let name = &info.name;
+            let init = layout.class_inits.get(&info.owner).map(|&(f, _)| f);
+
+            let get_ty = module.add_type(SubType::plain(CompType::Func {
+                params: Vec::new(),
+                results: alloc::vec![ty],
+            }));
+            let mut get = Insn::new();
+            if let Some(init) = init {
+                get.call(init);
+            }
+            get.global_get(global);
+            let get_index = module.func_index(module.funcs.len());
+            Self::push_func(
+                module,
+                Func {
+                    type_index: get_ty,
+                    locals: Vec::new(),
+                    body: get.into_body(),
+                },
+            )?;
+            module.exports.push((
+                alloc::format!("{owner_name}#{name}#get"),
+                ExportKind::Func,
+                get_index,
+            ));
+
+            let put_ty = module.add_type(SubType::plain(CompType::Func {
+                params: alloc::vec![ty],
+                results: Vec::new(),
+            }));
+            let mut put = Insn::new();
+            if let Some(init) = init {
+                put.call(init);
+            }
+            put.local_get(0).global_set(global);
+            let put_index = module.func_index(module.funcs.len());
+            Self::push_func(
+                module,
+                Func {
+                    type_index: put_ty,
+                    locals: Vec::new(),
+                    body: put.into_body(),
+                },
+            )?;
+            module.exports.push((
+                alloc::format!("{owner_name}#{name}#put"),
+                ExportKind::Func,
+                put_index,
+            ));
+        }
+
+        // One tag covers every Java throw in the module, so one export lets a consumer catch them
+        // all: the payload is the thrown reference, and the *class* of it is what a catch tests.
+        if let Some(tag) = layout.tag {
+            module
+                .exports
+                .push(("$jals$tag".to_owned(), ExportKind::Tag, tag));
+        }
+
+        // The class-to-struct map a consumer needs to represent a value of the type at all.
+        let mut map = Vec::new();
+        for &item in classes {
+            if let Some(&type_index) = layout.structs.get(&item) {
+                map.push(ClassType {
+                    name: Descriptor::internal_name_of(item, index),
+                    index: type_index,
+                });
+            }
+        }
+        Ok(map)
+    }
+
+    /// A constructor as a consumer can call it: allocate, run the constructor, return the object.
+    ///
+    /// The parameters are the constructor's own, minus the `this` its in-module shape leads with —
+    /// which is what makes this work for an inner class too, where the enclosing instance is one of
+    /// them and simply becomes an explicit factory parameter.
+    fn constructor_factory(
+        member: MemberId,
+        function: u32,
+        structure: u32,
+        layout: &Layout,
+        module: &mut Module,
+        index: &ProjectIndex,
+    ) -> Result<u32> {
+        let defined = usize::try_from(function.saturating_sub(module.func_index(0)))
+            .map_err(|_| WasmError::TooLarge)?;
+        let type_index = module
+            .funcs
+            .get(defined)
+            .ok_or(WasmError::Unsupported("a constructor with no function"))?
+            .type_index;
+        let Some(SubType {
+            comp: CompType::Func { params, .. },
+            ..
+        }) = module
+            .types()
+            .get(usize::try_from(type_index).map_err(|_| WasmError::TooLarge)?)
+        else {
+            return Err(WasmError::Unsupported(
+                "a constructor whose type is no function",
+            ));
+        };
+        let params = params.get(1..).unwrap_or_default().to_vec();
+        let result = layout.class_ref(index.member(member).owner)?;
+
+        let factory_ty = module.add_type(SubType::plain(CompType::Func {
+            params: params.clone(),
+            results: alloc::vec![result],
+        }));
+        // One local holding the object between allocating it and returning it; it sits after the
+        // factory's own parameters, so its index is their count.
+        let slot = u32::try_from(params.len()).map_err(|_| WasmError::TooLarge)?;
+        let mut insn = Insn::new();
+        insn.struct_new_default(structure)
+            .local_set(slot)
+            .local_get(slot);
+        for position in 0..slot {
+            insn.local_get(position);
+        }
+        insn.call(function).local_get(slot);
+        let factory = module.func_index(module.funcs.len());
+        Self::push_func(
+            module,
+            Func {
+                type_index: factory_ty,
+                locals: alloc::vec![result],
+                body: insn.into_body(),
+            },
+        )?;
+        Ok(factory)
+    }
+
+    /// `owner#name+descriptor`, the one spelling a linked member is exported and imported under.
+    ///
+    /// A constructor is spelled `<init>`, as the class-file format spells it: the index keeps the
+    /// simple name the source wrote, and two members named `Counter` — the class's own name and a
+    /// method that happens to share it — would otherwise key the same.
+    fn member_key(owner: ItemId, member: MemberId, index: &ProjectIndex) -> Result<String> {
+        let owner = Descriptor::internal_name_of(owner, index);
+        let info = index.member(member);
+        let name = if info.kind == DefKind::Constructor {
+            "<init>".to_owned()
+        } else {
+            info.name.clone()
+        };
+        let descriptor =
+            Descriptor::method_descriptor(member, index, info.kind == DefKind::Constructor)
+                .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
+        Ok(alloc::format!("{owner}#{name}{descriptor}"))
     }
 
     /// Give every class with static state a function index and a "has run" flag.
