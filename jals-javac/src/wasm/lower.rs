@@ -427,14 +427,26 @@ impl CompileWasm {
         for &item in &interface_items {
             layout.interfaces.insert(item);
         }
-        // One tag, declared whether or not anything throws: an unused tag costs three bytes and saves
-        // the lowering from having to know in advance whether a body will need one.
-        let payload = module.add_type(SubType::plain(CompType::Func {
-            params: alloc::vec![ValType::Ref(RefType::nullable(HeapType::Any))],
-            results: Vec::new(),
-        }));
-        module.tags.push(payload);
-        layout.tag = Some(u32::try_from(module.tags.len() - 1).map_err(|_| WasmError::TooLarge)?);
+        // One tag carries every Java exception: every one of them is a reference, so what a `catch`
+        // tests is the class of the payload, not which tag raised it. A module that links a library
+        // exporting one *imports* it instead of declaring its own — two tags with the same payload
+        // type are still two different tags, and a `try_table` naming the local one would never see
+        // the library's `throw`. Which of the two this module gets is settled in
+        // `collect_linked_imports`, where the replayed payload's type index is known; a module with
+        // no linked tag declares one of its own, which costs three bytes even if nothing throws.
+        if !linked
+            .iter()
+            .any(|library| library.abi.export_type("$jals$tag").is_some())
+        {
+            let payload = module.add_type(SubType::plain(CompType::Func {
+                params: alloc::vec![ValType::Ref(RefType::nullable(HeapType::Any))],
+                results: Vec::new(),
+            }));
+            module.tags.push(payload);
+            layout.tag =
+                Some(u32::try_from(module.tags.len() - 1).map_err(|_| WasmError::TooLarge)?);
+            layout.tag_type = Some(payload);
+        }
         for &item in &classes {
             layout.reserve_class(item, index, &mut module);
         }
@@ -664,9 +676,9 @@ impl CompileWasm {
         // common Java shape (`class Counter { private int count = 3; }`), and without it a consumer
         // finds the class in the map and no way to construct one.
         //
-        // The receiver reaches the stack only for an initialiser to consume: pushing it before the
-        // `if` leaves a second value behind for a class with nothing to run, and the module is then
-        // one no validator accepts.
+        // The factory stores the object in a local and re-reads it: the receiver has to survive
+        // the initialiser call, and a copy left on the stack by a class with nothing to run is a
+        // module no validator accepts.
         for &item in classes {
             if layout.constructors(index, item).next().is_some() {
                 continue;
@@ -680,17 +692,36 @@ impl CompileWasm {
             let Some(&structure) = layout.structs.get(&item) else {
                 continue;
             };
+            // An inner class's factory takes its enclosing instance first, exactly as a declared
+            // constructor's does: the synthesized initialiser has no parameter for it — its
+            // signature is the object alone — so the factory writes the synthetic field itself,
+            // and a consumer's `outer.new Inner()` passes the instance it named.
+            let enclosing = layout
+                .inner
+                .get(&item)
+                .copied()
+                .zip(layout.outer.get(&item).copied());
+            let params = match enclosing {
+                Some((outer, _)) => alloc::vec![layout.class_ref(outer)?],
+                None => Vec::new(),
+            };
+            let slot = u32::try_from(params.len()).map_err(|_| WasmError::TooLarge)?;
             let result = layout.class_ref(item)?;
             let factory_ty = module.add_type(SubType::plain(CompType::Func {
-                params: Vec::new(),
+                params,
                 results: alloc::vec![result],
             }));
             let mut insn = Insn::new();
-            insn.struct_new_default(structure).local_set(0);
-            if let Some(&init) = layout.default_constructors.get(&item) {
-                insn.local_get(0).call(init);
+            insn.struct_new_default(structure).local_set(slot);
+            if let Some((_, field)) = enclosing {
+                insn.local_get(slot)
+                    .local_get(0)
+                    .struct_set(structure, field);
             }
-            insn.local_get(0);
+            if let Some(&init) = layout.default_constructors.get(&item) {
+                insn.local_get(slot).call(init);
+            }
+            insn.local_get(slot);
             let factory = module.func_index(module.funcs.len());
             Self::push_func(
                 module,
@@ -782,10 +813,19 @@ impl CompileWasm {
 
         // One tag covers every Java throw in the module, so one export lets a consumer catch them
         // all: the payload is the thrown reference, and the *class* of it is what a catch tests.
+        // The export alone is not enough to import — a tag is imported *at a type*, and the type
+        // has to be the one this module declared — so the payload's index travels beside it, under
+        // the same name, and the consumer's import sweep reads it there.
         if let Some(tag) = layout.tag {
             module
                 .exports
                 .push(("$jals$tag".to_owned(), ExportKind::Tag, tag));
+            if let Some(payload) = layout.tag_type {
+                functions.push(ExportType {
+                    name: "$jals$tag".to_owned(),
+                    type_index: payload,
+                });
+            }
         }
 
         // The class-to-struct map a consumer needs to represent a value of the type at all.
@@ -795,6 +835,13 @@ impl CompileWasm {
                 map.push(ClassType {
                     name: Descriptor::internal_name_of(item, index),
                     index: type_index,
+                    // An inner class's factory leads with its enclosing instance, so which class
+                    // that instance is has to travel: without it the consumer's `outer.new Inner()`
+                    // emits a call one argument short.
+                    enclosing: layout
+                        .inner
+                        .get(&item)
+                        .map(|&outer| Descriptor::internal_name_of(outer, index)),
                 });
             }
         }
@@ -921,6 +968,15 @@ impl CompileWasm {
             layout
                 .external_classes
                 .insert(item, library.name.to_owned());
+            // The enclosing link is replayed too: an inner class the project constructs is reached
+            // as `outer.new Inner()`, and the factory's first parameter is the enclosing instance.
+            if let Some(outer) = class
+                .enclosing
+                .as_deref()
+                .and_then(|name| index.item_by_fqn(&Self::fqn_of_internal(name)))
+            {
+                layout.inner.insert(item, outer);
+            }
         }
         Ok(())
     }
@@ -1057,6 +1113,26 @@ impl CompileWasm {
                         _ => {}
                     }
                 }
+            }
+            // The one export that is not a member key: the tag every `throw` in the library names.
+            // A consumer's `try_table` catches a tag *instance*, so it has to be this one — a tag
+            // of its own with the same payload would never see the throw. The import's type is the
+            // replayed payload, which is exactly why the two modules declared matching groups.
+            if let Some(local) = library.abi.export_type("$jals$tag") {
+                // One tag is all this lowering has: `layout.tag` is a single index and every
+                // `throw`/`try_table` reads it. A second library's tag would be a second instance,
+                // and silently not catching it is the failure mode this import exists to remove.
+                if layout.tag.is_some() {
+                    return Err(WasmError::Unsupported(
+                        "more than one linked library exports an exception tag",
+                    ));
+                }
+                let tag = module.add_tag_import(
+                    library.name.to_owned(),
+                    "$jals$tag".to_owned(),
+                    local.saturating_add(base),
+                );
+                layout.tag = Some(tag);
             }
             base = base.saturating_add(u32::try_from(library.abi.types.len()).unwrap_or(u32::MAX));
         }
@@ -1851,7 +1927,16 @@ struct Layout {
     /// The one exception tag, if the module throws anything. Every Java throw is a reference, so one
     /// tag carrying one reference covers all of them and the *class* of that reference is what a
     /// `catch` tests.
+    ///
+    /// For a defined tag this is its index in the tag space; when the tag is a linked library's it
+    /// is the import's index in the same space, so every `throw` and `try_table` reads one value.
     tag: Option<u32>,
+    /// The declared function type the defined tag's payload occupies, for a library's ABI.
+    ///
+    /// The two are different index spaces: `tag` names the tag, and this names the type a consumer
+    /// must import the tag *at*. `None` when the tag is itself an import — the payload is then the
+    /// library's replayed type and this module states nothing about it.
+    tag_type: Option<u32>,
     /// [`WasmOptions::assertions`], carried here because the statement lowering is the only thing
     /// that reads it and every body already holds the layout.
     assertions: bool,
@@ -2358,6 +2443,25 @@ impl Layout {
             .position(|slot| matches!(slot, Slot::Declared(id) if *id == member))?;
         u32::try_from(slot).ok()
     }
+
+    /// [`field_slot`](Self::field_slot), with the refusal that names the actual problem.
+    ///
+    /// A linked library class has no slot map here: its fields were laid out in the library's own
+    /// module, and deriving the slots from the replayed struct type would be inventing the
+    /// declaration order. The data is reachable — the struct is shared — but only through the
+    /// library's own methods, so the report says what is missing rather than pretending a field
+    /// of a class that exists in the index is not there.
+    fn field_slot_or(&self, owner: ItemId, member: MemberId, name: String) -> Result<u32> {
+        if let Some(slot) = self.field_slot(owner, member) {
+            return Ok(slot);
+        }
+        if self.external_classes.contains_key(&owner) {
+            return Err(WasmError::Unsupported(
+                "an instance field of a linked library class",
+            ));
+        }
+        Err(WasmError::Unresolved(name))
+    }
 }
 
 /// Everything that runs in some class's initialisation, before it is grouped by the class it belongs to.
@@ -2456,9 +2560,49 @@ impl Body {
             // `T::new` allocates rather than delegating: the object *is* what the interface method returns.
             if Facts::constructs(&method.node) {
                 let created = Lowering::constructed_item(&method.node, input, index)?;
+                let arity = index.member(member).params.len();
+                // A linked library's class is built by the library, exactly as in the explicit
+                // `new` path: its constructor's in-module shape leads with a `this` no consumer
+                // has, and the factory is what stands in for it. Without this arm the body fell
+                // through to a bare `struct.new_default` — the object existed, the constructor
+                // never ran, and nothing failed, because the module validates.
+                if layout.external_classes.contains_key(&created) {
+                    // An inner class's factory leads with its enclosing instance, which a
+                    // constructor reference's arguments do not carry: `Outer.Inner::new` takes it
+                    // as the first parameter of the interface method, a shape this path does not
+                    // model. Refusing by name beats emitting a call one argument short.
+                    if layout.inner.contains_key(&created) {
+                        return Err(WasmError::Unsupported(
+                            "a constructor reference to a linked library's inner class",
+                        ));
+                    }
+                    let constructor = index
+                        .own_members(created)
+                        .iter()
+                        .copied()
+                        .find(|&id| {
+                            index.member(id).kind == DefKind::Constructor
+                                && index.member(id).params.len() == arity
+                        })
+                        .ok_or(WasmError::Unsupported(
+                            "a constructor reference with no matching constructor",
+                        ))?;
+                    let factory = *layout.external_constructors.get(&constructor).ok_or(
+                        WasmError::Unsupported("a constructor a linked library does not export"),
+                    )?;
+                    for position in 0..arity {
+                        insn.local_get(
+                            u32::try_from(position + 1).map_err(|_| WasmError::TooLarge)?,
+                        );
+                    }
+                    insn.call(factory).return_();
+                    return Ok(Self {
+                        locals: Vec::new(),
+                        code: insn.into_body(),
+                    });
+                }
                 let struct_type = layout.structs[&created];
                 insn.struct_new_default(struct_type);
-                let arity = index.member(member).params.len();
                 // Only one with a *body*: the index also holds the default constructor every class
                 // without a written one has (JLS §8.8.9), which nothing lowered a function for —
                 // and which is the arm below, not a constructor this can call.
@@ -4503,8 +4647,7 @@ impl Lowering<'_> {
         let item = self.load_unqualified_receiver(self.index.member(member).owner, insn)?;
         let slot = self
             .layout
-            .field_slot(item, member)
-            .ok_or_else(unresolved)?;
+            .field_slot_or(item, member, text.trim().to_owned())?;
         insn.struct_get(self.layout.structs[&item], slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
     }
@@ -4659,8 +4802,7 @@ impl Lowering<'_> {
         self.expr_as(&receiver, receiver_ty, insn)?;
         let slot = self
             .layout
-            .field_slot(owner, member)
-            .ok_or_else(|| WasmError::Unresolved(access.field().unwrap_or_default()))?;
+            .field_slot_or(owner, member, access.field().unwrap_or_default())?;
         insn.struct_get(self.layout.structs[&owner], slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
     }
@@ -5349,10 +5491,9 @@ impl Lowering<'_> {
                     self.ensure_initialised(member, insn);
                     return Ok(Place::Global { index: global, ty });
                 }
-                let slot = self
-                    .layout
-                    .field_slot(owner, member)
-                    .ok_or_else(|| WasmError::Unresolved(access.field().unwrap_or_default()))?;
+                let slot =
+                    self.layout
+                        .field_slot_or(owner, member, access.field().unwrap_or_default())?;
                 let receiver = access.receiver().ok_or(WasmError::Unsupported(
                     "a field assignment with no receiver",
                 ))?;
@@ -5615,6 +5756,13 @@ impl Lowering<'_> {
                 .ok_or(WasmError::Unsupported(
                     "a constructor a linked library does not export",
                 ))?;
+            // An inner class's factory leads with the enclosing instance — the in-module shape's
+            // first parameter after `this` — because the consumer has no `this` to pass. The
+            // qualified form is the only one that can name a *library* outer class, and the
+            // unqualified one refuses in `enclosing_instance` rather than pushing the wrong value.
+            if let Some(&enclosing) = self.layout.inner.get(&item) {
+                self.enclosing_instance(qualifier.as_ref(), enclosing, insn)?;
+            }
             self.push_arguments(member, &arguments, insn)?;
             insn.call(factory);
             return self.layout.class_ref(item);
