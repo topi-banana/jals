@@ -803,3 +803,98 @@ fn a_module_that_imports_library_values_validates() {
             .expect("a module whose lengths all fit"),
     );
 }
+
+/// A module that fills a dispatch slot with `ref.func`, reads it back out of the struct, and calls
+/// through it with `call_ref` — the encoding half of the linked-dispatcher arrangement.
+///
+/// Two things here are only decidable by a validator: a struct field may hold a `funcref`, and a
+/// function named by `ref.func` has to be *declared* in a declarative element segment. The engine's
+/// side — the same reference crossing a module boundary — is pinned by `jals-build`'s
+/// `wasm_linking` test.
+fn dispatching_module() -> Module {
+    let mut module = Module::new();
+    // The group a library and its consumer declare identically: the slot's function type and the
+    // struct that holds one.
+    let slot_ty = signature(&mut module, vec![ValType::I32], vec![ValType::I32]);
+    let table = module.add_type(SubType::plain(CompType::Struct(vec![FieldType {
+        // The field names the *concrete* function type, not `funcref`: `call_ref` checks the
+        // reference's static type against the type it is given, and the abstract `func` is not a
+        // subtype of any declared one. One field per slot, each with its own signature, is what a
+        // realm struct is.
+        storage: StorageType::Val(ValType::Ref(RefType::nullable(HeapType::Concrete(slot_ty)))),
+        mutable: false,
+    }])));
+    module.begin_group();
+
+    // `double(i32) -> i32`, the function a slot will hold. Its type *is* the shared slot type, so
+    // the reference the project makes and the call the library emits name one canonicalisation.
+    let mut double = Insn::new();
+    double
+        .local_get(0)
+        .i32_const(2)
+        .numeric(NumOp::Mul, ValType::I32)
+        .expect("i32.mul");
+    module.funcs.push(Func {
+        type_index: slot_ty,
+        locals: Vec::new(),
+        body: double.into_body(),
+    });
+    let double_index = module.func_index(0);
+
+    // `build()` returns a table holding `double`.
+    let build_ty = signature(
+        &mut module,
+        Vec::new(),
+        vec![ValType::Ref(RefType::nullable(HeapType::Concrete(table)))],
+    );
+    let mut build = Insn::new();
+    build.ref_func(double_index).struct_new(table);
+    module.funcs.push(Func {
+        type_index: build_ty,
+        locals: Vec::new(),
+        body: build.into_body(),
+    });
+
+    // `run()` builds the same table and calls through its slot. The reference goes on top of the
+    // arguments: `call_ref` reads it off the stack last, not first.
+    let mut run = Insn::new();
+    run.ref_func(double_index)
+        .struct_new(table)
+        .struct_get(table, 0)
+        .local_set(1)
+        .i32_const(21)
+        .local_get(1)
+        .call_ref(slot_ty);
+    module.funcs.push(Func {
+        type_index: slot_ty,
+        locals: vec![ValType::Ref(RefType::nullable(HeapType::Concrete(slot_ty)))],
+        body: run.into_body(),
+    });
+
+    export(&mut module, "build", 1);
+    export(&mut module, "run", 2);
+    module
+}
+
+#[test]
+fn a_module_that_calls_through_a_function_reference_validates() {
+    validate(
+        &dispatching_module()
+            .finish()
+            .expect("a module whose lengths all fit"),
+    );
+}
+
+/// A custom section reaches the bytes under the name a reader looks it up by — the one artifact a
+/// linked library carries its ABI in.
+#[test]
+fn a_custom_section_travels_with_its_name() {
+    let mut module = Module::new();
+    module.add_custom_section("jals.library".to_owned(), vec![1, 2, 3]);
+    let bytes = module.finish().expect("a module whose lengths all fit");
+    validate(&bytes);
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("jals.library"),
+        "the section name is encoded"
+    );
+}

@@ -18,10 +18,15 @@
 #![cfg(feature = "wasm-run")]
 
 use jals_javac::wasm::{
-    CompType, ExportKind, FieldType, Func, Global, HeapType, Insn, Module, RefType, StorageType,
-    SubType, ValType,
+    CompType, ExportKind, FieldType, Func, Global, HeapType, Insn, Instr, Module, NumOp, RefType,
+    StorageType, SubType, ValType,
 };
 use tinywasm::{Imports, ModuleInstance, Store, WasmValue, parse_bytes};
+
+/// A function type in the module's current recursive group.
+fn signature(module: &mut Module, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
+    module.add_type(SubType::plain(CompType::Func { params, results }))
+}
 
 /// The type indices both modules declare identically, in the group that must match.
 struct Shared {
@@ -343,5 +348,176 @@ fn a_group_that_differs_by_one_type_does_not_link() {
     assert!(
         error.contains("incompatible import type"),
         "the refusal names the import: {error}"
+    );
+}
+
+/// A library that holds a realm — a shared struct of function references — and calls through its
+/// slot when asked.
+///
+/// This is the arrangement `$jals$link` exists for, exercised at the engine level: a reference the
+/// project made becomes callable inside the library. A type-test dispatch chain cannot do this
+/// across a module boundary, because the library was compiled before the project existed and
+/// cannot name the project's classes; a function reference can, because the *type* both sides
+/// check is the one they replayed from the same group.
+fn realm_library() -> Module {
+    let mut module = Module::new();
+    // The shared group: the slot's function type, the realm struct that holds one, and the link
+    // function's own type.
+    let slot_ty = signature(&mut module, vec![ValType::I32], vec![ValType::I32]);
+    let realm = module.add_type(SubType::plain(CompType::Struct(vec![FieldType {
+        storage: StorageType::Val(ValType::Ref(RefType::nullable(HeapType::Concrete(slot_ty)))),
+        mutable: false,
+    }])));
+    let link_ty = signature(
+        &mut module,
+        vec![ValType::Ref(RefType::nullable(HeapType::Concrete(realm)))],
+        Vec::new(),
+    );
+    module.begin_group();
+
+    // The realm arrives after instantiation — the project is instantiated second — so the slot
+    // starts null and `$jals$link` is what fills it in.
+    module.globals.push(Global {
+        ty: ValType::Ref(RefType::nullable(HeapType::Concrete(realm))),
+        init: vec![Instr::RefNull(HeapType::Concrete(realm))],
+    });
+
+    let mut link = Insn::new();
+    link.local_get(0).global_set(0);
+    module.funcs.push(Func {
+        type_index: link_ty,
+        locals: Vec::new(),
+        body: link.into_body(),
+    });
+
+    // `invoke(n)` calls whatever the realm holds. The reference goes on top of the argument:
+    // `call_ref` pops it first.
+    let mut invoke = Insn::new();
+    invoke
+        .global_get(0)
+        .ref_as_non_null()
+        .struct_get(realm, 0)
+        .local_set(1)
+        .local_get(0)
+        .local_get(1)
+        .call_ref(slot_ty);
+    module.funcs.push(Func {
+        type_index: slot_ty,
+        locals: vec![ValType::Ref(RefType::nullable(HeapType::Concrete(slot_ty)))],
+        body: invoke.into_body(),
+    });
+
+    module.exports.push((
+        "$jals$link".to_owned(),
+        ExportKind::Func,
+        module.func_index(0),
+    ));
+    module
+        .exports
+        .push(("invoke".to_owned(), ExportKind::Func, module.func_index(1)));
+    module
+}
+
+/// The project: replays the shared group, imports the library's two functions and defines the
+/// function a slot will hold.
+fn realm_project() -> Module {
+    let mut module = Module::new();
+    let slot_ty = signature(&mut module, vec![ValType::I32], vec![ValType::I32]);
+    let realm = module.add_type(SubType::plain(CompType::Struct(vec![FieldType {
+        storage: StorageType::Val(ValType::Ref(RefType::nullable(HeapType::Concrete(slot_ty)))),
+        mutable: false,
+    }])));
+    let link_ty = signature(
+        &mut module,
+        vec![ValType::Ref(RefType::nullable(HeapType::Concrete(realm)))],
+        Vec::new(),
+    );
+    module.begin_group();
+
+    let link = module.add_shared_import("library".to_owned(), "$jals$link".to_owned(), link_ty);
+    let invoke = module.add_shared_import("library".to_owned(), "invoke".to_owned(), slot_ty);
+
+    // `double` is the function the slot will hold; its type is the shared slot type, so the
+    // reference is callable through the library's `call_ref`.
+    let mut double = Insn::new();
+    double
+        .local_get(0)
+        .i32_const(2)
+        .numeric(NumOp::Mul, ValType::I32)
+        .expect("i32.mul");
+    module.funcs.push(Func {
+        type_index: slot_ty,
+        locals: Vec::new(),
+        body: double.into_body(),
+    });
+    let double = module.func_index(0);
+
+    // `run(n)` builds a realm holding `double`, links it, and calls through the library.
+    let mut run = Insn::new();
+    run.ref_func(double)
+        .struct_new(realm)
+        .call(link)
+        .local_get(0)
+        .call(invoke);
+    module.funcs.push(Func {
+        type_index: slot_ty,
+        locals: Vec::new(),
+        body: run.into_body(),
+    });
+    module
+        .exports
+        .push(("run".to_owned(), ExportKind::Func, module.func_index(1)));
+    module
+}
+
+/// A function reference made in the project is stored in a shared struct, handed to the library,
+/// and called there — the whole mechanism a linked dispatcher rests on.
+#[test]
+fn a_function_reference_crosses_a_module_boundary() {
+    let library = realm_library().finish().expect("the library encodes");
+    let project = realm_project().finish().expect("the project encodes");
+    let library = parse_bytes(&library).expect("the library parses");
+    let project = parse_bytes(&project).expect("the project parses");
+
+    let mut store = Store::default();
+    let library_instance =
+        ModuleInstance::instantiate(&mut store, &library, None).expect("the library instantiates");
+    let mut imports = Imports::new();
+    imports
+        .link_module("library", library_instance)
+        .expect("the library registers");
+    let project_instance = ModuleInstance::instantiate(&mut store, &project, Some(&imports))
+        .expect("the project links");
+
+    // The library received the project's reference and called it.
+    assert_eq!(
+        i32_of(&call(
+            &project_instance,
+            &mut store,
+            "run",
+            &[WasmValue::I32(21)]
+        )),
+        42
+    );
+}
+
+/// The negative half: before `$jals$link` runs there is no realm, and a call through the slot
+/// traps rather than calling nothing.
+#[test]
+fn a_call_through_an_unset_realm_traps() {
+    let library = realm_library().finish().expect("the library encodes");
+    let library = parse_bytes(&library).expect("the library parses");
+
+    let mut store = Store::default();
+    let instance =
+        ModuleInstance::instantiate(&mut store, &library, None).expect("the library instantiates");
+    let func = instance
+        .func_untyped(&store, "invoke")
+        .expect("the library exports `invoke`");
+    let mut results = [WasmValue::I32(0)];
+    assert!(
+        func.call(&mut store, &[WasmValue::I32(1)], &mut results)
+            .is_err(),
+        "an unset realm is not callable"
     );
 }
