@@ -30,9 +30,11 @@ pub const CUSTOM_SECTION: &str = "jals.library";
 
 /// The format this reader and writer speak.
 ///
-/// Bumped when a shape changes meaning. A consumer that reads a version it does not know refuses
-/// the library rather than guessing, which is the only answer a linker can give about an ABI.
-pub const VERSION: u32 = 1;
+/// Bumped when a shape changes meaning. Version 2 added the `functions` list — the export names
+/// and the type index each import has to be declared at, `$jals$tag` included — and the class
+/// map's `enclosing` name. A consumer that reads a version it does not know refuses the library
+/// rather than guessing, which is the only answer a linker can give about an ABI.
+pub const VERSION: u32 = 2;
 
 /// The magic that opens the section, so a mangled file is refused before it is parsed.
 const MAGIC: &[u8; 8] = b"JALSLIB\0";
@@ -61,6 +63,28 @@ pub struct ClassType {
     pub name: String,
     /// The class's struct type, as a local index into [`LibraryAbi::types`].
     pub index: u32,
+    /// The internal name of the class this one is an inner class of, when it has one.
+    ///
+    /// An inner class's constructor takes its enclosing instance as its first parameter, and the
+    /// library's factory makes that explicit — a consumer has no `this` to pass. Without this, the
+    /// consumer's `outer.new Inner()` would emit a call one argument short, which is a module the
+    /// validator refuses.
+    pub enclosing: Option<String>,
+}
+
+/// One exported function or tag, and the type index it is imported at.
+///
+/// A consumer cannot derive the index: the export's type lives inside a replayed group, and an
+/// import that declared a structurally-equal type of its own would canonicalise somewhere else and
+/// link against nothing. So the library states which of its types is which export's, and the
+/// consumer imports at that index — a tag included, whose payload is a function type exactly as a
+/// signature is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportType {
+    /// The export name — a member key, or an ABI name like `$jals$tag`.
+    pub(crate) name: String,
+    /// The function type's local index into [`LibraryAbi::types`].
+    pub(crate) type_index: u32,
 }
 
 /// What a linked library states about itself.
@@ -74,11 +98,23 @@ pub struct LibraryAbi {
     pub sources: Vec<Source>,
     /// Every class the module declared and where its struct sits.
     pub classes: Vec<ClassType>,
+    /// Every function the module exports and the type its signature occupies.
+    pub(crate) functions: Vec<ExportType>,
     /// The type index each declared recursive group starts at — the boundaries a consumer must
     /// reproduce *exactly*.
     pub(crate) groups: Vec<usize>,
     /// Every declared type, flattened across the groups.
     pub types: Vec<SubType>,
+}
+
+impl LibraryAbi {
+    /// The *local* type index the function exported under `name` occupies.
+    pub(crate) fn export_type(&self, name: &str) -> Option<u32> {
+        self.functions
+            .iter()
+            .find(|export| export.name == name)
+            .map(|export| export.type_index)
+    }
 }
 
 /// Why a `jals.library` section was not read.
@@ -134,6 +170,18 @@ impl LibraryAbi {
         out.count(self.classes.len());
         for class in &self.classes {
             out.name(&class.name).u32(class.index);
+            match &class.enclosing {
+                Some(enclosing) => {
+                    out.byte(1).name(enclosing);
+                }
+                None => {
+                    out.byte(0);
+                }
+            }
+        }
+        out.count(self.functions.len());
+        for export in &self.functions {
+            out.name(&export.name).u32(export.type_index);
         }
         out.count(self.groups.len());
         for &start in &self.groups {
@@ -167,9 +215,24 @@ impl LibraryAbi {
         }
         let mut classes = Vec::new();
         for _ in 0..reader.u32()? {
+            let name = reader.string()?;
+            let index = reader.u32()?;
+            let enclosing = match reader.byte()? {
+                0 => None,
+                1 => Some(reader.string()?),
+                other => return Err(AbiError::Unknown(other)),
+            };
             classes.push(ClassType {
+                name,
+                index,
+                enclosing,
+            });
+        }
+        let mut functions = Vec::new();
+        for _ in 0..reader.u32()? {
+            functions.push(ExportType {
                 name: reader.string()?,
-                index: reader.u32()?,
+                type_index: reader.u32()?,
             });
         }
         let mut groups = Vec::new();
@@ -185,6 +248,7 @@ impl LibraryAbi {
             version,
             sources,
             classes,
+            functions,
             groups,
             types,
         })
@@ -440,9 +504,23 @@ mod tests {
                 path: "demo/Counter.java".to_owned(),
                 text: "class Counter { int n; }".to_owned(),
             }],
-            classes: alloc::vec![ClassType {
-                name: "demo/Counter".to_owned(),
-                index: 1,
+            classes: alloc::vec![
+                ClassType {
+                    name: "demo/Counter".to_owned(),
+                    index: 1,
+                    enclosing: None,
+                },
+                // An inner class names its outer class, which is what makes the consumer's
+                // `outer.new Inner()` push the enclosing instance the factory leads with.
+                ClassType {
+                    name: "demo/Counter$Inner".to_owned(),
+                    index: 2,
+                    enclosing: Some("demo/Counter".to_owned()),
+                },
+            ],
+            functions: alloc::vec![ExportType {
+                name: "demo/Counter#twice(I)I".to_owned(),
+                type_index: 0,
             }],
             groups: alloc::vec![0, 3],
             types: alloc::vec![
