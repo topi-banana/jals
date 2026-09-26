@@ -646,6 +646,65 @@ fn a_module_that_imports_a_host_function_validates() {
     );
 }
 
+/// A `begin_group` before any type must not make the type section declare an entry it never writes.
+///
+/// The boundary has nothing after it, so it is not a group; a section that counted it would say two
+/// entries and write one — the import's singleton type — and `wasm-tools` rejects exactly that with
+/// `unexpected end-of-file`. The assertion is byte equality with the same module built without the
+/// call, because the claim is about the encoding, not only about the validator's verdict.
+#[test]
+fn a_group_opened_before_any_type_is_not_a_group() {
+    let mut opened = Module::new();
+    opened.begin_group();
+    let import = opened.add_import(
+        "test/host/Host".to_owned(),
+        "answer(I)I".to_owned(),
+        vec![ValType::I32],
+        vec![ValType::I32],
+    );
+    assert_eq!(import, 0, "an import takes the first function index");
+
+    let mut plain = Module::new();
+    plain.add_import(
+        "test/host/Host".to_owned(),
+        "answer(I)I".to_owned(),
+        vec![ValType::I32],
+        vec![ValType::I32],
+    );
+
+    let bytes = opened.finish().expect("a module whose lengths all fit");
+    assert_eq!(
+        bytes,
+        plain.finish().expect("a module whose lengths all fit"),
+        "the leading boundary is not an entry"
+    );
+    validate(&bytes);
+}
+
+/// A `begin_group` after the last type is a boundary with nothing after it, and must not encode an
+/// empty `rec` group.
+///
+/// The doc promises it, and a library built from the `wasm_linking` fixture ends with exactly this
+/// call, so every module built that way would otherwise carry a trailing empty group. Again the
+/// bytes have to match the module without the call.
+#[test]
+fn a_group_opened_after_the_last_type_is_not_a_group() {
+    let mut opened = Module::new();
+    opened.add_type(SubType::plain(CompType::Struct(Vec::new())));
+    opened.begin_group();
+
+    let mut plain = Module::new();
+    plain.add_type(SubType::plain(CompType::Struct(Vec::new())));
+
+    let bytes = opened.finish().expect("a module whose lengths all fit");
+    assert_eq!(
+        bytes,
+        plain.finish().expect("a module whose lengths all fit"),
+        "the trailing boundary is not an entry"
+    );
+    validate(&bytes);
+}
+
 /// The two names an import is spelled with reach the encoded module verbatim.
 ///
 /// They are the *link symbol*: a host registers its implementation under exactly these strings, so

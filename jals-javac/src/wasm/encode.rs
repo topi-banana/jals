@@ -314,7 +314,7 @@ impl SubType {
 /// A project module's surface is the `public static` methods it compiled, which is why [`Func`]
 /// was the only arm for as long as one module was the whole program. A **library** module a project
 /// module links against is different: its surface is its `public static` methods, its `static`
-/// fields, and the one exception tag every `throw` uses — so all four kinds are exportable, and the
+/// fields, and the one exception tag every `throw` uses — so all three kinds are exportable, and the
 /// index in each is the index in *that kind's* space (see [`Module::global_index`] and
 /// [`Module::tag_index`]).
 ///
@@ -491,13 +491,37 @@ impl Module {
     ///
     /// The boundary is what a module linking against a precompiled library needs — see the
     /// [`groups`](Self::groups) field. Calling this before any type or twice in a row adds no empty
-    /// group: a boundary with nothing after it is not a group.
+    /// group: a boundary with nothing after it is not a group, and [`finish`](Self::finish) is what
+    /// makes that true of the bytes.
     pub fn begin_group(&mut self) {
+        if self.types.is_empty() {
+            return;
+        }
         if self.groups.is_empty() {
             self.groups.push(0);
         } else if self.groups.last() != Some(&self.types.len()) {
             self.groups.push(self.types.len());
         }
+    }
+
+    /// The recursive groups actually emitted, as `(start, end)` spans into [`types`](Self::types).
+    ///
+    /// A boundary with nothing after it is not a group, and a trailing one is only knowable here —
+    /// the caller opens it, and no later `add_type` closes it. The count and the write loop both
+    /// come from this list, because a section that declares an entry it does not write is bytes an
+    /// engine reads as something else.
+    fn emitted_groups(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.groups
+            .iter()
+            .enumerate()
+            .filter_map(move |(position, &start)| {
+                let end = self
+                    .groups
+                    .get(position + 1)
+                    .copied()
+                    .unwrap_or(self.types.len());
+                (start < end).then_some((start, end))
+            })
     }
 
     /// Reserve a type index whose body is filled in by [`set_type`](Self::set_type) later.
@@ -651,25 +675,19 @@ impl Module {
         let mut out = Bytes::new();
         out.raw(b"\0asm").raw(&1u32.to_le_bytes());
 
-        if !self.types.is_empty() || !self.imports.is_empty() {
+        // Every declared recursive group, then one entry of its own per *host* import. The split is
+        // what makes a host import linkable at all: a host function is canonicalised alone, so it
+        // matches a declared type only when that type is a group of one — see `ImportKind::Function`.
+        // A shared, global, or tag import allocates nothing: its type is a declared one the exporting
+        // module declared identically. The two counts agree because both read `emitted_groups`.
+        let type_entries = self.emitted_groups().count() + self.host_import_count();
+        if type_entries > 0 {
             let mut section = Bytes::new();
-            // Every declared recursive group, then one entry of its own per *host* import. The
-            // split is what makes a host import linkable at all: a host function is canonicalised
-            // alone, so it matches a declared type only when that type is a group of one — see
-            // `ImportKind::Function`. A shared, global, or tag import allocates nothing: its type
-            // is a declared one the exporting module declared identically.
-            section.count(self.groups.len() + self.host_import_count());
-            if !self.types.is_empty() {
-                for (position, &start) in self.groups.iter().enumerate() {
-                    let end = self
-                        .groups
-                        .get(position + 1)
-                        .copied()
-                        .unwrap_or(self.types.len());
-                    section.byte(0x4E).count(end.saturating_sub(start));
-                    for ty in &self.types[start..end] {
-                        ty.write(&mut section);
-                    }
+            section.count(type_entries);
+            for (start, end) in self.emitted_groups() {
+                section.byte(0x4E).count(end - start);
+                for ty in &self.types[start..end] {
+                    ty.write(&mut section);
                 }
             }
             for import in &self.imports {
