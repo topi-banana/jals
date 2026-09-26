@@ -70,11 +70,17 @@ pub struct WasmRunRequest<'a> {
     /// — so passing [`NativeBindings::new`] is not a degraded mode, it is what "this module needs
     /// nothing from the host" looks like.
     pub natives: &'a NativeBindings,
-    /// The precompiled libraries the module imports from, in dependency order: a library may
-    /// import an earlier one, so each is instantiated with what the ones before it contributed.
+    /// The precompiled libraries the module imports from, in the order they are instantiated:
+    /// each links against what the ones before it contributed, so a library that imports another
+    /// has to come after it.
     ///
     /// Empty for the ordinary single-module build, which is what a project with no `wasm`
     /// dependency produces.
+    ///
+    /// The CLI passes them in the manifest's dependency-key order. Nothing declares that order and
+    /// nothing needs to yet: `CompileWasm::library` takes no linked list, so a library module
+    /// cannot import another library — an ordering *edge* would have to exist before the order
+    /// could matter.
     pub libraries: &'a [WasmLibrary<'a>],
     /// Where the run reports what it is doing.
     pub progress: &'a Progress,
@@ -494,7 +500,7 @@ impl WasmRunner {
         })
     }
 
-    /// Decode every library once, in dependency order, against the name it links under.
+    /// Decode every library once, in the order given, against the name it links under.
     pub(crate) fn parse_libraries(
         libraries: &[WasmLibrary<'_>],
     ) -> Result<Vec<(String, ParsedModule)>, WasmRunError> {
@@ -571,7 +577,7 @@ impl WasmRunner {
         let module = &module.0;
         let mut imports = Self::link(module, natives, libraries)?;
         let mut store = Store::default();
-        // The libraries first, in dependency order: a project's imports are resolved when it is
+        // The libraries first, in the order given: a project's imports are resolved when it is
         // instantiated, so everything it imports has to exist by then. Each library links against
         // what the ones before it contributed and runs its own start — where a class's `static`
         // initialisers are lowered.
@@ -669,13 +675,22 @@ impl WasmRunner {
     /// What is left to check is therefore only whether a name is bound at all — and because the
     /// import's field name carries the method's descriptor, a Rust half that spelled the signature
     /// differently shows up exactly here, as an unresolved import listing what *is* registered.
+    ///
+    /// Every *library*'s import section is swept too. A library is a module of its own: a `native`
+    /// method its Java declares is an import there whether or not the project ever calls it, and
+    /// the project's own table says nothing about it — so a library whose embedder supplies a host
+    /// function could never be instantiated. `define` overwrites, so an import both modules carry
+    /// is bound once.
     fn link(
         module: &tinywasm::Module,
         natives: &NativeBindings,
         libraries: &[(String, ParsedModule)],
     ) -> Result<Imports, WasmRunError> {
         let mut imports = Imports::new();
-        for import in module.imports() {
+        let library_imports = libraries
+            .iter()
+            .flat_map(|(_, library)| library.0.imports());
+        for import in module.imports().chain(library_imports) {
             // A library import is not a host function: it is satisfied when the library instance
             // is registered under its name, after it has been instantiated. Its type check happens
             // there, against the type both modules replayed.
