@@ -1214,7 +1214,7 @@ impl RunArgs {
 
         // The two are built together, so one without the other cannot happen; the module arm is
         // what the `else` is.
-        let linked: Vec<jals_build::WasmLibrary<'_>> = plan
+        let mut linked: Vec<jals_build::WasmLibrary<'_>> = plan
             .libraries
             .iter()
             .zip(&plan.library_bytes)
@@ -1223,6 +1223,13 @@ impl RunArgs {
                 bytes,
             })
             .collect();
+        // A selected package that ships its Java as a module links like a `wasm` dependency, under
+        // the name it was selected by.
+        linked.extend(
+            natives
+                .libraries()
+                .map(|(name, bytes)| jals_build::WasmLibrary { name, bytes }),
+        );
         let (Some(runtime), Some(run_request)) = (&runtime, &run_request) else {
             return self.run_module(session, &outcome, &natives, &linked, &package);
         };
@@ -1453,7 +1460,7 @@ impl TestArgs {
                     should_fail: test.should_fail,
                 })
                 .collect();
-            let linked: Vec<jals_build::WasmLibrary<'_>> = plan
+            let mut linked: Vec<jals_build::WasmLibrary<'_>> = plan
                 .libraries
                 .iter()
                 .zip(&plan.library_bytes)
@@ -1462,6 +1469,11 @@ impl TestArgs {
                     bytes,
                 })
                 .collect();
+            linked.extend(
+                natives
+                    .libraries()
+                    .map(|(name, bytes)| jals_build::WasmLibrary { name, bytes }),
+            );
             Launcher::Wasm(
                 jals_build::WasmTestLauncher::resolve(module, entries, natives.bindings(), &linked)
                     .map_err(|e| anyhow!("{e}"))?,
@@ -1927,12 +1939,9 @@ impl LintProject {
         manifest: &Manifest,
     ) -> Vec<jals_editor::PackageSource> {
         match natives::Natives::select(shell, manifest) {
-            Ok(selection) => selection
-                .sources()
-                .map(|(_, source)| jals_editor::PackageSource {
-                    path: source.path.to_owned(),
-                    text: source.text.to_owned(),
-                })
+            Ok(selection) => jals_build::native_package_sources(&selection)
+                .into_iter()
+                .map(|(path, text)| jals_editor::PackageSource { path, text })
                 .collect(),
             Err(error) => {
                 shell.warn(format_args!("{error:#}"));

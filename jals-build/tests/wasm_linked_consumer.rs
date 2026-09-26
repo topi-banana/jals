@@ -452,3 +452,186 @@ fn the_runner_links_a_librarys_host_imports() {
         jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(42)])
     );
 }
+
+/// One frontend-published source, the shape a backend request takes.
+fn backend_source(path: &str, text: &str) -> jals_build::BackendSource {
+    let bytes = text.as_bytes().to_vec();
+    jals_build::BackendSource {
+        path: jals_storage::RelativePath::parse(path).expect("a valid path"),
+        key: jals_storage::CacheKey::new(
+            jals_storage::CacheNamespace::FrontendOutput,
+            jals_storage::ContentDigest::of(b"test"),
+            jals_storage::ContentDigest::of(&bytes),
+        ),
+        bytes,
+    }
+}
+
+/// Compile `source` through the in-process wasm backend, with `selection`'s packages as its
+/// natives and `libraries` linked, and return the outcome.
+fn compile_against_packages(
+    source: &str,
+    selection: &jals_native::NativePackageSet,
+    libraries: &[jals_build::BackendLibrary],
+) -> jals_build::BackendOutcome {
+    let tree = [backend_source("Main.java", source)];
+    let options = jals_build::BackendOptions::default();
+    let request = jals_build::BackendRequest {
+        progress: &jals_progress::Progress::SILENT,
+        tree: &tree,
+        classpath: &[],
+        libraries,
+        options: &options,
+    };
+    let selected = jals_build::BackendSelection::in_process(
+        jals_config::BackendKind::JalsWasm {},
+        None,
+        jals_build::Assertions::Disabled,
+        selection.clone(),
+    );
+    let jals_build::BackendSelection::Available(backend) = selected else {
+        panic!("the in-process wasm backend is available on every host");
+    };
+    jals_exec::block_on_inline(backend.compile(&request)).expect("the compile runs")
+}
+
+/// A package that ships its Java as a precompiled module instead of sources: the same program,
+/// with the library arriving through `[build] native-packages` rather than a `wasm` dependency.
+#[test]
+fn a_package_can_ship_its_java_as_a_module() {
+    let (library_bytes, _) = compiled_pair(PROJECT, &[("demo/Counter.java", LIBRARY)]);
+    // A package's module is compiled into the binary that ships it, so its bytes are `'static`;
+    // a test hands its own over the same way `include_bytes!` would.
+    let library_bytes: &'static [u8] = Box::leak(library_bytes.into_boxed_slice());
+
+    let mut package = jals_native::NativePackage::new("lib", 1);
+    package.library(library_bytes);
+    let mut registry = jals_native::NativeRegistry::new();
+    registry.add(package);
+    let selection = registry
+        .select(&["lib".to_owned()])
+        .expect("the package is registered");
+
+    // What an editor or a linter indexes is the module's *published* Java: the package declares
+    // no sources, so an editor reading `lowered_sources` would report every name from the
+    // library unresolved.
+    let published = jals_build::native_package_sources(&selection);
+    assert!(
+        published
+            .iter()
+            .any(|(path, text)| path == "demo/Counter.java" && text.contains("class Counter")),
+        "the module's Java is what a reader indexes: {published:?}"
+    );
+
+    let outcome = compile_against_packages(PROJECT, &selection, &[]);
+    assert!(outcome.success(), "messages: {:?}", outcome.messages);
+    let project_bytes = outcome
+        .artifact(jals_build::JalsBackend::WASM_MODULE)
+        .expect("the compile produced a module");
+
+    let outcome = jals_build::WasmRunner::run(&jals_build::WasmRunRequest {
+        module: project_bytes,
+        invoke: Some("run"),
+        args: &[],
+        natives: &selection.bindings(),
+        libraries: &[jals_build::WasmLibrary {
+            name: "lib",
+            bytes: library_bytes,
+        }],
+        progress: &jals_progress::Progress::SILENT,
+    })
+    .expect("the run links and executes");
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(52)])
+    );
+}
+
+/// A package's module that calls its **own** binding, through the `[build] native-packages` route.
+///
+/// The library's `native` method is an import of the *library's* module — the project never calls
+/// it, and its import section says nothing about it. The package's binding table is what answers,
+/// and only if the runner links host functions for the libraries it instantiates too. The
+/// library class also declares no constructor, which exercises the synthesized factory such a
+/// class gets: an extra value left on the stack is a module no validator accepts, and this route
+/// validates the module before either half of it runs.
+#[test]
+fn a_package_ships_a_modules_own_native_methods_too() {
+    let (library_bytes, _) = compiled_pair(HOST_PROJECT, &[("demo/Caller.java", HOST_LIBRARY)]);
+    let library_bytes: &'static [u8] = Box::leak(library_bytes.into_boxed_slice());
+
+    let mut package = jals_native::NativePackage::new("lib", 1);
+    package.library(library_bytes);
+    package.bind(
+        "demo/Caller",
+        "answer()I",
+        |_host: &mut dyn jals_native::NativeHost,
+         _args: jals_native::Args<'_>,
+         mut results: jals_native::Results<'_>| {
+            results.set(0, jals_native::NativeValue::I32(42));
+            Ok::<(), jals_native::NativeError>(())
+        },
+    );
+    let mut registry = jals_native::NativeRegistry::new();
+    registry.add(package);
+    let selection = registry
+        .select(&["lib".to_owned()])
+        .expect("the package is registered");
+
+    let outcome = compile_against_packages(HOST_PROJECT, &selection, &[]);
+    assert!(outcome.success(), "messages: {:?}", outcome.messages);
+    let project_bytes = outcome
+        .artifact(jals_build::JalsBackend::WASM_MODULE)
+        .expect("the compile produced a module");
+
+    let outcome = jals_build::WasmRunner::run(&jals_build::WasmRunRequest {
+        module: project_bytes,
+        invoke: Some("run"),
+        args: &[],
+        natives: &selection.bindings(),
+        libraries: &[jals_build::WasmLibrary {
+            name: "lib",
+            bytes: library_bytes,
+        }],
+        progress: &jals_progress::Progress::SILENT,
+    })
+    .expect("the run links and executes");
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(42)])
+    );
+}
+
+/// One link name cannot be two modules: a `wasm` dependency and a selected package that agree on
+/// a name are refused while both halves are still in hand, not at instantiation in the engine's
+/// vocabulary.
+#[test]
+fn a_wasm_dependency_and_a_package_cannot_share_a_link_name() {
+    let (library_bytes, _) = compiled_pair(PROJECT, &[("demo/Counter.java", LIBRARY)]);
+    let library_bytes: &'static [u8] = Box::leak(library_bytes.into_boxed_slice());
+
+    let mut package = jals_native::NativePackage::new("lib", 1);
+    package.library(library_bytes);
+    let mut registry = jals_native::NativeRegistry::new();
+    registry.add(package);
+    let selection = registry
+        .select(&["lib".to_owned()])
+        .expect("the package is registered");
+
+    let abi = jals_build::LibraryAbi::of_module(library_bytes).expect("a linked library");
+    let dependency = [jals_build::BackendLibrary {
+        name: "lib".to_owned(),
+        abi,
+    }];
+    let outcome = compile_against_packages(PROJECT, &selection, &dependency);
+    assert!(!outcome.success(), "the compile refuses the collision");
+    assert!(
+        outcome
+            .messages
+            .iter()
+            .any(|message| message
+                .contains("both a `wasm` dependency and a selected native package")),
+        "messages: {:?}",
+        outcome.messages
+    );
+}

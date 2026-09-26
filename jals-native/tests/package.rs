@@ -266,13 +266,14 @@ fn a_selection_carries_the_java_the_bindings_and_the_provenance() {
     assert!(!selection.is_empty());
     assert_eq!(selection.names().collect::<Vec<_>>(), vec![JalsIo::NAME]);
     let paths: Vec<&str> = selection
-        .sources()
+        .lowered_sources()
         .map(|(package, source)| {
             assert_eq!(package, JalsIo::NAME);
             source.path
         })
         .collect();
     assert_eq!(paths, vec!["jals/io/Out.java"]);
+    assert_eq!(selection.libraries().count(), 0);
 
     let bindings = selection.bindings();
     assert!(!bindings.is_empty());
@@ -292,13 +293,49 @@ fn a_selection_carries_the_java_the_bindings_and_the_provenance() {
     // The empty selection is a value rather than an absence, and answers everything as empty.
     let empty = NativePackageSet::empty();
     assert!(empty.is_empty());
-    assert_eq!(empty.sources().count(), 0);
+    assert_eq!(empty.lowered_sources().count(), 0);
+    assert_eq!(empty.libraries().count(), 0);
     assert!(empty.bindings().is_empty());
     assert!(NativeBindings::new().is_empty());
     assert_eq!(
         format!("{:?}", NativeRegistry::default()),
         "NativeRegistry { packages: {} }"
     );
+}
+
+/// A package that ships a module contributes Java to link and none to lower.
+///
+/// The two accessors are the two answers a host asks for: what the consumer lays out beside its
+/// own sources, and what it registers as a precompiled module. A package takes one route, so
+/// exactly one of them answers.
+#[test]
+fn a_library_package_is_linked_rather_than_lowered() {
+    static MODULE: &[u8] = b"bytes a compiler emitted, which nothing here decodes";
+    let mut registry = NativeRegistry::new();
+    let mut package = NativePackage::new("lib", 1);
+    package.library(MODULE);
+    registry.add(package);
+
+    let selection = registry
+        .select(&["lib".to_owned()])
+        .expect("the package is offered");
+    assert_eq!(selection.lowered_sources().count(), 0);
+    let libraries: Vec<(&str, &'static [u8])> = selection.libraries().collect();
+    assert_eq!(libraries, vec![("lib", MODULE)]);
+}
+
+/// Declaring both routes is the package author's mistake, and the builder cannot refuse the
+/// second call — `source` before `library` and `library` before `source` are the same mistake
+/// backwards — so the check is where the package is handed over.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "declares sources and ships a module")]
+fn a_package_cannot_declare_sources_and_ship_a_module() {
+    let mut package = NativePackage::new("demo", 1);
+    package.source("demo/Answer.java", "package demo; final class Answer {}");
+    package.library(b"not a module");
+    let mut registry = NativeRegistry::new();
+    registry.add(package);
 }
 
 /// A name this binary does not offer is reported with the names it does — the only evidence a

@@ -63,7 +63,21 @@ impl NativeRegistry {
     }
 
     /// Offer `package` under its own name, replacing one already offered under it.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, when the package declares Java sources *and* ships a precompiled module.
+    /// The two routes are alternatives, not two halves of one definition: a package that ships a
+    /// module has already compiled its Java, so lowering the declared text too would compile the
+    /// same code twice, into two modules that cannot share a method. The builder cannot refuse the
+    /// second call itself — `source` before `library` and `library` before `source` are the same
+    /// mistake spelled backwards — so the check is where the package is handed over.
     pub fn add(&mut self, package: NativePackage) -> &mut Self {
+        debug_assert!(
+            package.wasm_library().is_none() || package.sources().is_empty(),
+            "native package `{}` declares sources and ships a module: a package takes one route",
+            package.name()
+        );
         self.packages
             .insert(package.name().to_owned(), Rc::new(package));
         self
@@ -122,15 +136,35 @@ impl NativePackageSet {
         self.packages.iter().map(|package| package.name())
     }
 
-    /// Every Java compilation unit the selection publishes, as `(package name, source)`.
+    /// Every Java compilation unit the selection contributes to **lowering**, as
+    /// `(package name, source)`.
     ///
     /// This is what joins the compile: `jals-javac`'s wasm backend lays these classes out and
     /// lowers their bodies exactly as it does the project's own, and `jals-hir` indexes them so
     /// the project's source resolves against them.
-    pub fn sources(&self) -> impl Iterator<Item = (&str, &NativeSource)> {
+    ///
+    /// A package that ships a precompiled module contributes none: its Java is already lowered
+    /// into that module, and lowering the text a second time would be a second copy of the same
+    /// code. What a host that only *indexes* wants is not this list but
+    /// `jals_build::native_package_sources`, which also reaches the module's published Java.
+    pub fn lowered_sources(&self) -> impl Iterator<Item = (&str, &NativeSource)> {
         self.packages
             .iter()
+            // The filter is what a release build does with a package that declares both routes
+            // (`NativeRegistry::add` asserts against it in debug builds): the module is the
+            // artifact that ships, so the declared text is the copy that goes.
+            .filter(|package| package.wasm_library().is_none())
             .flat_map(|package| package.sources().iter().map(|src| (package.name(), src)))
+    }
+
+    /// Every precompiled module the selection ships, as `(package name, bytes)`.
+    ///
+    /// The package name is the link name: the module's imports are spelled with it, so the two
+    /// cannot disagree about which library is which.
+    pub fn libraries(&self) -> impl Iterator<Item = (&str, &'static [u8])> {
+        self.packages
+            .iter()
+            .filter_map(|package| package.wasm_library().map(|bytes| (package.name(), bytes)))
     }
 
     /// The binding table the runner links a module's imports against.
