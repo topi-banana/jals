@@ -90,8 +90,10 @@ public class Main {
 
 /// Compile the library, compile the project against it, link the two, and return what `run`
 /// answered.
-fn linked_run() -> i32 {
-    let texts = [PROJECT, LIBRARY];
+fn linked_run(project_source: &str, library_sources: &[(&str, &str)]) -> i32 {
+    let texts: Vec<&str> = std::iter::once(project_source)
+        .chain(library_sources.iter().map(|(_, text)| *text))
+        .collect();
     let roots: Vec<(FileId, jals_syntax::SyntaxNode)> = texts
         .iter()
         .enumerate()
@@ -126,10 +128,13 @@ fn linked_run() -> i32 {
         WasmOptions::default(),
         "lib",
         1,
-        vec![Source {
-            path: "demo/Counter.java".to_owned(),
-            text: LIBRARY.to_owned(),
-        }],
+        library_sources
+            .iter()
+            .map(|(path, text)| Source {
+                path: (*path).to_owned(),
+                text: (*text).to_owned(),
+            })
+            .collect(),
     )
     .expect("the library compiles");
     let linked = [LinkedLibrary {
@@ -172,5 +177,181 @@ fn linked_run() -> i32 {
 /// and an instance method runs against an object the library allocated.
 #[test]
 fn a_project_calls_into_a_precompiled_library() {
-    assert_eq!(linked_run(), 52);
+    assert_eq!(linked_run(PROJECT, &[("demo/Counter.java", LIBRARY)]), 52);
+}
+
+/// A linked class the library gives an implicit constructor, and a constructor *reference* to it.
+///
+/// Both shapes missed the factory: the class declares no constructor, so the only construction
+/// code is the synthesized initialiser, and `Made::new` reaches the same constructor through the
+/// method-reference path rather than an explicit `new`. The value read back says whether the
+/// initialiser ran — a factory that allocated without calling it leaves the default zero.
+const IMPLICIT_LIBRARY: &str = r"
+package demo;
+
+public class Made {
+    private int value = 41;
+
+    public int read() {
+        return this.value;
+    }
+}
+";
+
+const IMPLICIT_PROJECT: &str = r"
+package app;
+
+import demo.Made;
+
+interface Maker {
+    Made make();
+}
+
+public class Main {
+    public static int run() {
+        Maker maker = demo.Made::new;
+        return maker.make().read();
+    }
+}
+";
+
+#[test]
+fn a_constructor_reference_to_a_linked_class_runs_its_implicit_constructor() {
+    assert_eq!(
+        linked_run(IMPLICIT_PROJECT, &[("demo/Made.java", IMPLICIT_LIBRARY)]),
+        41
+    );
+}
+
+/// An inner class is reached through the outer instance the factory leads with.
+///
+/// The library's factory takes the enclosing instance as its first parameter — its in-module
+/// constructor shape's parameter after `this` — and writes it into the synthetic field, because
+/// the synthesized initialiser's own signature is the object alone. A consumer that emitted only
+/// the declared arguments would call one short, and one that passed an enclosing instance to a
+/// factory that did not want it left a value on the stack; both are modules no validator accepts.
+const INNER_LIBRARY: &str = r"
+package demo;
+
+public class Outer {
+    private int base;
+
+    public Outer(int base) {
+        this.base = base;
+    }
+
+    public class Inner {
+        public int next() {
+            return base + 1;
+        }
+    }
+}
+";
+
+const INNER_PROJECT: &str = r"
+package app;
+
+import demo.Outer;
+
+public class Main {
+    public static int run() {
+        Outer outer = new Outer(40);
+        Outer.Inner inner = outer.new Inner();
+        return inner.next();
+    }
+}
+";
+
+#[test]
+fn a_project_constructs_a_linked_inner_class_through_its_outer_instance() {
+    assert_eq!(
+        linked_run(INNER_PROJECT, &[("demo/Outer.java", INNER_LIBRARY)]),
+        41
+    );
+}
+
+/// A `catch` catches the library's tag because the project *imports* it.
+///
+/// The project declares no tag of its own when a library exports one: two tags with the same
+/// payload type are two different tags, and a `try_table` naming the local one would never see
+/// the library's `throw`. Without the import the exception escapes the `try` and the call fails.
+const SURPRISE_LIBRARY: &str = r"
+package demo;
+
+public class Surprise extends RuntimeException {
+}
+";
+
+const THROWING_LIBRARY: &str = r"
+package demo;
+
+public class Thrower {
+    public static void boom() {
+        throw new Surprise();
+    }
+}
+";
+
+const CATCHING_PROJECT: &str = r"
+package app;
+
+import demo.Thrower;
+
+public class Main {
+    public static int run() {
+        try {
+            Thrower.boom();
+            return 1;
+        } catch (demo.Surprise e) {
+            return 2;
+        }
+    }
+}
+";
+
+#[test]
+fn a_project_catches_an_exception_a_linked_library_throws() {
+    assert_eq!(
+        linked_run(
+            CATCHING_PROJECT,
+            &[
+                ("demo/Surprise.java", SURPRISE_LIBRARY),
+                ("demo/Thrower.java", THROWING_LIBRARY),
+            ]
+        ),
+        2
+    );
+}
+
+/// Legal Java this backend cannot compile yet reports what is missing.
+///
+/// The struct is shared, so the data is reachable — but the slots were laid out in the library's
+/// own module, and deriving them from the replayed struct type would be inventing the declaration
+/// order. The point of the test is the *diagnostic*: it used to say the field "did not resolve",
+/// sending a reader looking for a typo in a program that is legal Java.
+const FIELD_LIBRARY: &str = r"
+package demo;
+
+public class Point {
+    public int x = 7;
+}
+";
+
+const FIELD_PROJECT: &str = r"
+package app;
+
+import demo.Point;
+
+public class Main {
+    public static int run() {
+        Point p = new Point();
+        return p.x;
+    }
+}
+";
+
+#[test]
+#[should_panic(expected = "an instance field of a linked library class")]
+fn reading_a_linked_instance_field_names_the_missing_capability() {
+    linked_run(FIELD_PROJECT, &[("demo/Point.java", FIELD_LIBRARY)]);
 }
