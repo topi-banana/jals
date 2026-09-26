@@ -96,7 +96,7 @@ pub use backend::{
 pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
 pub use init::{InitOptions, ScaffoldFile};
-pub use jals_backend::JalsBackend;
+pub use jals_backend::{JalsBackend, native_package_sources};
 #[cfg(feature = "native")]
 pub use javac_backend::{HostCompileInputs, JavacBackend};
 #[cfg(feature = "native")]
