@@ -375,6 +375,7 @@ fn the_runner_links_a_wasm_dependency() {
             name: "lib",
             bytes: &library_bytes,
         }],
+        foreign: &[],
         progress: &jals_progress::Progress::SILENT,
     })
     .expect("the run links and executes");
@@ -444,6 +445,7 @@ fn the_runner_links_a_librarys_host_imports() {
             name: "lib",
             bytes: &library_bytes,
         }],
+        foreign: &[],
         progress: &jals_progress::Progress::SILENT,
     })
     .expect("the run links and executes");
@@ -538,6 +540,7 @@ fn a_package_can_ship_its_java_as_a_module() {
             name: "lib",
             bytes: library_bytes,
         }],
+        foreign: &[],
         progress: &jals_progress::Progress::SILENT,
     })
     .expect("the run links and executes");
@@ -593,6 +596,7 @@ fn a_package_ships_a_modules_own_native_methods_too() {
             name: "lib",
             bytes: library_bytes,
         }],
+        foreign: &[],
         progress: &jals_progress::Progress::SILENT,
     })
     .expect("the run links and executes");
