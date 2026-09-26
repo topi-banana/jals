@@ -90,6 +90,8 @@ pub enum AbiError {
     Truncated,
     /// A tag byte named a shape this version does not know.
     Unknown(u8),
+    /// A LEB128's final byte carried bits the value has no room for.
+    IntegerTooLarge,
     /// A string was not valid UTF-8.
     Text,
     /// The section states a version this reader does not know.
@@ -106,6 +108,9 @@ impl fmt::Display for AbiError {
             Self::Unknown(tag) => {
                 write!(f, "the library ABI section states an unknown shape ({tag})")
             }
+            Self::IntegerTooLarge => f.write_str(
+                "the library ABI section holds a LEB128 whose final byte has bits the value has no room for",
+            ),
             Self::Text => f.write_str("the library ABI section holds text that is not UTF-8"),
             Self::Version(version) => write!(
                 f,
@@ -397,7 +402,14 @@ impl<'a> Reader<'a> {
         for shift in 0..5 {
             let byte = self.byte()?;
             let payload = u32::from(byte & 0x7F);
-            value |= payload.checked_shl(shift * 7).ok_or(AbiError::Truncated)?;
+            // Five bytes carry 35 bits for a 32-bit value, so the last byte's top three data bits
+            // (0x70) have no room in the value. Accepting them would silently discard them — the
+            // reader would read `FF FF FF FF 7F` as `u32::MAX` — and a reader that guesses at
+            // corrupt bytes is the failure this section's format contract exists to refuse.
+            if shift == 4 && payload & 0x70 != 0 {
+                return Err(AbiError::IntegerTooLarge);
+            }
+            value |= payload << (shift * 7);
             if byte & 0x80 == 0 {
                 return Ok(value);
             }
@@ -477,5 +489,32 @@ mod tests {
     fn a_module_without_the_section_is_absent_not_guessed() {
         let bytes = super::super::Module::new().finish().expect("encodes");
         assert_eq!(LibraryAbi::of_module(&bytes), Err(AbiError::Absent));
+    }
+
+    /// `FF FF FF FF 7F` is five bytes of payload for a `u32` that has room for four, so the last
+    /// byte's top three bits have nowhere to go. Reading it as `u32::MAX` is what the reader used
+    /// to do — `checked_shl(28)` can never fail — and silently discarding payload is the failure
+    /// this format contract exists to refuse.
+    #[test]
+    fn a_leb128_with_bits_the_value_cannot_hold_is_refused() {
+        assert_eq!(
+            Reader::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x7F]).u32(),
+            Err(AbiError::IntegerTooLarge)
+        );
+        // The same five bytes with the extra bits clear *is* `u32::MAX`, so the check rejects the
+        // unused bits and not a five-byte encoding as such.
+        assert_eq!(
+            Reader::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]).u32(),
+            Ok(u32::MAX)
+        );
+    }
+
+    /// The same refusal through the public door: a section whose version field is over-long is an
+    /// error, not a version someone might match.
+    #[test]
+    fn an_over_long_leb128_in_a_section_is_an_error_at_read() {
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_eq!(LibraryAbi::read(&bytes), Err(AbiError::IntegerTooLarge));
     }
 }

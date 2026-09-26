@@ -81,7 +81,7 @@ mod lower;
 /// because it is what [`Insn::convert`] takes. [`jvm`](crate::jvm) re-exports it for the same
 /// reason, so that neither backend's seam sends a caller to the other one for a name it needs.
 pub use crate::facts::Numeric;
-pub use abi::{AbiError, ClassType, LibraryAbi, Source};
+pub use abi::{AbiError, CUSTOM_SECTION, ClassType, LibraryAbi, Source};
 pub use encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Import, ImportKind, Module, RefType,
     StorageType, SubType, ValType,
