@@ -2647,9 +2647,11 @@ impl Manifest {
             });
         }
         // A `wasm` dependency is a module linked at run time, which only the wasm backend emits a
-        // module to link into. Checked entry by entry so the message names the one to move.
+        // module to link into. Checked entry by entry so the message names the one to move, and
+        // over `[dev-dependencies]` too: a test run resolves those, so a `wasm` entry there is
+        // just as contradicted by a class-file backend as one in `[dependencies]`.
         if !matches!(self.build.backend, BackendKind::JalsWasm {}) {
-            for (name, dependency) in &self.dependencies {
+            for (name, dependency) in self.dependencies.iter().chain(&self.dev_dependencies) {
                 if matches!(dependency, Dependency::Wasm(_)) {
                     return Err(ValidationError::WasmDependencyWithoutWasmBackend {
                         name: name.clone(),
@@ -4469,6 +4471,25 @@ mod tests {
             let mut m = Manifest::default();
             m.build.backend = backend;
             m.dependencies.insert(
+                "demo".to_owned(),
+                Dependency::Wasm(WasmDependency {
+                    wasm: "../demo/demo.wasm".to_owned(),
+                    optional: None,
+                }),
+            );
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::WasmDependencyWithoutWasmBackend {
+                    name: "demo".to_owned(),
+                    backend: backend.tag_name(),
+                })
+            );
+
+            // `[dev-dependencies]` goes through the identical check: a test run resolves those,
+            // so the contradiction with a class-file backend is exactly the same one.
+            let mut m = Manifest::default();
+            m.build.backend = backend;
+            m.dev_dependencies.insert(
                 "demo".to_owned(),
                 Dependency::Wasm(WasmDependency {
                     wasm: "../demo/demo.wasm".to_owned(),

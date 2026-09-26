@@ -2317,8 +2317,8 @@ struct ResolvedWasmLibrary {
 struct CompilePlan {
     backend: Box<dyn jals_build::Backend>,
     tree: Vec<jals_build::BackendSource>,
-    /// The `wasm` dependencies this compile links, in declaration order, as the request borrows
-    /// them.
+    /// The `wasm` dependencies this compile links — the active ones in the lowering's scope,
+    /// ordered by their dependency key — as the request borrows them.
     libraries: Vec<jals_build::BackendLibrary>,
     /// The same libraries' bytes, aligned with [`libraries`](Self::libraries), for the run step —
     /// which needs the module the compile only described.
@@ -2377,10 +2377,11 @@ impl CompilePlan {
         .await;
         match selection {
             jals_build::BackendSelection::Available(backend) => {
-                let (libraries, library_bytes) = Self::wasm_libraries(root, manifest, features)?
-                    .into_iter()
-                    .map(|library| (library.library, library.bytes))
-                    .unzip();
+                let (libraries, library_bytes) =
+                    Self::wasm_libraries(root, manifest, features, lowering.dependency_scope())?
+                        .into_iter()
+                        .map(|library| (library.library, library.bytes))
+                        .unzip();
                 Ok(Self {
                     backend,
                     tree,
@@ -2411,18 +2412,24 @@ impl CompilePlan {
         }
     }
 
-    /// Every active `wasm` dependency of `manifest`, read and decoded in declaration order.
+    /// Every active `wasm` dependency of `manifest` in `scope`, read and decoded.
     ///
     /// A dependency whose module carries no `jals.library` section is refused here, with the path
     /// that was read: it is the wrong kind of module, and a link failure at run time would say so
     /// in the engine's vocabulary rather than the project's.
+    ///
+    /// The slice comes out in the manifest's own order, which is the dependency-key order of its
+    /// map — not the order the author wrote the tables in. Nothing depends on it today: library
+    /// modules cannot import one another (`CompileWasm::library` takes no linked list), so a
+    /// library-to-library call would need an ordering *edge*, not a slice order.
     fn wasm_libraries(
         root: &Path,
         manifest: &Manifest,
         features: &ResolvedBuildFeatures,
+        scope: DependencyScope,
     ) -> Result<Vec<ResolvedWasmLibrary>> {
         let mut libraries = Vec::new();
-        for (name, dependency) in manifest.active_dependencies(DependencyScope::Build, features) {
+        for (name, dependency) in manifest.active_dependencies(scope, features) {
             let Dependency::Wasm(wasm) = dependency else {
                 continue;
             };
@@ -3508,5 +3515,37 @@ mod tests {
             vec![root.join("libs/z.jar"), root.join("libs/a.jar")]
         );
         assert_eq!(manifest.build.classpath, vec!["libs/base.jar"]);
+    }
+
+    /// A `[dev-dependencies] wasm` entry resolves under the test lowering, and nowhere else.
+    ///
+    /// The walk and the snapshot scope the entry under both scopes, but the compile gathered
+    /// libraries under `DependencyScope::Build` whatever the lowering was — so `jals test`
+    /// resolved the library's Java in the index and then linked nothing. The missing file is the
+    /// assertion: a scope that never looks at the entry has nothing to read. Built from TOML
+    /// because the dependency's fields are the manifest's to own, not the CLI's to spell.
+    #[test]
+    fn wasm_dependencies_resolve_in_the_lowerings_scope() {
+        let manifest: Manifest = concat!(
+            "[build]\n",
+            "backend = { type = \"jals-wasm\" }\n",
+            "\n[dev-dependencies]\n",
+            "test-lib = { wasm = \"lib.wasm\" }\n",
+        )
+        .parse()
+        .expect("the manifest parses and validates");
+        let features = ResolvedBuildFeatures::default();
+        let root = Path::new("/project");
+        let libraries =
+            CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Build)
+                .expect("the build scope resolves no wasm dependency");
+        assert!(libraries.is_empty());
+        let error = CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Test)
+            .err()
+            .expect("the test scope reads the development dependency");
+        assert!(
+            error.to_string().contains("test-lib"),
+            "the report names the dependency: {error}"
+        );
     }
 }

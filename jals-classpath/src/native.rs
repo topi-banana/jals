@@ -533,7 +533,15 @@ impl NativeProjectPlan {
                         scopes.push(NativeScope::extension(relative, "java"));
                     }
                 }
-                Dependency::Git(_) | Dependency::Wasm(_) => {}
+                // A precompiled module is a build input exactly as a jar is: the compile reads its
+                // bytes and its `jals.library` section decides what the project resolves against.
+                // Captured under both scopes, for the same reason the tables are not filtered.
+                Dependency::Wasm(wasm) => {
+                    if let Some(path) = Self::project_relative(project_root, &wasm.wasm) {
+                        scopes.push(NativeScope::all(path));
+                    }
+                }
+                Dependency::Git(_) => {}
             }
         }
         scopes
