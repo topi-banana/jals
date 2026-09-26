@@ -142,7 +142,7 @@ impl JalsBackend {
         // module's exported surface, which is why it travels as a second list all the way into
         // `CompileWasm::project` rather than being appended here.
         let project_files = roots.len();
-        for (offset, (_, source)) in self.natives.sources().enumerate() {
+        for (offset, (_, source)) in self.natives.lowered_sources().enumerate() {
             let file = FileId(u32::try_from(project_files + offset).unwrap_or(u32::MAX));
             roots.push((file, Parse::parse(source.text).await.syntax()));
         }
@@ -158,6 +158,22 @@ impl JalsBackend {
             }
         }
         for library in request.libraries {
+            // One link name is one module: the engine registers an import module per name, so a
+            // second module under it would resolve the first's imports while its own went to the
+            // wrong code — or fail in the engine's vocabulary, far from either declaration. A
+            // `wasm` dependency and a selected native package are the two ways a name can arrive,
+            // and this is the one place both halves are in hand.
+            if self
+                .natives
+                .libraries()
+                .any(|(name, _)| name == library.name)
+            {
+                messages.push(format!(
+                    "`{}` is both a `wasm` dependency and a selected native package: a link \
+                     name must identify one module",
+                    library.name
+                ));
+            }
             linked.push((library.name.clone(), library.abi.clone()));
         }
         if !messages.is_empty() {
@@ -336,6 +352,37 @@ impl Backend for JalsBackend {
             ),
         }
     }
+}
+
+/// Every Java compilation unit a selected native package publishes for the **index**, as
+/// `(path, text)`.
+///
+/// A source package contributes the Java it declares; a package that ships a precompiled module
+/// contributes the Java its module's `jals.library` section publishes — the same text the library
+/// compiled against, so the declarations a reader resolves and the code that runs cannot drift.
+/// This is the half an editor or a linter wants; what the consumer *lowers* is
+/// [`NativePackageSet::lowered_sources`](jals_native::NativePackageSet::lowered_sources), which a
+/// library-shipping package contributes nothing to.
+///
+/// A module the ABI cannot be read from yields nothing here: the compile is where its bytes are
+/// reported, under the package name it was selected by, and a host that only indexes has no
+/// better answer than to leave it out — the same way an unresolved classpath entry degrades the
+/// analysis instead of stopping it.
+pub fn native_package_sources(selection: &NativePackageSet) -> Vec<(String, String)> {
+    let mut sources = Vec::new();
+    for (_, source) in selection.lowered_sources() {
+        sources.push((source.path.to_owned(), source.text.to_owned()));
+    }
+    for (_, bytes) in selection.libraries() {
+        if let Ok(abi) = jals_javac::wasm::LibraryAbi::of_module(bytes) {
+            sources.extend(
+                abi.sources
+                    .iter()
+                    .map(|source| (source.path.clone(), source.text.clone())),
+            );
+        }
+    }
+    sources
 }
 
 #[cfg(test)]

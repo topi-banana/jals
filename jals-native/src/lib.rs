@@ -60,9 +60,12 @@
 //! - `jals-config` reads `[build] native-packages`, and refuses a non-empty list under any backend
 //!   but `jals-wasm` — a native package has exactly one producer that can take it in.
 //! - `jals-build` selects a [`NativePackageSet`] out of a [`NativeRegistry`], compiles its
-//!   [`sources`](NativePackageSet::sources) into the module beside the project's own, folds its
-//!   [`provenance`](NativePackageSet::provenance) into the backend's cache key, and links its
-//!   [`bindings`](NativePackageSet::bindings) when the module is instantiated.
+//!   [`lowered_sources`](NativePackageSet::lowered_sources) into the module beside the project's
+//!   own, folds its [`provenance`](NativePackageSet::provenance) into the backend's cache key,
+//!   and links its [`bindings`](NativePackageSet::bindings) when the module is instantiated. A
+//!   host that only indexes — the editor, the linter — asks for
+//!   `jals_build::native_package_sources` instead, which also reaches the published Java of a
+//!   package that ships a precompiled module.
 //! - `jals-hir` indexes the same Java, so the project's own source resolves against it.
 
 extern crate alloc;

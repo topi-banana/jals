@@ -1939,12 +1939,9 @@ impl LintProject {
         manifest: &Manifest,
     ) -> Vec<jals_editor::PackageSource> {
         match natives::Natives::select(shell, manifest) {
-            Ok(selection) => selection
-                .sources()
-                .map(|(_, source)| jals_editor::PackageSource {
-                    path: source.path.to_owned(),
-                    text: source.text.to_owned(),
-                })
+            Ok(selection) => jals_build::native_package_sources(&selection)
+                .into_iter()
+                .map(|(path, text)| jals_editor::PackageSource { path, text })
                 .collect(),
             Err(error) => {
                 shell.warn(format_args!("{error:#}"));
