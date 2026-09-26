@@ -89,8 +89,9 @@ pub struct WasmTestLauncher {
     bindings: NativeBindings,
     /// The precompiled libraries the module imports from, decoded once beside it.
     libraries: Vec<(String, ParsedModule)>,
-    /// The foreign modules that may satisfy its `native` imports, decoded once beside it.
-    foreign: Vec<ParsedModule>,
+    /// The foreign modules that may satisfy its `native` imports, decoded once beside it, each
+    /// with the name it was declared by.
+    foreign: Vec<(String, ParsedModule)>,
 }
 
 impl WasmTestLauncher {
@@ -204,7 +205,7 @@ struct SharedWasmRun {
     /// test links its own instances of them.
     libraries: Vec<(String, ParsedModule)>,
     /// The foreign modules, cloned for the same reason: every test gets fresh instances.
-    foreign: Vec<ParsedModule>,
+    foreign: Vec<(String, ParsedModule)>,
     /// Test id to the export that runs it. A `Vec` rather than a map: a suite is small enough that
     /// the scan is free, and it keeps the frontend's order visible.
     exports: Vec<(String, String)>,

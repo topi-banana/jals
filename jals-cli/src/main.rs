@@ -1233,7 +1233,7 @@ impl RunArgs {
         let foreign: Vec<jals_build::WasmForeignModule<'_>> = plan
             .foreign
             .iter()
-            .map(|bytes| jals_build::WasmForeignModule { bytes })
+            .map(|(name, bytes)| jals_build::WasmForeignModule { name, bytes })
             .collect();
         let (Some(runtime), Some(run_request)) = (&runtime, &run_request) else {
             return self.run_module(session, &outcome, &natives, &linked, &foreign, &package);
@@ -1484,7 +1484,7 @@ impl TestArgs {
             let foreign: Vec<jals_build::WasmForeignModule<'_>> = plan
                 .foreign
                 .iter()
-                .map(|bytes| jals_build::WasmForeignModule { bytes })
+                .map(|(name, bytes)| jals_build::WasmForeignModule { name, bytes })
                 .collect();
             Launcher::Wasm(
                 jals_build::WasmTestLauncher::resolve(
@@ -2336,6 +2336,18 @@ struct ResolvedWasmLibrary {
     library: jals_build::BackendLibrary,
 }
 
+/// A scope's `wasm` dependencies, split by kind.
+///
+/// Two halves with two destinations and one source: the compile links the libraries, and the run
+/// instantiates both — the libraries by their ABI and the foreign modules by the canonical keys
+/// their exports carry. A foreign module has no ABI to decode, so it travels as the pair of its
+/// dependency name and its bytes.
+#[derive(Default)]
+struct WasmLibraries {
+    libraries: Vec<ResolvedWasmLibrary>,
+    foreign: Vec<(String, Vec<u8>)>,
+}
+
 /// The compile step, selected and ready to run.
 ///
 /// Owns what a [`BackendRequest`](jals_build::BackendRequest) borrows, which is the whole reason it
@@ -2350,9 +2362,10 @@ struct CompilePlan {
     /// The same libraries' bytes, aligned with [`libraries`](Self::libraries), for the run step —
     /// which needs the module the compile only described.
     library_bytes: Vec<Vec<u8>>,
-    /// The foreign modules this run satisfies `native` imports from: no ABI, no compile input, and
-    /// only the run consumes them. See [`jals_build::WasmForeignModule`].
-    foreign: Vec<Vec<u8>>,
+    /// The foreign modules this run satisfies `native` imports from, as `(dependency name, bytes)`:
+    /// no ABI, no compile input, and only the run consumes them. See
+    /// [`jals_build::WasmForeignModule`].
+    foreign: Vec<(String, Vec<u8>)>,
     options: jals_build::BackendOptions,
     /// Attributed to the package being compiled, so an in-process backend's per-file counting lands
     /// under the same name the `Compiling` line carries.
@@ -2407,9 +2420,10 @@ impl CompilePlan {
         .await;
         match selection {
             jals_build::BackendSelection::Available(backend) => {
-                let (resolved, foreign) =
+                let resolved =
                     Self::wasm_libraries(root, manifest, features, lowering.dependency_scope())?;
                 let (libraries, library_bytes) = resolved
+                    .libraries
                     .into_iter()
                     .map(|library| (library.library, library.bytes))
                     .unzip();
@@ -2418,7 +2432,7 @@ impl CompilePlan {
                     tree,
                     libraries,
                     library_bytes,
-                    foreign,
+                    foreign: resolved.foreign,
                     options: jals_build::BackendOptions::from_manifest(manifest),
                     progress,
                 })
@@ -2444,24 +2458,27 @@ impl CompilePlan {
         }
     }
 
-    /// Every active `wasm` dependency of `manifest` in `scope`, read and decoded.
+    /// Every active `wasm` dependency of `manifest` in `scope`, read and split by kind.
     ///
     /// A dependency whose module carries no `jals.library` section is refused here, with the path
     /// that was read: it is the wrong kind of module, and a link failure at run time would say so
-    /// in the engine's vocabulary rather than the project's.
+    /// in the engine's vocabulary rather than the project's. A `foreign = true` entry is the
+    /// exception and the reason the check exists: it declares up front that its module was not
+    /// emitted by this backend and has no ABI to read, so it comes back as foreign bytes instead.
     ///
     /// The slice comes out in the manifest's own order, which is the dependency-key order of its
     /// map — not the order the author wrote the tables in. Nothing depends on it today: library
     /// modules cannot import one another (`CompileWasm::library` takes no linked list), so a
-    /// library-to-library call would need an ordering *edge*, not a slice order.
+    /// library-to-library call would need an ordering *edge*, not a slice order. A foreign module
+    /// can import from an earlier one, though: the engine links each under its dependency key, so
+    /// the key order is what decides which pairs can be spelled.
     fn wasm_libraries(
         root: &Path,
         manifest: &Manifest,
         features: &ResolvedBuildFeatures,
         scope: DependencyScope,
-    ) -> Result<(Vec<ResolvedWasmLibrary>, Vec<Vec<u8>>)> {
-        let mut libraries = Vec::new();
-        let mut foreign = Vec::new();
+    ) -> Result<WasmLibraries> {
+        let mut resolved = WasmLibraries::default();
         for (name, dependency) in manifest.active_dependencies(scope, features) {
             let Dependency::Wasm(wasm) = dependency else {
                 continue;
@@ -2473,7 +2490,7 @@ impl CompilePlan {
             // A foreign module has no ABI to read: the project's own `native` declarations are
             // its API, and its exports are matched to them by canonical key at run time.
             if wasm.foreign.unwrap_or(false) {
-                foreign.push(bytes);
+                resolved.foreign.push((name.clone(), bytes));
                 continue;
             }
             let abi = jals_build::LibraryAbi::of_module(&bytes).map_err(|error| {
@@ -2482,7 +2499,7 @@ impl CompilePlan {
                     path.display()
                 )
             })?;
-            libraries.push(ResolvedWasmLibrary {
+            resolved.libraries.push(ResolvedWasmLibrary {
                 bytes,
                 library: jals_build::BackendLibrary {
                     name: name.clone(),
@@ -2490,7 +2507,7 @@ impl CompilePlan {
                 },
             });
         }
-        Ok((libraries, foreign))
+        Ok(resolved)
     }
 }
 
@@ -3575,17 +3592,73 @@ mod tests {
         .expect("the manifest parses and validates");
         let features = ResolvedBuildFeatures::default();
         let root = Path::new("/project");
-        let (libraries, foreign) =
+        let resolved =
             CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Build)
                 .expect("the build scope resolves no wasm dependency");
-        assert!(libraries.is_empty());
-        assert!(foreign.is_empty());
+        assert!(resolved.libraries.is_empty());
+        assert!(resolved.foreign.is_empty());
         let error = CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Test)
             .err()
             .expect("the test scope reads the development dependency");
         assert!(
             error.to_string().contains("test-lib"),
             "the report names the dependency: {error}"
+        );
+    }
+
+    /// `foreign = true` is what routes a `wasm` dependency to the runner without an ABI read.
+    ///
+    /// The file is not a module at all, which is the point: the foreign route only reads it, so
+    /// the flag — and not the module's content — is what has to decide the split. The same entry
+    /// without the flag goes down the library route and is refused by the ABI decode, which is
+    /// what makes the flag load-bearing rather than cosmetic.
+    #[test]
+    fn a_foreign_wasm_dependency_is_routed_past_the_abi() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        std::fs::write(directory.path().join("core.wasm"), b"not a wasm module")
+            .expect("the file writes");
+        let features = ResolvedBuildFeatures::default();
+
+        let manifest: Manifest = concat!(
+            "[build]\n",
+            "backend = { type = \"jals-wasm\" }\n",
+            "\n[dependencies]\n",
+            "core = { wasm = \"core.wasm\", foreign = true }\n",
+        )
+        .parse()
+        .expect("the manifest parses and validates");
+        let resolved = CompilePlan::wasm_libraries(
+            directory.path(),
+            &manifest,
+            &features,
+            DependencyScope::Build,
+        )
+        .expect("a foreign module is read, not decoded");
+        assert!(resolved.libraries.is_empty(), "it is not a linked library");
+        assert_eq!(
+            resolved.foreign,
+            vec![("core".to_owned(), b"not a wasm module".to_vec())]
+        );
+
+        let plain: Manifest = concat!(
+            "[build]\n",
+            "backend = { type = \"jals-wasm\" }\n",
+            "\n[dependencies]\n",
+            "core = { wasm = \"core.wasm\" }\n",
+        )
+        .parse()
+        .expect("the manifest parses and validates");
+        let error = CompilePlan::wasm_libraries(
+            directory.path(),
+            &plain,
+            &features,
+            DependencyScope::Build,
+        )
+        .err()
+        .expect("without the flag the ABI is what decides");
+        assert!(
+            error.to_string().contains("not a linked library"),
+            "the refusal is the ABI's: {error}"
         );
     }
 }
