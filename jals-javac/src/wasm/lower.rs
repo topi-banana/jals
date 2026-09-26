@@ -264,12 +264,17 @@ impl CompileWasm {
     ///   lookup table.
     /// - A constructor is exported as a *factory*, because the in-module shape — a `this`
     ///   parameter and a `void` result — is not callable from outside. The factory allocates,
-    ///   runs the constructor, and returns the object.
+    ///   runs the constructor (or the class's initialisers, for the constructor the language gives
+    ///   a class that declares none), and returns the object.
     /// - A `static` field is exported as an accessor pair, because the in-module shape is a
     ///   global and a global's name is not a Java signature.
     /// - The module's exception tag is exported, so a consumer can catch what the library throws.
     /// - The [`LibraryAbi`] travels in a custom section beside the code: the type groups a
     ///   consumer must replay, the class-to-struct map, and the package's Java for the index.
+    ///
+    /// One boundary is stated rather than discovered: a consumer class cannot extend a library
+    /// class through this surface. `super(...)` needs a `(this, params) -> ()` constructor, and a
+    /// factory allocates its own receiver, so no exported shape can be passed a consumer's `this`.
     ///
     /// `sources` is the same Java that was compiled, and it is the package's API: a consumer's
     /// index reads the text, not a copy of it.
@@ -340,9 +345,18 @@ impl CompileWasm {
         for (item, captured) in captured_items {
             layout.captures.insert(item, captured);
         }
+        // What the library surface gates on is "was this item compiled here", and that is every type
+        // declaration — interfaces included. `classes` alone is the wrong set: it deliberately
+        // excludes interfaces, which have no struct, and gating on it silently dropped every
+        // interface's `default`/`static` method and implicitly-static field out of the surface.
+        let compiled: BTreeSet<ItemId> = classes
+            .iter()
+            .chain(interface_items.iter())
+            .copied()
+            .collect();
         // An interface has no struct type, so it is registered before any class is laid out: a field or
         // a parameter of interface type has to resolve to *something* while the structs are built.
-        for item in interface_items {
+        for &item in &interface_items {
             layout.interfaces.insert(item);
         }
         // One tag, declared whether or not anything throws: an unused tag costs three bytes and saves
@@ -503,7 +517,9 @@ impl CompileWasm {
         // name exists.
         let classes = match surface {
             Surface::Project => Vec::new(),
-            Surface::Library => Self::export_library(&classes, index, &layout, &mut module)?,
+            Surface::Library => {
+                Self::export_library(&classes, &compiled, index, &layout, &mut module)?
+            }
         };
         Ok((module, classes))
     }
@@ -524,17 +540,17 @@ impl CompileWasm {
     /// embedder supplies, not what the library defines.
     fn export_library(
         classes: &[ItemId],
+        compiled: &BTreeSet<ItemId>,
         index: &ProjectIndex,
         layout: &Layout,
         module: &mut Module,
     ) -> Result<Vec<ClassType>> {
-        let own: BTreeSet<ItemId> = classes.iter().copied().collect();
         let first_defined = module.func_index(0);
 
         for (&member, &function) in &layout.functions {
             let info = index.member(member);
             let owner = info.owner;
-            if !own.contains(&owner) || info.modifiers.is_private || function < first_defined {
+            if !compiled.contains(&owner) || info.modifiers.is_private || function < first_defined {
                 continue;
             }
             match info.kind {
@@ -556,13 +572,59 @@ impl CompileWasm {
             }
         }
 
+        // A class that writes no constructor still has one — the default JLS §8.8.9 gives it — and
+        // the index synthesises the member. Nothing lowered a *function* for it, so the factory is
+        // built here: allocate, run the class's initialisers when it has any, return. This is the
+        // common Java shape (`class Counter { private int count = 3; }`), and without it a consumer
+        // finds the class in the map and no way to construct one.
+        //
+        // The receiver reaches the stack only for an initialiser to consume: pushing it before the
+        // `if` leaves a second value behind for a class with nothing to run, and the module is then
+        // one no validator accepts.
+        for &item in classes {
+            if layout.constructors(index, item).next().is_some() {
+                continue;
+            }
+            let Some(member) = index.own_members(item).iter().copied().find(|&member| {
+                index.member(member).kind == DefKind::Constructor
+                    && index.member(member).params.is_empty()
+            }) else {
+                continue;
+            };
+            let Some(&structure) = layout.structs.get(&item) else {
+                continue;
+            };
+            let result = layout.class_ref(item)?;
+            let factory_ty = module.add_type(SubType::plain(CompType::Func {
+                params: Vec::new(),
+                results: alloc::vec![result],
+            }));
+            let mut insn = Insn::new();
+            insn.struct_new_default(structure).local_set(0);
+            if let Some(&init) = layout.default_constructors.get(&item) {
+                insn.local_get(0).call(init);
+            }
+            insn.local_get(0);
+            let factory = module.func_index(module.funcs.len());
+            Self::push_func(
+                module,
+                Func {
+                    type_index: factory_ty,
+                    locals: alloc::vec![result],
+                    body: insn.into_body(),
+                },
+            )?;
+            let key = Self::member_key(item, member, index)?;
+            module.exports.push((key, ExportKind::Func, factory));
+        }
+
         // A `static` field is module state; the surface is a getter and a setter.
         for (&member, &global) in &layout.statics {
             let info = index.member(member);
             if info.kind != DefKind::Field
                 || !info.modifiers.is_static
                 || info.modifiers.is_private
-                || !own.contains(&info.owner)
+                || !compiled.contains(&info.owner)
             {
                 continue;
             }

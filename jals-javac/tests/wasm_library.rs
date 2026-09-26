@@ -236,3 +236,125 @@ fn a_constructor_is_exported_as_a_factory() {
         func.body.last()
     );
 }
+
+/// A class that declares no constructor still has one (JLS §8.8.9), and the surface has to offer
+/// it: the constructor the language gives the class has no lowered function, so its factory is
+/// synthesized here — allocate, run the class's initialisers when it has any, return.
+const INITIALISED: &str = r"
+package demo;
+
+public class Initialised {
+    private int count = 3;
+
+    public int next() {
+        return this.count + 1;
+    }
+}
+";
+
+/// The shape that made the module invalid before: nothing to run after the allocation. The factory
+/// must not push a receiver no initialiser consumes.
+const EMPTY: &str = r"
+package demo;
+
+public class Empty {
+    public static int one() {
+        return 1;
+    }
+}
+";
+
+/// The implicit constructor is part of the surface, and the factory for a class with nothing to
+/// run is one value, not two.
+#[test]
+fn an_implicit_constructor_is_exported_as_a_factory() {
+    let (module, _) = library_of(
+        &[
+            ("demo/Initialised.java", INITIALISED),
+            ("demo/Empty.java", EMPTY),
+        ],
+        "demo",
+    );
+    let names = exports(&module);
+    for expected in ["demo/Initialised#<init>()V", "demo/Empty#<init>()V"] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "expected `{expected}` among {names:?}"
+        );
+    }
+
+    let factory_body = |name: &str| {
+        let (_, _, index) = module
+            .exports
+            .iter()
+            .find(|(exported, ..)| exported == name)
+            .unwrap_or_else(|| panic!("`{name}` is exported"));
+        let defined = usize::try_from(*index).expect("an index that fits")
+            - usize::try_from(module.func_index(0)).expect("a function import count that fits");
+        &module.funcs[defined].body
+    };
+    let gets = factory_body("demo/Empty#<init>()V")
+        .iter()
+        .filter(|instruction| matches!(instruction, jals_javac::wasm::Instr::LocalGet(_)))
+        .count();
+    assert_eq!(
+        gets,
+        1,
+        "an empty factory leaves one value on the stack, not two: {:?}",
+        factory_body("demo/Empty#<init>()V")
+    );
+    let calls = factory_body("demo/Initialised#<init>()V")
+        .iter()
+        .filter(|instruction| matches!(instruction, jals_javac::wasm::Instr::Call(_)))
+        .count();
+    assert_eq!(
+        calls,
+        1,
+        "the initialised factory runs the synthesized initialiser once: {:?}",
+        factory_body("demo/Initialised#<init>()V")
+    );
+    validate(&module.finish().expect("a module whose lengths all fit"));
+}
+
+/// An interface is compiled here even though it has no struct, so its `default` and `static`
+/// methods and its implicitly-static fields are part of the surface. Its abstract method is not:
+/// nothing lowered a function for it.
+const GREETER: &str = r"
+package demo;
+
+public interface Greeter {
+    int LIMIT = 4;
+
+    int base();
+
+    default int twice(int n) {
+        return n + n;
+    }
+
+    static int three() {
+        return 3;
+    }
+}
+";
+
+#[test]
+fn an_interface_contributes_its_default_static_and_field_surface() {
+    let (module, _) = library_of(&[("demo/Greeter.java", GREETER)], "demo");
+    let names = exports(&module);
+    for expected in [
+        "demo/Greeter#twice(I)I",
+        "demo/Greeter#three()I",
+        "demo/Greeter#LIMIT#get",
+        "demo/Greeter#LIMIT#put",
+    ] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "expected `{expected}` among {names:?}"
+        );
+    }
+    assert!(
+        !names.iter().any(|name| name == "demo/Greeter#base()I"),
+        "an abstract method has no body to export: {names:?}"
+    );
+    validate(&module.finish().expect("a module whose lengths all fit"));
+}
