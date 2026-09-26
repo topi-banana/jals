@@ -112,9 +112,11 @@ impl Bytes {
 
 /// A heap type: what a reference points at.
 ///
-/// Only the concrete form is modelled. The abstract heap types (`any`, `func`, `none`, …) occupy
-/// the *negative* range of the same encoding, and this backend has no use for them: every Java
-/// reference is a reference to a declared class or array type.
+/// Both forms are modelled, but only where Java has a type for them. A reference to a declared class
+/// or array type is [`Concrete`](Self::Concrete); the abstract types are [`Any`](Self::Any), which
+/// holds an interface-typed value, [`None`](Self::None), which is a bare `null`, and
+/// [`Func`](Self::Func), which is a signature-erased function reference. The rest of the negative
+/// range (`i31`, `extern`, `noexn`, …) names nothing Java can write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeapType {
     /// A declared type, by index.
@@ -131,12 +133,17 @@ pub enum HeapType {
     /// `(ref null none)` is a subtype of *every* nullable reference — so it fits wherever the literal
     /// does without the target type having to be known first.
     None,
-    /// The function-reference hierarchy, which is what a linked dispatch slot holds.
+    /// The function-reference hierarchy: a function reference whose *signature* is not known here.
     ///
-    /// The one heap type here that names no Java type: a library's dispatch slots are function
-    /// references the consumer fills in, and the receiver of a call through one is an argument like
-    /// any other rather than part of the value. `call_ref` names the function type both sides agreed
-    /// on, and the group replay is what makes that agreement canonical.
+    /// The one heap type here that names no Java type. It is what a signature-erased reference is —
+    /// the value beside `ref.null func`, or the null a `struct.new_default` writes into a function
+    /// field before anything fills it.
+    ///
+    /// It is **not** what a linked dispatch slot is called through: `call_ref` requires the
+    /// operand's static type to be a subtype of the function type the call names, and
+    /// `(ref null func)` is not a subtype of any declared one. A slot that must be callable names a
+    /// [`Concrete`](Self::Concrete) function type instead — see the linked-dispatcher test in
+    /// `wasm_asm` — and the group replay is what makes that agreement canonical.
     Func,
 }
 
@@ -691,30 +698,26 @@ impl Module {
         u32::try_from(self.tag_import_count().saturating_add(defined)).unwrap_or(u32::MAX)
     }
 
-    /// Every function index a body or global initialiser names with `ref.func`, in first-use order.
+    /// Every function index a *body* names with `ref.func`, in first-use order.
     ///
     /// `ref.func` is only valid for a function the module has *declared* a reference to, and a
     /// declarative element segment is where that is spelled. Collected by reading the module's own
     /// instructions back rather than tracked at each `ref.func` site: an emitter that had to
     /// remember would be a second place the set lives, and the encoder is the one place that cannot
     /// go stale.
+    ///
+    /// Only bodies need the segment. A `ref.func` in a global initialiser is part of the module's
+    /// declared set on its own, and an exported function is declared by its export, so neither is
+    /// collected here.
     fn declared_functions(&self) -> Vec<u32> {
         let mut declared: Vec<u32> = Vec::new();
-        let mut record = |instruction: &Instr| {
-            if let Instr::RefFunc(index) = instruction
-                && !declared.contains(index)
-            {
-                declared.push(*index);
-            }
-        };
-        for global in &self.globals {
-            for instruction in &global.init {
-                record(instruction);
-            }
-        }
         for func in &self.funcs {
             for instruction in &func.body {
-                record(instruction);
+                if let Instr::RefFunc(index) = instruction
+                    && !declared.contains(index)
+                {
+                    declared.push(*index);
+                }
             }
         }
         declared
