@@ -88,9 +88,8 @@ public class Main {
 }
 ";
 
-/// Compile the library, compile the project against it, link the two, and return what `run`
-/// answered.
-fn linked_run(project_source: &str, library_sources: &[(&str, &str)]) -> i32 {
+/// Compile the library, then the project against it, and return `(library, project)` bytes.
+fn compiled_pair(project_source: &str, library_sources: &[(&str, &str)]) -> (Vec<u8>, Vec<u8>) {
     let texts: Vec<&str> = std::iter::once(project_source)
         .chain(library_sources.iter().map(|(_, text)| *text))
         .collect();
@@ -148,6 +147,12 @@ fn linked_run(project_source: &str, library_sources: &[(&str, &str)]) -> i32 {
     let library_bytes = library_module.finish().expect("the library encodes");
     validate(&library_bytes);
     validate(&project_bytes);
+    (library_bytes, project_bytes)
+}
+
+/// Compile the pair, link the two with the engine directly, and return what `run` answered.
+fn linked_run(project_source: &str, library_sources: &[(&str, &str)]) -> i32 {
+    let (library_bytes, project_bytes) = compiled_pair(project_source, library_sources);
     let library = parse_bytes(&library_bytes).expect("the library parses");
     let project = parse_bytes(&project_bytes).expect("the project parses");
 
@@ -354,4 +359,96 @@ public class Main {
 #[should_panic(expected = "an instance field of a linked library class")]
 fn reading_a_linked_instance_field_names_the_missing_capability() {
     linked_run(FIELD_PROJECT, &[("demo/Point.java", FIELD_LIBRARY)]);
+}
+
+/// The same program through the runner a `jals run` uses: the bytes arrive as a `wasm` dependency
+/// does, the library is instantiated first, and the project links against it by name.
+#[test]
+fn the_runner_links_a_wasm_dependency() {
+    let (library_bytes, project_bytes) = compiled_pair(PROJECT, &[("demo/Counter.java", LIBRARY)]);
+    let outcome = jals_build::WasmRunner::run(&jals_build::WasmRunRequest {
+        module: &project_bytes,
+        invoke: Some("run"),
+        args: &[],
+        natives: &jals_native::NativeBindings::new(),
+        libraries: &[jals_build::WasmLibrary {
+            name: "lib",
+            bytes: &library_bytes,
+        }],
+        progress: &jals_progress::Progress::SILENT,
+    })
+    .expect("the run links and executes");
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(52)])
+    );
+}
+
+/// A library's **own** host imports are linked too, not only the project's.
+///
+/// A `native` method the library's Java declares is an import of the *library's* module, and the
+/// project's import section says nothing about it — the project never has to call the method for
+/// the declaration to be there. Before the sweep, the library could not be instantiated at all
+/// (`linking error: unknown import: demo/Caller.answer()I`) even with the exact owner and
+/// signature selected in `natives`.
+const HOST_LIBRARY: &str = r"
+package demo;
+
+public class Caller {
+    public static native int answer();
+
+    public static int call() {
+        return answer();
+    }
+}
+";
+
+const HOST_PROJECT: &str = r"
+package app;
+
+import demo.Caller;
+
+public class Main {
+    public static int run() {
+        return Caller.call();
+    }
+}
+";
+
+#[test]
+fn the_runner_links_a_librarys_host_imports() {
+    let (library_bytes, project_bytes) =
+        compiled_pair(HOST_PROJECT, &[("demo/Caller.java", HOST_LIBRARY)]);
+    let mut registry = jals_native::NativeRegistry::new();
+    let mut package = jals_native::NativePackage::new("demo.host", 1);
+    package.bind(
+        "demo/Caller",
+        "answer()I",
+        |_host: &mut dyn jals_native::NativeHost,
+         _args: jals_native::Args<'_>,
+         mut results: jals_native::Results<'_>| {
+            results.set(0, jals_native::NativeValue::I32(42));
+            Ok::<(), jals_native::NativeError>(())
+        },
+    );
+    registry.add(package);
+    let selected = registry
+        .select(&["demo.host".to_owned()])
+        .expect("the package selects");
+    let outcome = jals_build::WasmRunner::run(&jals_build::WasmRunRequest {
+        module: &project_bytes,
+        invoke: Some("run"),
+        args: &[],
+        natives: &selected.bindings(),
+        libraries: &[jals_build::WasmLibrary {
+            name: "lib",
+            bytes: &library_bytes,
+        }],
+        progress: &jals_progress::Progress::SILENT,
+    })
+    .expect("the run links and executes");
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(42)])
+    );
 }

@@ -164,6 +164,9 @@ impl Execute {
             // The implementations of every `native` method the module imports. Empty for a project
             // that selected no package, which is what a module with no import section needs.
             natives: &natives.bindings(),
+            // The browser playground has no filesystem to resolve a `wasm` dependency from, so a
+            // project that links one is a host-only arrangement for now.
+            libraries: &[],
             progress: &jals_progress::Progress::SILENT,
         };
         let outcome = WasmRunner::run(&request).map_err(|error| error.to_string())?;
@@ -243,6 +246,7 @@ impl Compile {
             // from the classpath, so resolved dependency jars do not participate — the same `&[]`
             // `jals-cli` passes.
             classpath: &[],
+            libraries: &[],
             options: &options,
         };
         let outcome = backend

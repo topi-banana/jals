@@ -89,8 +89,8 @@ mod wasm_test;
 mod native;
 
 pub use backend::{
-    Assertions, Backend, BackendAbsence, BackendError, BackendFuture, BackendOptions,
-    BackendOutcome, BackendRequest, BackendSelection, BackendSource,
+    Assertions, Backend, BackendAbsence, BackendError, BackendFuture, BackendLibrary,
+    BackendOptions, BackendOutcome, BackendRequest, BackendSelection, BackendSource,
 };
 #[cfg(feature = "native")]
 pub use builtin::BuiltinToolchain;
@@ -116,8 +116,14 @@ pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]
 pub use toolchain::{BuildOutcome, JdkInstall, Runtime, ToolchainError, ToolchainFuture};
 
+/// The ABI a linked library carries in its `jals.library` section, re-exported for the host that
+/// reads one out of a module's bytes and hands the decoded value back as a [`BackendLibrary`].
 #[cfg(feature = "wasm-run")]
-pub use wasm_run::{WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner, WasmValue};
+pub use jals_javac::wasm::LibraryAbi;
+#[cfg(feature = "wasm-run")]
+pub use wasm_run::{
+    WasmLibrary, WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner, WasmValue,
+};
 #[cfg(all(feature = "native", feature = "wasm-run"))]
 pub use wasm_test::{WasmTestEntry, WasmTestLauncher};
 

@@ -104,6 +104,20 @@ pub struct BackendSource {
     pub bytes: Vec<u8>,
 }
 
+/// A precompiled library the project links against.
+///
+/// The ABI travels decoded because it was read from the module's own `jals.library` section by the
+/// host — which needs the bytes again at run time — while the compile needs only what the section
+/// said. The Java the section publishes reaches the index through the same seam, so resolution
+/// reads the library the artifact actually contains.
+#[derive(Debug, Clone)]
+pub struct BackendLibrary {
+    /// The link name every import from this library is spelled with.
+    pub name: String,
+    /// What the library's `jals.library` section said.
+    pub abi: jals_javac::wasm::LibraryAbi,
+}
+
 /// What a backend compiles.
 #[derive(Debug, Clone, Copy)]
 pub struct BackendRequest<'a> {
@@ -111,6 +125,12 @@ pub struct BackendRequest<'a> {
     pub tree: &'a [BackendSource],
     /// Resolved classpath artifacts, in manifest order.
     pub classpath: &'a [CacheKey],
+    /// The precompiled libraries the project links against, in dependency order.
+    ///
+    /// Only the wasm backend reads them, and the manifest already refuses a `wasm` dependency under
+    /// any other — so a selection cannot reach one, exactly as with `[build] native-packages`.
+    /// Empty for every ordinary project, which is what makes the borrow free.
+    pub libraries: &'a [BackendLibrary],
     pub options: &'a BackendOptions,
     /// Where the compile reports what it is doing.
     ///
@@ -501,6 +521,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &[],
             classpath: &[],
+            libraries: &[],
             options: &options,
         };
         let digest = |release| match BackendSelection::in_process(

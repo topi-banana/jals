@@ -275,6 +275,24 @@ impl<H: GraphHost> GraphWalk<'_, H> {
                     }
                     Dependency::Path(path) => self.host.acquire_path(declaring, path).await,
                     Dependency::Git(git) => self.host.acquire_git(declaring, name, git).await,
+                    // A precompiled module is a leaf like a jar: it has no project of its own to
+                    // preprocess, and its bytes are a build input the snapshot has to capture.
+                    Dependency::Wasm(wasm) => {
+                        let optional = dependency.is_optional();
+                        if let Err(message) = self
+                            .visit_binary(
+                                parent.clone(),
+                                declaring,
+                                name,
+                                &wasm.wasm,
+                                DeclaredBinaryEdge::classes(false, None, optional),
+                            )
+                            .await
+                        {
+                            self.warn_declared(parent.as_ref(), name, message);
+                        }
+                        continue;
+                    }
                 };
                 match acquired {
                     Ok(acquired) => {

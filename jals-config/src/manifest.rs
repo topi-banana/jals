@@ -213,6 +213,22 @@ pub enum Dependency {
     Git(GitDependency),
     /// A local directory tree of `.java` source (analysis + editor navigation only).
     Path(PathDependency),
+    /// A **precompiled WebAssembly library**: one module that carries its own `jals.library` ABI
+    /// section, linked into the artifact a `jals-wasm` backend produces.
+    Wasm(WasmDependency),
+}
+
+/// The `wasm` form of a [`Dependency`]: a module this workspace's own wasm backend (or a foreign
+/// one that speaks the same ABI) emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct WasmDependency {
+    /// A `.wasm` location, relative to the manifest directory. Read by the host, never here: the
+    /// module's ABI, not its path, is what a compile consumes.
+    pub wasm: String,
+    /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
+    /// See [`Dependency::is_optional`].
+    optional: Option<bool>,
 }
 
 /// The `jar` form of a [`Dependency`]: a compiled `.jar` and its optional companion `sources` jar.
@@ -2229,6 +2245,15 @@ impl Dependency {
                 }
                 Ok(())
             }
+            Self::Wasm(wasm) => {
+                if wasm.wasm.is_empty() {
+                    return Err(DependencyError::Empty {
+                        name: name.to_owned(),
+                        field: "wasm",
+                    });
+                }
+                Ok(())
+            }
         }?;
         self.validate_features(name)
     }
@@ -2245,7 +2270,7 @@ impl Dependency {
     /// parse error) and this returns an empty slice.
     pub fn features(&self) -> &[String] {
         match self {
-            Self::Jar(_) => &[],
+            Self::Jar(_) | Self::Wasm(_) => &[],
             Self::Git(git) => &git.features,
             Self::Path(path) => &path.features,
         }
@@ -2260,7 +2285,7 @@ impl Dependency {
     /// is never read.
     pub fn default_features(&self) -> bool {
         match self {
-            Self::Jar(_) => true,
+            Self::Jar(_) | Self::Wasm(_) => true,
             Self::Git(git) => git.default_features.unwrap_or(true),
             Self::Path(path) => path.default_features.unwrap_or(true),
         }
@@ -2275,7 +2300,7 @@ impl Dependency {
     pub fn remap(&self) -> Option<&str> {
         match self {
             Self::Jar(jar) => jar.remap.as_deref(),
-            Self::Git(_) | Self::Path(_) => None,
+            Self::Git(_) | Self::Path(_) | Self::Wasm(_) => None,
         }
     }
 
@@ -2297,6 +2322,7 @@ impl Dependency {
             Self::Jar(jar) => jar.optional.unwrap_or(false),
             Self::Git(git) => git.optional.unwrap_or(false),
             Self::Path(path) => path.optional.unwrap_or(false),
+            Self::Wasm(wasm) => wasm.optional.unwrap_or(false),
         }
     }
 
@@ -2308,7 +2334,7 @@ impl Dependency {
     /// answer here rather than inherit whichever side of the question the two callers assumed.
     const fn accepts_features(&self) -> bool {
         match self {
-            Self::Jar(_) => false,
+            Self::Jar(_) | Self::Wasm(_) => false,
             Self::Git(_) | Self::Path(_) => true,
         }
     }
@@ -2619,6 +2645,20 @@ impl Manifest {
             return Err(ValidationError::NativePackagesWithoutWasmBackend {
                 backend: self.build.backend.tag_name(),
             });
+        }
+        // A `wasm` dependency is a module linked at run time, which only the wasm backend emits a
+        // module to link into. Checked entry by entry so the message names the one to move, and
+        // over `[dev-dependencies]` too: a test run resolves those, so a `wasm` entry there is
+        // just as contradicted by a class-file backend as one in `[dependencies]`.
+        if !matches!(self.build.backend, BackendKind::JalsWasm {}) {
+            for (name, dependency) in self.dependencies.iter().chain(&self.dev_dependencies) {
+                if matches!(dependency, Dependency::Wasm(_)) {
+                    return Err(ValidationError::WasmDependencyWithoutWasmBackend {
+                        name: name.clone(),
+                        backend: self.build.backend.tag_name(),
+                    });
+                }
+            }
         }
         // A name that is empty, or declared twice. Both are decidable here; whether a name *exists*
         // is not — the set is a property of the binary that holds the registry, so an unknown name
@@ -3099,6 +3139,17 @@ pub enum ValidationError {
         /// The backend actually selected, by its serialized `type` tag.
         backend: &'static str,
     },
+    /// A `[dependencies]` entry uses the `wasm` form without `[build] backend = { type =
+    /// "jals-wasm" }`.
+    ///
+    /// The third of the same shape: the module is linked into the artifact the wasm backend
+    /// produces, and no other backend emits one to link it into.
+    WasmDependencyWithoutWasmBackend {
+        /// The dependency's name.
+        name: String,
+        /// The backend actually selected, by its serialized `type` tag.
+        backend: &'static str,
+    },
     /// A `[build] native-packages` entry is empty.
     InvalidNativePackage {
         /// The offending entry.
@@ -3281,6 +3332,11 @@ impl fmt::Display for ValidationError {
             Self::EmptyBinField { field } => {
                 write!(f, "a `[[bin]]` has an empty `{field}`")
             }
+            Self::WasmDependencyWithoutWasmBackend { name, backend } => write!(
+                f,
+                "dependency `{name}` uses the `wasm` form, which links a module into the artifact \
+                 a WebAssembly backend produces, and `[build] backend` is `{backend}`"
+            ),
             Self::WasmRuntimeWithoutWasmBackend { backend } => write!(
                 f,
                 "`[toolchain] runtime` is `wasm`, which runs a WebAssembly module, and `[build] \
@@ -4404,6 +4460,62 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// A `wasm` dependency is a module linked into the artifact the wasm backend emits; no other
+    /// backend emits one to link into, so the pairing is the manifest's contradiction too — named
+    /// entry by entry, so the message points at the one to move.
+    #[test]
+    fn validate_rejects_a_wasm_dependency_without_the_wasm_backend() {
+        for backend in [BackendKind::Javac {}, BackendKind::Jals {}] {
+            let mut m = Manifest::default();
+            m.build.backend = backend;
+            m.dependencies.insert(
+                "demo".to_owned(),
+                Dependency::Wasm(WasmDependency {
+                    wasm: "../demo/demo.wasm".to_owned(),
+                    optional: None,
+                }),
+            );
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::WasmDependencyWithoutWasmBackend {
+                    name: "demo".to_owned(),
+                    backend: backend.tag_name(),
+                })
+            );
+
+            // `[dev-dependencies]` goes through the identical check: a test run resolves those,
+            // so the contradiction with a class-file backend is exactly the same one.
+            let mut m = Manifest::default();
+            m.build.backend = backend;
+            m.dev_dependencies.insert(
+                "demo".to_owned(),
+                Dependency::Wasm(WasmDependency {
+                    wasm: "../demo/demo.wasm".to_owned(),
+                    optional: None,
+                }),
+            );
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::WasmDependencyWithoutWasmBackend {
+                    name: "demo".to_owned(),
+                    backend: backend.tag_name(),
+                })
+            );
+        }
+
+        // Beside the backend that links it, the same manifest is accepted.
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        m.dependencies.insert(
+            "demo".to_owned(),
+            Dependency::Wasm(WasmDependency {
+                wasm: "../demo/demo.wasm".to_owned(),
+                optional: None,
+            }),
+        );
+        assert_eq!(m.validate(), Ok(()));
     }
 
     /// Beside the backend that can take one in, and with the value-level checks this layer *can*
