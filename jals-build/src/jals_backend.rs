@@ -288,6 +288,37 @@ impl JalsBackend {
             BackendOutcome::failed(messages)
         }
     }
+
+    /// Every Java compilation unit a selected native package publishes for the **index**, as
+    /// `(path, text)`.
+    ///
+    /// A source package contributes the Java it declares; a package that ships a precompiled
+    /// module contributes the Java its module's `jals.library` section publishes — the same text
+    /// the library compiled against, so the declarations a reader resolves and the code that runs
+    /// cannot drift. This is the half an editor or a linter wants; what the consumer *lowers* is
+    /// [`lowered_sources`](jals_native::NativePackageSet::lowered_sources), which a
+    /// library-shipping package contributes nothing to.
+    ///
+    /// A module the ABI cannot be read from yields nothing here: the compile is where its bytes
+    /// are reported, under the package name it was selected by, and a host that only indexes has
+    /// no better answer than to leave it out — the same way an unresolved classpath entry
+    /// degrades the analysis instead of stopping it.
+    pub fn native_package_sources(selection: &NativePackageSet) -> Vec<(String, String)> {
+        let mut sources = Vec::new();
+        for (_, source) in selection.lowered_sources() {
+            sources.push((source.path.to_owned(), source.text.to_owned()));
+        }
+        for (_, bytes) in selection.libraries() {
+            if let Ok(abi) = jals_javac::wasm::LibraryAbi::of_module(bytes) {
+                sources.extend(
+                    abi.sources
+                        .iter()
+                        .map(|source| (source.path.clone(), source.text.clone())),
+                );
+            }
+        }
+        sources
+    }
 }
 
 impl Backend for JalsBackend {
@@ -352,37 +383,6 @@ impl Backend for JalsBackend {
             ),
         }
     }
-}
-
-/// Every Java compilation unit a selected native package publishes for the **index**, as
-/// `(path, text)`.
-///
-/// A source package contributes the Java it declares; a package that ships a precompiled module
-/// contributes the Java its module's `jals.library` section publishes — the same text the library
-/// compiled against, so the declarations a reader resolves and the code that runs cannot drift.
-/// This is the half an editor or a linter wants; what the consumer *lowers* is
-/// [`NativePackageSet::lowered_sources`](jals_native::NativePackageSet::lowered_sources), which a
-/// library-shipping package contributes nothing to.
-///
-/// A module the ABI cannot be read from yields nothing here: the compile is where its bytes are
-/// reported, under the package name it was selected by, and a host that only indexes has no
-/// better answer than to leave it out — the same way an unresolved classpath entry degrades the
-/// analysis instead of stopping it.
-pub fn native_package_sources(selection: &NativePackageSet) -> Vec<(String, String)> {
-    let mut sources = Vec::new();
-    for (_, source) in selection.lowered_sources() {
-        sources.push((source.path.to_owned(), source.text.to_owned()));
-    }
-    for (_, bytes) in selection.libraries() {
-        if let Ok(abi) = jals_javac::wasm::LibraryAbi::of_module(bytes) {
-            sources.extend(
-                abi.sources
-                    .iter()
-                    .map(|source| (source.path.clone(), source.text.clone())),
-            );
-        }
-    }
-    sources
 }
 
 #[cfg(test)]

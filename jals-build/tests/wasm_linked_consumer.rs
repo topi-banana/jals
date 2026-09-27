@@ -515,7 +515,7 @@ fn a_package_can_ship_its_java_as_a_module() {
     // What an editor or a linter indexes is the module's *published* Java: the package declares
     // no sources, so an editor reading `lowered_sources` would report every name from the
     // library unresolved.
-    let published = jals_build::native_package_sources(&selection);
+    let published = jals_build::JalsBackend::native_package_sources(&selection);
     assert!(
         published
             .iter()

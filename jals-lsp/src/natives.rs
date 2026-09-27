@@ -44,7 +44,7 @@ impl Natives {
         let mut registry = NativeRegistry::new();
         registry.add(JalsIo::package(std::rc::Rc::new(SilentConsole)));
         let selection = registry.select(&manifest.build.native_packages)?;
-        Ok(jals_build::native_package_sources(&selection)
+        Ok(jals_build::JalsBackend::native_package_sources(&selection)
             .into_iter()
             .map(|(path, text)| jals_editor::PackageSource { path, text })
             .collect())

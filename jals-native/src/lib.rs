@@ -64,8 +64,8 @@
 //!   own, folds its [`provenance`](NativePackageSet::provenance) into the backend's cache key,
 //!   and links its [`bindings`](NativePackageSet::bindings) when the module is instantiated. A
 //!   host that only indexes — the editor, the linter — asks for
-//!   `jals_build::native_package_sources` instead, which also reaches the published Java of a
-//!   package that ships a precompiled module.
+//!   `jals_build::JalsBackend::native_package_sources` instead, which also reaches the published
+//!   Java of a package that ships a precompiled module.
 //! - `jals-hir` indexes the same Java, so the project's own source resolves against it.
 
 extern crate alloc;

@@ -146,7 +146,8 @@ impl NativePackageSet {
     /// A package that ships a precompiled module contributes none: its Java is already lowered
     /// into that module, and lowering the text a second time would be a second copy of the same
     /// code. What a host that only *indexes* wants is not this list but
-    /// `jals_build::native_package_sources`, which also reaches the module's published Java.
+    /// `jals_build::JalsBackend::native_package_sources`, which also reaches the module's published
+    /// Java.
     pub fn lowered_sources(&self) -> impl Iterator<Item = (&str, &NativeSource)> {
         self.packages
             .iter()
