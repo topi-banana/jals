@@ -416,7 +416,7 @@ public class Main {
 ";
 
 #[test]
-fn the_runner_links_a_librarys_host_imports() {
+fn the_runner_links_a_library_host_imports() {
     let (library_bytes, project_bytes) =
         compiled_pair(HOST_PROJECT, &[("demo/Caller.java", HOST_LIBRARY)]);
     let mut registry = jals_native::NativeRegistry::new();
