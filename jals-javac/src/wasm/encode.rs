@@ -28,7 +28,7 @@ pub(crate) struct Bytes {
 }
 
 impl Bytes {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             out: Vec::new(),
             overflow: false,
@@ -80,7 +80,7 @@ impl Bytes {
     }
 
     /// A length-prefixed UTF-8 name.
-    fn name(&mut self, text: &str) -> &mut Self {
+    pub(crate) fn name(&mut self, text: &str) -> &mut Self {
         self.count(text.len());
         self.raw(text.as_bytes())
     }
@@ -105,7 +105,7 @@ impl Bytes {
         self.out.len()
     }
 
-    fn into_vec(self) -> Vec<u8> {
+    pub(crate) fn into_vec(self) -> Vec<u8> {
         self.out
     }
 }
@@ -696,6 +696,23 @@ impl Module {
     /// The index the `defined`-th defined tag has, past any imported tags.
     pub fn tag_index(&self, defined: usize) -> u32 {
         u32::try_from(self.tag_import_count().saturating_add(defined)).unwrap_or(u32::MAX)
+    }
+
+    /// The module's declared types, flattened across every recursive group.
+    ///
+    /// Exposed for the library ABI, which writes its own types as data: a consumer replays them
+    /// rather than decoding the module, which this crate has no reader for.
+    pub(crate) fn types(&self) -> &[SubType] {
+        &self.types
+    }
+
+    /// The type index each recursive group starts at.
+    ///
+    /// A trailing boundary is meaningful here even though [`finish`](Self::finish) emits no group
+    /// for it: it is where a consumer replaying these types adds its own, so the project's types
+    /// land in a group of their own. The *section* only counts groups with something in them.
+    pub(crate) fn groups(&self) -> &[usize] {
+        &self.groups
     }
 
     /// Every function index a *body* names with `ref.func`, in first-use order.
