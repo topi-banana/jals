@@ -63,6 +63,14 @@
 //! module that only ever appears as bytes can be asked nothing at all. It matters more here than
 //! there: the tests that run this backend end-to-end need a real engine, and the platform this
 //! backend targets is exactly the one CI has no engine on.
+//!
+//! It also carries the shape a module needs when it is *not* the whole program. [`Module`] can
+//! declare more than one recursive group, import a function, global, or tag another module
+//! exports, and export its own globals and tag — which is what linking a project module against a
+//! precompiled library module requires, since an engine canonicalises types per group and two
+//! modules meet only at groups they declared identically. The lowering does not use that mode yet:
+//! a library input is still compiled in. `jals-build`'s `wasm_linking` test is what pins the
+//! arrangement the mode will have to produce.
 
 mod encode;
 mod insn;
@@ -73,8 +81,8 @@ mod lower;
 /// reason, so that neither backend's seam sends a caller to the other one for a name it needs.
 pub use crate::facts::Numeric;
 pub use encode::{
-    CompType, ExportKind, FieldType, Func, Global, HeapType, Import, Module, RefType, StorageType,
-    SubType, ValType,
+    CompType, ExportKind, FieldType, Func, Global, HeapType, Import, ImportKind, Module, RefType,
+    StorageType, SubType, ValType,
 };
 pub use insn::{Insn, Instr, NumOp};
 pub use lower::{CompileWasm, WasmError, WasmOptions};
