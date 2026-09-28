@@ -47,6 +47,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use jals_hir::{ClassTy, DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, TypedFile};
 use jals_syntax::SyntaxKind::{
@@ -60,7 +61,7 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 use crate::desc::Descriptor;
 use crate::facts::{ArmLabels, Facts, Literal};
 use crate::facts::{Numeric, Operator, Unary};
-use crate::wasm::abi::{self, ClassType, ExportType, LibraryAbi, Source};
+use crate::wasm::abi::{self, ClassType, ExportType, LibraryAbi, Realm, Source};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -241,6 +242,9 @@ struct LibrarySurface {
     interfaces: Vec<String>,
     /// Every function the module exports and the type its signature occupies.
     functions: Vec<ExportType>,
+    /// The dispatch realm, when the module lowered at least one virtual call a consumer could
+    /// answer — see [`Realm`].
+    realm: Option<Realm>,
 }
 
 /// A library a project links against: what to call it and what it said about itself.
@@ -326,17 +330,20 @@ impl CompileWasm {
     /// - A constructor is exported as a *factory*, because the in-module shape — a `this`
     ///   parameter and a `void` result — is not callable from outside. The factory allocates,
     ///   runs the constructor (or the class's initialisers, for the constructor the language gives
-    ///   a class that declares none), and returns the object.
+    ///   a class that declares none), and returns the object. Its **body** is exported beside the
+    ///   factory under the factory's key with `#init` appended: a consumer's `super(…)` has an
+    ///   object already and takes the `(this, params) -> ()` shape, which is the one a factory
+    ///   cannot offer.
     /// - A `static` field is exported as an accessor pair, because the in-module shape is a
     ///   global and a global's name is not a Java signature.
     /// - The module's exception tag is exported, so a consumer can catch what the library throws.
+    /// - Its **dispatch realm**, when it lowered any open virtual call a consumer class could
+    ///   answer: one slot per dispatched method, a struct holding them, and the `$jals$link` entry
+    ///   that installs it — see [`Realm`]. A library whose calls all close over its own classes
+    ///   publishes none.
     /// - The [`LibraryAbi`] travels in a custom section beside the code: the type groups a
-    ///   consumer must replay, the class-to-struct map, the interface names, and the package's
-    ///   Java for the index.
-    ///
-    /// One boundary is stated rather than discovered: a consumer class cannot extend a library
-    /// class through this surface. `super(...)` needs a `(this, params) -> ()` constructor, and a
-    /// factory allocates its own receiver, so no exported shape can be passed a consumer's `this`.
+    ///   consumer must replay, the class-to-struct map, the interface names, the realm, and the
+    ///   package's Java for the index.
     ///
     /// `sources` is the same Java that was compiled, and it is the package's API: a consumer's
     /// index reads the text, not a copy of it.
@@ -357,6 +364,7 @@ impl CompileWasm {
             classes: surface.classes,
             interfaces: surface.interfaces,
             functions: surface.functions,
+            realm: surface.realm,
             groups: module.groups().to_vec(),
             types: module.types().to_vec(),
         };
@@ -525,8 +533,34 @@ impl CompileWasm {
             layout.declare_constants(input, index, &mut module, &mut constants)?;
         }
 
+        // A *library* publishes a dispatch realm: a struct of function references its consumer
+        // fills with dispatchers over its own classes. Both halves have to exist before the first
+        // body is lowered — an arm names the struct type and the global — so the type is reserved
+        // and the global declared here, and the struct is filled once the last body has registered
+        // its slots. A library whose calls all close over its own classes ends with no slots and
+        // publishes no realm; the reservation is then a fieldless struct nothing refers to.
+        if surface == Surface::Library {
+            let structure = module.reserve_type();
+            let ty = ValType::Ref(RefType::nullable(HeapType::Concrete(structure)));
+            let global = module.global_index(module.globals.len());
+            module.globals.push(Global {
+                ty,
+                init: alloc::vec![Instr::RefNull(HeapType::Concrete(structure))],
+            });
+            layout.realm = Some(RealmBuild {
+                structure,
+                global,
+                slots: RefCell::new(Vec::new()),
+            });
+        }
+
         // Pass 2: every method gets a signature and a function index, so a call emitted in pass 3
         // can name a function declared later in the source.
+        // Everything the module imports is declared by now — a `native`'s host import and every
+        // linked member — so the boundary between the import and defined halves of the function
+        // index space is fixed here, and a member below it is one whose body this module does not
+        // hold. See [`Layout::first_function`].
+        layout.first_function = module.func_index(0);
         let mut methods = Vec::new();
         for (position, input) in inputs.iter().enumerate() {
             Self::collect_methods(
@@ -538,6 +572,20 @@ impl CompileWasm {
                 &mut module,
                 &mut methods,
             )?;
+        }
+
+        // A library's dispatch arms call at a method's declared type, and a stub's methods have no
+        // declaration here to read one from. Made before any body is lowered, because a body is
+        // where the first arm for one can appear.
+        if layout.realm.is_some() {
+            Self::collect_stub_types(
+                &classes,
+                &interface_items,
+                &compiled,
+                index,
+                &mut layout,
+                &mut module,
+            );
         }
 
         // A record's canonical constructor and its accessors have no declaration to walk: the header
@@ -627,6 +675,10 @@ impl CompileWasm {
             });
             module.start = Some(start);
         }
+        // The consumer's side of every realm: one thunk per slot, and a start function that
+        // installs the structs before the class initialisers run. Emitted last, because a thunk
+        // names every function and struct the module holds.
+        Self::link_realms(index, &layout, &mut module)?;
         // A linked library's surface is added last: its factories and accessors are functions the
         // lowering above knows nothing about, and they may only be pushed once every index they
         // name exists.
@@ -904,6 +956,70 @@ impl CompileWasm {
             }
         }
 
+        // The dispatch realm, when this module lowered at least one virtual call a consumer could
+        // answer. The struct's type was reserved before the first body — an arm names it — and its
+        // slots were registered while bodies were lowered; here the struct is filled, `$jals$link`
+        // is emitted, and both travel in the ABI. A library whose calls all closed over its own
+        // classes has no slots and publishes nothing: the reservation stays a fieldless struct
+        // nothing refers to.
+        let realm = match &layout.realm {
+            None => None,
+            Some(build) => {
+                let slots = build.slots.borrow();
+                if slots.is_empty() {
+                    None
+                } else {
+                    let fields = slots
+                        .iter()
+                        .map(|&(_, ty)| FieldType {
+                            storage: StorageType::Val(ValType::Ref(RefType::nullable(
+                                HeapType::Concrete(ty),
+                            ))),
+                            mutable: false,
+                        })
+                        .collect();
+                    module.set_type(build.structure, SubType::plain(CompType::Struct(fields)));
+                    let ty = ValType::Ref(RefType::nullable(HeapType::Concrete(build.structure)));
+                    let link_type = module.add_type(SubType::plain(CompType::Func {
+                        params: alloc::vec![ty],
+                        results: Vec::new(),
+                    }));
+                    let link = module.func_index(module.funcs.len());
+                    let mut insn = Insn::new();
+                    insn.local_get(0).global_set(build.global);
+                    Self::push_func(
+                        module,
+                        Func {
+                            type_index: link_type,
+                            locals: Vec::new(),
+                            body: insn.into_body(),
+                        },
+                    )?;
+                    module
+                        .exports
+                        .push(("$jals$link".to_owned(), ExportKind::Func, link));
+                    functions.push(ExportType {
+                        name: "$jals$link".to_owned(),
+                        type_index: link_type,
+                    });
+                    let slots = slots
+                        .iter()
+                        .map(|&(member, type_index)| {
+                            Ok(abi::Slot {
+                                name: Self::member_key(index.member(member).owner, member, index)?,
+                                type_index,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Some(Realm {
+                        structure: build.structure,
+                        link: link_type,
+                        slots,
+                    })
+                }
+            }
+        };
+
         // The class-to-struct map a consumer needs to represent a value of the type at all.
         let mut map = Vec::new();
         for &item in classes {
@@ -933,6 +1049,7 @@ impl CompileWasm {
             classes: map,
             interfaces,
             functions,
+            realm,
         })
     }
 
@@ -1294,9 +1411,262 @@ impl CompileWasm {
                 );
                 layout.tag = Some(tag);
             }
+            // The dispatch realm, when the library published one: `$jals$link` becomes an import,
+            // and the slots become the fields of the struct this module builds and installs in its
+            // start function. Each slot's member is found here — an abstract method has no export
+            // and is found only this way.
+            if let Some(realm) = &library.abi.realm {
+                let link_type = realm.link.saturating_add(base);
+                let link = module.add_shared_import(
+                    library.name.to_owned(),
+                    "$jals$link".to_owned(),
+                    link_type,
+                );
+                let slots = realm
+                    .slots
+                    .iter()
+                    .map(|slot| RealmSlotImport {
+                        member: Self::slot_member(&slot.name, index),
+                        ty: slot.type_index.saturating_add(base),
+                    })
+                    .collect();
+                layout.realms.push(RealmImport {
+                    link,
+                    structure: realm.structure.saturating_add(base),
+                    slots,
+                });
+            }
             base = base.saturating_add(u32::try_from(library.abi.types.len()).unwrap_or(u32::MAX));
         }
         Ok(())
+    }
+
+    /// The member a realm slot answers, found by the key the library published.
+    ///
+    /// The key is a [`member_key`](Self::member_key) exactly — `owner#name+descriptor` — so the
+    /// owner's item is one lookup and the member is the one of its declarations whose own key
+    /// matches. The search walks declarations rather than the import list because an abstract
+    /// method has no export: a slot for `Throwable.className`, which the library's `toString`
+    /// dispatches to, is nothing but a declaration to go on.
+    fn slot_member(key: &str, index: &ProjectIndex) -> Option<MemberId> {
+        let (owner, _) = key.split_once('#')?;
+        let item = index.item_by_fqn(&Self::fqn_of_internal(owner))?;
+        index
+            .own_members(item)
+            .iter()
+            .copied()
+            // Methods only: a field's key is built from its type the same way a method's is from
+            // its return type, so `ArrayList`'s `size` field and `size()` method *share* a key — and
+            // the field comes first. A realm slot is always a method: nothing else is dispatched.
+            .find(|&member| {
+                index.member(member).kind == DefKind::Method
+                    && Self::member_key(item, member, index).ok().as_deref() == Some(key)
+            })
+    }
+
+    /// Fill and install every linked library's dispatch realm, then run the class initialisers.
+    ///
+    /// The consumer is the module that *knows* both halves: the replayed library classes and the
+    /// project's own. One thunk per slot answers for both — the same `ref.test` chain a virtual
+    /// call uses, over this module's structs and most-derived first, with the library's own
+    /// implementation as the fallthrough — and the start function builds one struct per library and
+    /// installs it before any initialiser runs, so a library call a static initialiser makes sees
+    /// the same dispatch a later call does.
+    ///
+    /// Nothing here when no library published a realm: the module is the module it was.
+    fn link_realms(index: &ProjectIndex, layout: &Layout, module: &mut Module) -> Result<()> {
+        if layout.realms.is_empty() {
+            return Ok(());
+        }
+        let old_start = module.start;
+        let mut thunks: Vec<Vec<u32>> = Vec::new();
+        for realm in &layout.realms {
+            let mut indices = Vec::new();
+            for slot in &realm.slots {
+                match slot.member {
+                    Some(member) => {
+                        indices.push(Self::dispatch_thunk(
+                            index, layout, module, member, slot.ty,
+                        )?);
+                    }
+                    None => indices.push(Self::trap_thunk(module, slot.ty)?),
+                }
+            }
+            thunks.push(indices);
+        }
+        // A start function takes nothing and returns nothing: a type of its own, because the
+        // replayed groups have no `[] -> []` to borrow and the function is called by the engine
+        // rather than from any body.
+        let signature = module.add_type(SubType::plain(CompType::Func {
+            params: Vec::new(),
+            results: Vec::new(),
+        }));
+        let mut insn = Insn::new();
+        for (realm, indices) in layout.realms.iter().zip(&thunks) {
+            for &thunk in indices {
+                insn.ref_func(thunk);
+            }
+            insn.struct_new(realm.structure).call(realm.link);
+        }
+        if let Some(start) = old_start {
+            insn.call(start);
+        }
+        let link = module.func_index(module.funcs.len());
+        Self::push_func(
+            module,
+            Func {
+                type_index: signature,
+                locals: Vec::new(),
+                body: insn.into_body(),
+            },
+        )?;
+        module.start = Some(link);
+        Ok(())
+    }
+
+    /// One field of a linked library's realm: a function that answers the library's virtual call
+    /// with this module's classes first and the library's own imported implementation last.
+    ///
+    /// The chain is the one a virtual call emits, over *this* module's structs — every project
+    /// class and every replayed library class, most-derived first — and the fallthrough is the
+    /// import the library exported under the member's key. An arm narrows each argument to its own
+    /// function's parameters, exactly as an in-module arm does: the plan was made over the
+    /// *declared* method, and an override is free to declare narrower ones.
+    fn dispatch_thunk(
+        index: &ProjectIndex,
+        layout: &Layout,
+        module: &mut Module,
+        member: MemberId,
+        ty: u32,
+    ) -> Result<u32> {
+        let Some(SubType {
+            comp: CompType::Func { params, results },
+            ..
+        }) = module
+            .types()
+            .get(usize::try_from(ty).map_err(|_| WasmError::TooLarge)?)
+        else {
+            return Err(WasmError::Unsupported(
+                "a realm slot whose type is no function",
+            ));
+        };
+        let params = params.clone();
+        let result = results.first().copied();
+        let mut insn = Insn::new();
+        match result {
+            Some(result) => insn.block_typed(result),
+            None => insn.block(),
+        };
+        let leave = insn.depth();
+        for (item, over) in layout.overriders(index, member) {
+            let (Some(&function), Some(&struct_type)) =
+                (layout.functions.get(&over), layout.structs.get(&item))
+            else {
+                continue;
+            };
+            insn.local_get(0);
+            insn.ref_test(HeapType::Concrete(struct_type), false);
+            insn.if_();
+            // The receiver was cast to the *tested* class, which is a subtype of whatever class
+            // declares the arm's function, so the call's own receiver needs no narrowing.
+            insn.local_get(0);
+            insn.ref_cast(HeapType::Concrete(struct_type), false);
+            let over_tys = index.resolved_param_tys(over);
+            for (position, &held) in params.get(1..).unwrap_or_default().iter().enumerate() {
+                let local = 1 + u32::try_from(position).map_err(|_| WasmError::TooLarge)?;
+                insn.local_get(local);
+                if let Some(ty) = over_tys.get(position) {
+                    let want = layout.val_type(ty)?;
+                    Self::narrow_slot(held, want, &mut insn)?;
+                }
+            }
+            insn.call(function);
+            insn.br(insn.depth() - leave);
+            insn.end();
+        }
+        match layout.functions.get(&member) {
+            Some(&function) => {
+                insn.local_get(0);
+                let owner = layout.class_ref(index.member(member).owner)?;
+                Self::narrow_slot(params.first().copied().unwrap_or(owner), owner, &mut insn)?;
+                for position in 0..params.len().saturating_sub(1) {
+                    insn.local_get(1 + u32::try_from(position).map_err(|_| WasmError::TooLarge)?);
+                }
+                insn.call(function);
+            }
+            // The method is abstract, or the library exported nothing for it: every class that
+            // could satisfy the call is already in the chain above, so reaching here means the
+            // receiver is of a type nothing implemented — a trap, the same answer the library's own
+            // no-function fallthrough gives.
+            None => {
+                insn.unreachable();
+            }
+        }
+        insn.end();
+        let thunk = module.func_index(module.funcs.len());
+        Self::push_func(
+            module,
+            Func {
+                type_index: ty,
+                locals: Vec::new(),
+                body: insn.into_body(),
+            },
+        )?;
+        Ok(thunk)
+    }
+
+    /// A realm field this module has nothing to answer with: a function that traps, at the slot's
+    /// own type.
+    ///
+    /// A slot whose member this module cannot represent at all is the case — a type in its
+    /// declaration that has no representation here, which is the same refusal the corresponding
+    /// call site gives. The library only calls a slot it dispatched to, and this module has no such
+    /// call: the trap is unreachable in exactly the way a no-function fallthrough is.
+    fn trap_thunk(module: &mut Module, ty: u32) -> Result<u32> {
+        let thunk = module.func_index(module.funcs.len());
+        Self::push_func(
+            module,
+            Func {
+                type_index: ty,
+                locals: Vec::new(),
+                body: {
+                    let mut body = Insn::new();
+                    body.unreachable();
+                    body.into_body()
+                },
+            },
+        )?;
+        Ok(thunk)
+    }
+
+    /// Bring a dispatch thunk's value from the type the slot holds down to the type an arm's
+    /// function wants.
+    ///
+    /// Only reference narrowing can appear here: both types are the *erased* ones a call site uses,
+    /// so a primitive mismatch is a descriptor mismatch that cannot exist, and a parameter an
+    /// override narrows is a reference — a type variable's `anyref` down to the class it was
+    /// instantiated at, which is the everyday shape. Equality is the common case and costs nothing;
+    /// anything else is a bug worth a refusal rather than a module the validator rejects with
+    /// nothing said on this side.
+    fn narrow_slot(from: ValType, to: ValType, insn: &mut Insn) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+        match (from, to) {
+            (
+                ValType::Ref(RefType {
+                    heap: HeapType::Any,
+                    ..
+                }),
+                ValType::Ref(target),
+            ) => {
+                insn.ref_cast(target.heap, target.nullable);
+                Ok(())
+            }
+            _ => Err(WasmError::Unsupported(
+                "a dispatch arm whose parameter types do not narrow",
+            )),
+        }
     }
 
     /// Give every class with static state a function index and a "has run" flag.
@@ -1519,6 +1889,7 @@ impl CompileWasm {
                         results: Vec::new(),
                     }));
                     let function = module.func_index(methods.len() + out.len());
+                    layout.member_types.insert(ctor, signature);
                     layout.functions.insert(ctor, function);
                     out.push(Func {
                         type_index: signature,
@@ -1549,6 +1920,7 @@ impl CompileWasm {
                         results: alloc::vec![ty],
                     }));
                     let function = module.func_index(methods.len() + out.len());
+                    layout.member_types.insert(accessor, signature);
                     layout.functions.insert(accessor, function);
                     out.push(Func {
                         type_index: signature,
@@ -1893,6 +2265,98 @@ impl CompileWasm {
         alloc::format!("{owner}.{}", index.member(member).name)
     }
 
+    /// The declared function type of a method, receiver first, or `None` when a type it names has
+    /// no representation in this module.
+    ///
+    /// The same shape [`collect_methods`](Self::collect_methods) gives a body-carrying
+    /// declaration, for the declarations that have no body to give one: an abstract method, and
+    /// every method of a **stub** — a type the index knows and this module does not lay out. A
+    /// dispatch arm calls a consumer-provided function at exactly this type, and a method with no
+    /// function index has none to read.
+    ///
+    /// A receiver this module lays out is the owner's struct; a stub's is `anyref`, which is where
+    /// a value of a type nothing here declares can live. A miss is not a refusal: a method nothing
+    /// can call is a method whose type nothing needs, so no type is made and the call site keeps
+    /// its own error.
+    fn declared_member_type(
+        member: MemberId,
+        index: &ProjectIndex,
+        layout: &Layout,
+        module: &mut Module,
+    ) -> Option<u32> {
+        let info = index.member(member);
+        let mut params = Vec::new();
+        if !info.modifiers.is_static {
+            let any = ValType::Ref(RefType::nullable(HeapType::Any));
+            params.push(layout.class_ref(info.owner).unwrap_or(any));
+        }
+        for ty in index.resolved_param_tys(member) {
+            params.push(layout.val_type(&ty).ok()?);
+        }
+        let results = match index.resolved_member_ty(member) {
+            Ty::Void => Vec::new(),
+            ty => alloc::vec![layout.val_type(&ty).ok()?],
+        };
+        Some(module.add_type(SubType::plain(CompType::Func { params, results })))
+    }
+
+    /// Record a function type for every open method of a **stub** type this module's classes reach.
+    ///
+    /// A dispatch realm's arm calls at the method's declared type, and the type has to exist before
+    /// the body that dispatches is lowered. A method declared in this module has its type from
+    /// [`collect_methods`](Self::collect_methods); one inherited from a stub — `Object.equals`, an
+    /// interface a stub declares and a library class implements — has no declaration here at all,
+    /// so the type is made from the declaration the index holds, through
+    /// [`declared_member_type`](Self::declared_member_type).
+    ///
+    /// Only *supertypes* of what this module lays out are swept: a stub type named only in a
+    /// signature — a parameter nothing implements — is not, and a dispatched call through it stays
+    /// the refusal it was, naming the library type it needs.
+    fn collect_stub_types(
+        classes: &[ItemId],
+        interfaces: &[ItemId],
+        compiled: &BTreeSet<ItemId>,
+        index: &ProjectIndex,
+        layout: &mut Layout,
+        module: &mut Module,
+    ) {
+        let mut seen = BTreeSet::new();
+        let mut pending: Vec<ItemId> = Vec::new();
+        for &item in classes.iter().chain(interfaces.iter()) {
+            pending.extend(index.superclasses(item));
+            pending.extend(index.direct_interfaces(item));
+        }
+        while let Some(item) = pending.pop() {
+            if !seen.insert(item) {
+                continue;
+            }
+            pending.extend(index.direct_interfaces(item));
+            if compiled.contains(&item) {
+                pending.extend(index.superclasses(item));
+                continue;
+            }
+            // Only the stub types a value can actually live at: `Object` and the interfaces. A
+            // stub *class* this module does not lay out has no representation at a call site
+            // either, so its methods are not ones a realm could be asked about.
+            if Some(item) != layout.object && index.item(item).kind != DefKind::Interface {
+                continue;
+            }
+            for &member in index.own_members(item) {
+                let info = index.member(member);
+                if info.kind != DefKind::Method
+                    || info.modifiers.is_static
+                    || info.modifiers.is_private
+                    || layout.member_types.contains_key(&member)
+                {
+                    continue;
+                }
+                if let Some(signature) = Self::declared_member_type(member, index, layout, module) {
+                    layout.member_types.insert(member, signature);
+                }
+            }
+        }
+    }
+
     /// Register every method and constructor `input` declares.
     fn collect_methods(
         input: &TypedFile<'_>,
@@ -1939,6 +2403,7 @@ impl CompileWasm {
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = module.func_index(out.len());
+                layout.member_types.insert(member, signature);
                 layout.functions.insert(member, function);
                 out.push(Method {
                     owner: Some(item),
@@ -2006,15 +2471,27 @@ impl CompileWasm {
                 }
                 // An abstract method has no body, so there is no function to declare: a virtual call
                 // reaches the *implementations* instead. Declaring one would put a signature with a
-                // result type over an empty body, which no engine accepts.
+                // result type over an empty body, which no engine accepts. Its declared *type* is
+                // recorded all the same: a library's dispatch realm calls a consumer-provided
+                // function at exactly this type, and a method with no function index has no type to
+                // read one from.
                 let is_constructor = node.kind() == CONSTRUCTOR_DECL;
-                if !is_constructor && node.children().find_map(ast::Block::cast).is_none() {
-                    continue;
-                }
                 let member_name = Self::member_name_token(&node, is_constructor)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
                 let member = Facts::of(*input).member_at(&member_name)?;
                 let is_static = index.member(member).modifiers.is_static;
+                if !is_constructor && node.children().find_map(ast::Block::cast).is_none() {
+                    // A type this backend cannot represent makes the declared type unrepresentable
+                    // too, and a method nothing here can call is a method whose type nothing needs:
+                    // the declaration is skipped rather than turned into a new refusal, and the
+                    // refusal stays where it belongs, at the call site that would need it.
+                    if let Some(signature) =
+                        Self::declared_member_type(member, index, layout, module)
+                    {
+                        layout.member_types.insert(member, signature);
+                    }
+                    continue;
+                }
 
                 let mut params = Vec::new();
                 // An inner class's constructor takes the enclosing instance right after `this`, and
@@ -2051,6 +2528,7 @@ impl CompileWasm {
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = module.func_index(out.len());
+                layout.member_types.insert(member, signature);
                 layout.functions.insert(member, function);
                 out.push(Method {
                     owner: (!is_static).then_some(item),
@@ -2122,6 +2600,11 @@ struct Layout {
     parent_item: BTreeMap<ItemId, ItemId>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
+    /// The function index the module's *defined* functions start at; everything below it is an
+    /// import. A member whose function sits below answers with the host's body or another module's,
+    /// which is what keeps it out of a published realm: a consumer cannot call the body the library
+    /// did not export, so a slot for it would be a slot with no fallback.
+    first_function: u32,
     /// A non-`static` nested class and the class that encloses it. Its instance holds the enclosing one
     /// in a synthetic field, appended *after* its own — which keeps every real field's slot where
     /// `field_slot` computes it, and is why a class extending an inner class is reported instead.
@@ -2204,6 +2687,70 @@ struct Layout {
     external_initializers: BTreeMap<MemberId, u32>,
     /// A linked library's `static` fields: the accessor imports a read and a write call.
     external_statics: BTreeMap<MemberId, (u32, u32)>,
+    /// Every method's declared function type index, whether or not this module lowers a body for
+    /// it. A virtual call a *consumer* might answer needs the type at lowering time — its realm
+    /// arm calls a function reference *at* that type — and an abstract method has no function
+    /// index to read one from, so the type is recorded where it is declared instead: a declared
+    /// method here, a synthesised accessor there, and a stub's own members for the types only
+    /// `Object` and the stub interfaces have.
+    member_types: BTreeMap<MemberId, u32>,
+    /// The dispatch realm this module publishes, when it is a library. Set up before any body is
+    /// lowered — the struct's type index and the global have to exist before an arm names them —
+    /// and filled once every body has had its say.
+    realm: Option<RealmBuild>,
+    /// The dispatch realms this module *consumes*, when it links libraries: one per library that
+    /// published one, in link order.
+    realms: Vec<RealmImport>,
+}
+
+/// A virtual call's plan: what this module already knows how to answer, what the call produces,
+/// and whether a realm is asked before either.
+///
+/// Three facts that travel together and are all decided in the one place that routes a call —
+/// bundling them is what keeps the emitting function's signature readable.
+#[derive(Debug, Clone, Copy)]
+struct Dispatch<'a> {
+    /// Every in-module class that overrides the method, most-derived first.
+    overriders: &'a [(ItemId, MemberId)],
+    /// The call's result type: `None` for a `void` method.
+    ty: Option<ValType>,
+    /// Whether the realm arm is emitted ahead of the chain.
+    realm: bool,
+}
+
+/// A library's dispatch realm under construction.
+///
+/// The slots are collected while bodies are lowered — the first virtual call to a member is what
+/// registers it — so the vector is behind a [`RefCell`]: a body holds the layout by shared
+/// reference, and the slot list is the one thing a body adds to.
+struct RealmBuild {
+    /// The realm struct's reserved type index. Reserved before any body because an arm names the
+    /// struct in `struct.get`, and filled once the slot list is final.
+    structure: u32,
+    /// The global `$jals$link` stores the installed realm in.
+    global: u32,
+    /// `(member, function type)` per slot, in first-call order.
+    slots: RefCell<Vec<(MemberId, u32)>>,
+}
+
+/// A linked library's realm as its consumer holds it.
+struct RealmImport {
+    /// The `$jals$link` import, which installs a struct built here.
+    link: u32,
+    /// The replayed realm struct type index.
+    structure: u32,
+    /// One slot per field, in field order.
+    slots: Vec<RealmSlotImport>,
+}
+
+/// One field of a linked library's realm, as the consumer sees it.
+struct RealmSlotImport {
+    /// The member the slot answers, when this module's index holds it. `None` for a slot whose
+    /// member is of a type this module cannot represent — the thunk then traps rather than
+    /// dispatching, which is the same answer the library's own chain gives.
+    member: Option<MemberId>,
+    /// The replayed function type the field holds.
+    ty: u32,
 }
 
 /// One value a call site pushes.
@@ -2254,6 +2801,73 @@ enum Slot {
 }
 
 impl Layout {
+    /// Whether the member's function is an *import* — a `native`'s host body or a linked
+    /// library's — rather than one this module lowers.
+    ///
+    /// Everything below [`first_function`](Self::first_function) is the import half of the
+    /// function index space; a member with no function at all has nothing to be an import.
+    fn imported(&self, member: MemberId) -> bool {
+        self.functions
+            .get(&member)
+            .is_some_and(|&function| function < self.first_function)
+    }
+
+    /// Every class in this module that overrides `member`, most-derived first.
+    ///
+    /// wasm has no dynamic loading and no classpath: this backend compiles the *whole* project as one
+    /// module, so the set of classes that can override a method is closed and known here. That is what
+    /// makes dispatch by type test sound — and it is the only reason it is, which is why it is written
+    /// down rather than assumed.
+    ///
+    /// Empty when nothing overrides the method, which is the common case and the one that keeps a
+    /// direct `call`.
+    fn overriders(&self, index: &ProjectIndex, member: MemberId) -> Vec<(ItemId, MemberId)> {
+        let info = index.member(member);
+        if info.kind != DefKind::Method {
+            return Vec::new();
+        }
+        let owner = info.owner;
+        let mut found: Vec<(ItemId, MemberId)> = Vec::new();
+        for &item in self.structs.keys() {
+            if item == owner || !index.is_subtype(item, owner) {
+                continue;
+            }
+            // Only a definite override — the strict collapse, by name. A false positive here routes
+            // a call to the wrong method (output that loads, validates, and runs wrongly, which no
+            // later stage catches) while a false negative leaves the direct `call` a non-overridden
+            // method would have had anyway. That is the opposite collapse from the bridge
+            // emission's, and it is why the shared fact has three answers rather than two.
+            //
+            // **Inherited, not just declared.** `interface I { int f(); }` with
+            // `class Base { public int f() { … } }` and `class C extends Base implements I {}` is a
+            // `C` whose implementation of `I.f` is written in `Base`, and `C` declares nothing at
+            // all. Scanning only `own_members` found no override, the call fell through to the
+            // no-function arm below, and that arm — which reads "nothing implements this, so no such
+            // object exists" — emitted `unreachable` against a receiver whose implementation is one
+            // function away in the same module. Nearest-first, so a subclass's own override still
+            // wins over the one it inherits, and only a body this module actually lowered counts:
+            // dispatching to a member with no function index is a call to nothing.
+            let over = index.members_of(item).into_iter().find(|&id| {
+                id != member
+                    && self.functions.contains_key(&id)
+                    && index.implements_for(item, id, member).is_certain()
+            });
+            if let Some(over) = over {
+                found.push((item, over));
+            }
+        }
+        // Most-derived first, so a subclass's override is tested before its superclass's: testing the
+        // other way round would let the base class's `ref.test` succeed for every descendant and answer
+        // with the wrong method.
+        found.sort_by(|&(a, _), &(b, _)| {
+            index
+                .is_subtype(a, b)
+                .cmp(&index.is_subtype(b, a))
+                .reverse()
+        });
+        found
+    }
+
     /// The constructors of `item` this module actually lowered a function for.
     ///
     /// Not every indexed constructor is one. The index gives a class that writes none the **default**
@@ -6562,60 +7176,10 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// Every class in this module that overrides `member`, most-derived first.
-    ///
-    /// wasm has no dynamic loading and no classpath: this backend compiles the *whole* project as one
-    /// module, so the set of classes that can override a method is closed and known here. That is what
-    /// makes dispatch by type test sound — and it is the only reason it is, which is why it is written
-    /// down rather than assumed.
-    ///
-    /// Empty when nothing overrides the method, which is the common case and the one that keeps a
-    /// direct `call`.
+    /// The layout's answer, for a call site this lowering is emitting — see
+    /// [`Layout::overriders`], which is the one implementation and the one explanation.
     fn overriders(&self, member: MemberId) -> Vec<(ItemId, MemberId)> {
-        let info = self.index.member(member);
-        if info.kind != DefKind::Method {
-            return Vec::new();
-        }
-        let owner = info.owner;
-        let mut found: Vec<(ItemId, MemberId)> = Vec::new();
-        for &item in self.layout.structs.keys() {
-            if item == owner || !self.index.is_subtype(item, owner) {
-                continue;
-            }
-            // Only a definite override — the strict collapse, by name. A false positive here routes
-            // a call to the wrong method (output that loads, validates, and runs wrongly, which no
-            // later stage catches) while a false negative leaves the direct `call` a non-overridden
-            // method would have had anyway. That is the opposite collapse from the bridge
-            // emission's, and it is why the shared fact has three answers rather than two.
-            //
-            // **Inherited, not just declared.** `interface I { int f(); }` with
-            // `class Base { public int f() { … } }` and `class C extends Base implements I {}` is a
-            // `C` whose implementation of `I.f` is written in `Base`, and `C` declares nothing at
-            // all. Scanning only `own_members` found no override, the call fell through to the
-            // no-function arm below, and that arm — which reads "nothing implements this, so no such
-            // object exists" — emitted `unreachable` against a receiver whose implementation is one
-            // function away in the same module. Nearest-first, so a subclass's own override still
-            // wins over the one it inherits, and only a body this module actually lowered counts:
-            // dispatching to a member with no function index is a call to nothing.
-            let over = self.index.members_of(item).into_iter().find(|&id| {
-                id != member
-                    && self.layout.functions.contains_key(&id)
-                    && self.index.implements_for(item, id, member).is_certain()
-            });
-            if let Some(over) = over {
-                found.push((item, over));
-            }
-        }
-        // Most-derived first, so a subclass's override is tested before its superclass's: testing the
-        // other way round would let the base class's `ref.test` succeed for every descendant and answer
-        // with the wrong method.
-        found.sort_by(|&(a, _), &(b, _)| {
-            self.index
-                .is_subtype(a, b)
-                .cmp(&self.index.is_subtype(b, a))
-                .reverse()
-        });
-        found
+        self.layout.overriders(self.index, member)
     }
 
     /// A virtual call: test the receiver's actual type against each override, most-derived first, and
@@ -6631,10 +7195,14 @@ impl Lowering<'_> {
         call: &ast::CallExpr,
         member: MemberId,
         arguments: &[ast::Expr],
-        overriders: &[(ItemId, MemberId)],
-        ty: Option<ValType>,
+        dispatch: Dispatch<'_>,
         insn: &mut Insn,
     ) -> Result<Option<ValType>> {
+        let Dispatch {
+            overriders,
+            ty,
+            realm,
+        } = dispatch;
         // A bare call in an instance method is an implicit `this`, which is local 0.
         let receiver_ty = if let Some(ast::Expr::FieldAccess(access)) = call.callee() {
             let receiver = access
@@ -6668,6 +7236,46 @@ impl Lowering<'_> {
             slots.push((slot, value));
         }
 
+        // The realm arm, when a consumer could answer. Realm-first, because a project class that
+        // extends one of this library's classes *is* a subtype of the class the chain tests for, so
+        // a chain-first call would resolve to the library's body and never ask the consumer. The
+        // chain stays below as the `else`: an unlinked library has no realm and runs on it alone.
+        let realm = if realm {
+            Some(self.realm_slot(member)?)
+        } else {
+            None
+        };
+        if let Some((field, slot_ty)) = realm {
+            let build = self
+                .layout
+                .realm
+                .as_ref()
+                .ok_or(WasmError::Unsupported("a dispatch with no realm"))?;
+            let (structure, global) = (build.structure, build.global);
+            insn.global_get(global).ref_is_null().i32_eqz();
+            match ty {
+                Some(ty) => insn.if_typed(ty),
+                None => insn.if_(),
+            };
+            insn.local_get(receiver);
+            // The slot is called at the *declared* member's type — the same one
+            // `declared_member_type` recorded — so the receiver and every argument come up to it
+            // from wherever the expression and the plan left them.
+            let slot_receiver = self.slot_receiver(member);
+            self.narrow(receiver_ty, slot_receiver, insn)?;
+            let declared = self.index.resolved_param_tys(member);
+            for (position, &(slot, held)) in slots.iter().enumerate() {
+                insn.local_get(slot);
+                if let Some(ty) = declared.get(position) {
+                    let want = self.layout.val_type(ty)?;
+                    self.narrow(held, want, insn)?;
+                }
+            }
+            insn.global_get(global)
+                .struct_get(structure, field)
+                .call_ref(slot_ty);
+            insn.else_();
+        }
         match ty {
             Some(ty) => insn.block_typed(ty),
             None => insn.block(),
@@ -6724,7 +7332,47 @@ impl Lowering<'_> {
             }
         }
         insn.end();
+        if realm.is_some() {
+            insn.end();
+        }
         Ok(ty)
+    }
+
+    /// The field index and function type of the realm slot for `member`, registering it on first
+    /// use.
+    ///
+    /// One slot per member, in first-call order: the consumer fills one field with one dispatcher
+    /// whatever the number of call sites, which is what keeps the struct small enough to build by
+    /// hand. The field index is the position, and the type is the one the declaration recorded —
+    /// the same type the consumer replays and calls the field at.
+    fn realm_slot(&self, member: MemberId) -> Result<(u32, u32)> {
+        let realm = self
+            .layout
+            .realm
+            .as_ref()
+            .ok_or(WasmError::Unsupported("a dispatch with no realm"))?;
+        let ty = *self
+            .layout
+            .member_types
+            .get(&member)
+            .ok_or(WasmError::Unsupported("a dispatch with no declared type"))?;
+        let mut slots = realm.slots.borrow_mut();
+        let existing = slots.iter().position(|&(seen, _)| seen == member);
+        let field = existing.unwrap_or_else(|| {
+            slots.push((member, ty));
+            slots.len() - 1
+        });
+        Ok((u32::try_from(field).map_err(|_| WasmError::TooLarge)?, ty))
+    }
+
+    /// The receiver type a realm slot for `member` is declared at: the owner's struct, or `anyref`
+    /// when the owner is a type this module does not lay out — the same rule
+    /// [`declared_member_type`](Self::declared_member_type) records the type by.
+    fn slot_receiver(&self, member: MemberId) -> ValType {
+        let any = ValType::Ref(RefType::nullable(HeapType::Any));
+        self.layout
+            .class_ref(self.index.member(member).owner)
+            .unwrap_or(any)
     }
 
     /// Push the enclosing instance an inner class's constructor takes: the qualifier when the source
@@ -7055,12 +7703,36 @@ impl Lowering<'_> {
         } else {
             self.overriders(member)
         };
-        if !overriders.is_empty() {
+        // A library's dispatch cannot close over classes it cannot see, so every open call is also
+        // routed through its realm: the arm consults the installed dispatcher first and the chain
+        // below is what an unlinked library still runs on. `native` is the boundary — its body is
+        // the host's, which the library does not export, so a slot for it would have no fallback
+        // and an override of a native method in a consumer class is the one dispatch a realm
+        // cannot answer for. A member with no declared type is one no arm could be built for
+        // either, and stays on the path it was on.
+        let dispatched = self.layout.realm.is_some()
+            && !super_qualified
+            && !is_static
+            && !info.modifiers.is_private
+            && info.kind == DefKind::Method
+            && !self.layout.imported(member)
+            && self.layout.member_types.contains_key(&member);
+        if !overriders.is_empty() || dispatched {
             let ty = match self.index.resolved_member_ty(member) {
                 Ty::Void => None,
                 ty => Some(self.layout.val_type(&ty)?),
             };
-            return self.virtual_call(call, member, &arguments, &overriders, ty, insn);
+            return self.virtual_call(
+                call,
+                member,
+                &arguments,
+                Dispatch {
+                    overriders: &overriders,
+                    ty,
+                    realm: dispatched,
+                },
+                insn,
+            );
         }
         // Only now: a method with no function index is abstract, and an abstract one is only ever
         // reached through the chain above. Looking it up first reported "outside this module" for every

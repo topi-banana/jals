@@ -32,10 +32,10 @@ pub const CUSTOM_SECTION: &str = "jals.library";
 ///
 /// Bumped when a shape changes meaning. Version 2 added the `functions` list — the export names
 /// and the type index each import has to be declared at, `$jals$tag` included — and the class
-/// map's `enclosing` name; version 3 added the `interfaces` list. A consumer that reads a version
-/// it does not know refuses the library rather than guessing, which is the only answer a linker
-/// can give about an ABI.
-pub const VERSION: u32 = 3;
+/// map's `enclosing` name; version 3 added the `interfaces` list; version 4 added the dispatch
+/// [`realm`](LibraryAbi::realm). A consumer that reads a version it does not know refuses the
+/// library rather than guessing, which is the only answer a linker can give about an ABI.
+pub const VERSION: u32 = 4;
 
 /// The magic that opens the section, so a mangled file is refused before it is parsed.
 const MAGIC: &[u8; 8] = b"JALSLIB\0";
@@ -91,6 +91,48 @@ pub struct ExportType {
     pub(crate) type_index: u32,
 }
 
+/// One field of a library's dispatch [`Realm`]: the member key the slot answers, and the function
+/// type a caller has to provide at.
+///
+/// Reusing [`ExportType`]'s shape rather than its name, because a slot is not an export: nothing
+/// in the library calls it by name, and the consumer builds a function of its own behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    /// The member key the slot answers — `Throwable#className()Ljava/lang/String;` — which is how
+    /// the consumer finds the method to dispatch over its own classes.
+    pub name: String,
+    /// The function type's local index into [`LibraryAbi::types`]: the receiver first, then the
+    /// method's own parameters, exactly as an in-module implementation of it is typed.
+    pub type_index: u32,
+}
+
+/// The dispatch realm a library publishes for calls its own type chains cannot close.
+///
+/// A library is compiled before its consumer exists, so a virtual call in its code cannot name the
+/// classes that only the consumer is about to declare. The realm is the answer: the library exports
+/// `$jals$link`, which installs a struct of function references — one *slot* per method the
+/// library calls virtually — into a global, and every dispatch the library lowers consults the
+/// installed realm before its own chain of `ref.test` arms. The consumer fills the struct with
+/// functions that dispatch over its own classes and the replayed ones together.
+///
+/// With no realm installed the library behaves exactly as it did before: its own chain, which is
+/// all a library run by itself can ever need. That is what keeps a library instantiable on its own
+/// — the arrangement the engine-level tests pin.
+///
+/// The realm is a type *inside the replayed groups*, like everything else that crosses the link:
+/// the struct's field types name the slot function types, so the consumer can only build the
+/// struct at the index this says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Realm {
+    /// The realm struct's local type index into [`LibraryAbi::types`] — one immutable function
+    /// reference per slot, in [`slots`](Self::slots) order.
+    pub structure: u32,
+    /// The type index of the `$jals$link` export, which takes the struct and installs it.
+    pub(crate) link: u32,
+    /// One field per slot, in field order.
+    pub slots: Vec<Slot>,
+}
+
 /// What a linked library states about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryAbi {
@@ -114,6 +156,9 @@ pub struct LibraryAbi {
     /// Every function the module exports and the type its signature occupies — a member's, a
     /// constructor's factory and body, and the exception tag.
     pub(crate) functions: Vec<ExportType>,
+    /// The dispatch realm, when the library lowers any virtual call that a consumer class could
+    /// answer — see [`Realm`]. A library whose calls are all closed over its own classes has none.
+    pub realm: Option<Realm>,
     /// The type index each declared recursive group starts at — the boundaries a consumer must
     /// reproduce *exactly*.
     pub(crate) groups: Vec<usize>,
@@ -201,6 +246,18 @@ impl LibraryAbi {
         for export in &self.functions {
             out.name(&export.name).u32(export.type_index);
         }
+        match &self.realm {
+            None => {
+                out.byte(0);
+            }
+            Some(realm) => {
+                out.byte(1).u32(realm.structure).u32(realm.link);
+                out.count(realm.slots.len());
+                for slot in &realm.slots {
+                    out.name(&slot.name).u32(slot.type_index);
+                }
+            }
+        }
         out.count(self.groups.len());
         for &start in &self.groups {
             out.u32(u32::try_from(start).unwrap_or(u32::MAX));
@@ -257,6 +314,26 @@ impl LibraryAbi {
                 type_index: reader.u32()?,
             });
         }
+        let realm = match reader.byte()? {
+            0 => None,
+            1 => {
+                let structure = reader.u32()?;
+                let link = reader.u32()?;
+                let mut slots = Vec::new();
+                for _ in 0..reader.u32()? {
+                    slots.push(Slot {
+                        name: reader.string()?,
+                        type_index: reader.u32()?,
+                    });
+                }
+                Some(Realm {
+                    structure,
+                    link,
+                    slots,
+                })
+            }
+            other => return Err(AbiError::Unknown(other)),
+        };
         let mut groups = Vec::new();
         for _ in 0..reader.u32()? {
             groups.push(usize::try_from(reader.u32()?).unwrap_or(usize::MAX));
@@ -272,6 +349,7 @@ impl LibraryAbi {
             classes,
             interfaces,
             functions,
+            realm,
             groups,
             types,
         })
@@ -548,6 +626,17 @@ mod tests {
                 name: "demo/Counter#twice(I)I".to_owned(),
                 type_index: 0,
             }],
+            // A library that dispatched anything virtually carries a realm: the struct of slot
+            // functions, and the type `$jals$link` installs it at. One slot, whose key names the
+            // method a consumer has to answer for.
+            realm: Some(Realm {
+                structure: 1,
+                link: 0,
+                slots: alloc::vec![Slot {
+                    name: "demo/Counter#twice(I)I".to_owned(),
+                    type_index: 0,
+                }],
+            }),
             groups: alloc::vec![0, 3],
             types: alloc::vec![
                 SubType::plain(CompType::Func {

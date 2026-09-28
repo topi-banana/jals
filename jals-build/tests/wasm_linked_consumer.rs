@@ -1134,6 +1134,50 @@ class AppError extends IllegalArgumentException {
     );
 }
 
+/// The other direction of the same link: a call the *library* makes, answered by a class only the
+/// consumer has.
+///
+/// `AppError` overrides `className`, and the platform's `Throwable.toString` — the body the
+/// consumer imports — is where the call is made. The realm is the only thing that can answer it:
+/// without one, the library's own `ref.test` chain finds the replayed `IllegalArgumentException`
+/// *under* `AppError` (its struct extends it), calls the library's implementation and renders the
+/// wrong name.
+#[test]
+fn a_library_call_dispatches_to_a_project_override() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        try {
+            throw new AppError("nope");
+        } catch (RuntimeException e) {
+            if (e.toString().equals("app.AppError: nope")) {
+                return 7;
+            }
+            return 3;
+        }
+    }
+}
+
+class AppError extends IllegalArgumentException {
+    AppError(String message) {
+        super(message);
+    }
+
+    protected String className() {
+        return "app.AppError";
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(7)])
+    );
+}
+
 /// `parseInt` and `parseLong` are the two parsers the platform could not have before the
 /// exceptions existed: a parser that cannot report bad input has to invent an answer.
 ///

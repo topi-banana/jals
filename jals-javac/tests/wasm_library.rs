@@ -467,3 +467,78 @@ fn an_interface_contributes_its_default_static_and_field_surface() {
     );
     validate(&module.finish().expect("a module whose lengths all fit"));
 }
+
+/// `twice` calls `advance` on `this`, which nothing in this library overrides — but a consumer's
+/// subclass is one the library cannot see, so the call is open and has to be published.
+const SPRINT: &str = r"
+package demo;
+
+public class Sprint {
+    private int count;
+
+    public int twice() {
+        return this.advance() + this.advance();
+    }
+
+    public int advance() {
+        this.count = this.count + 1;
+        return this.count;
+    }
+}
+";
+
+/// A library publishes the dispatch realm its open calls need: one slot per dispatched method, a
+/// struct holding one dispatcher each, and the `$jals$link` entry a consumer installs it by.
+#[test]
+fn a_library_that_dispatches_publishes_a_realm() {
+    let (module, abi) = library_of(&[("demo/Sprint.java", SPRINT)], "demo");
+    let realm = abi.realm.as_ref().expect("the library dispatched a call");
+    let names: Vec<&str> = realm.slots.iter().map(|slot| slot.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["demo/Sprint#advance()I"],
+        "one slot per dispatched member, named by its canonical key"
+    );
+    assert!(
+        exports(&module).iter().any(|name| name == "$jals$link"),
+        "the consumer installs the realm through the linking export"
+    );
+
+    let at = |index: u32| usize::try_from(index).expect("an index that fits");
+    let class = abi
+        .classes
+        .iter()
+        .find(|class| class.name == "demo/Sprint")
+        .expect("the class map names the class")
+        .index;
+    let slot = &abi.types[at(realm.slots[0].type_index)];
+    let jals_javac::wasm::CompType::Func { params, results } = &slot.comp else {
+        panic!("a slot's type is a function: {:?}", slot.comp);
+    };
+    assert_eq!(
+        params,
+        &[jals_javac::wasm::ValType::Ref(
+            jals_javac::wasm::RefType::nullable(jals_javac::wasm::HeapType::Concrete(class))
+        )],
+        "the receiver comes first, at the class's struct"
+    );
+    assert_eq!(results, &[jals_javac::wasm::ValType::I32]);
+    let jals_javac::wasm::CompType::Struct(fields) = &abi.types[at(realm.structure)].comp else {
+        panic!("the realm is a struct");
+    };
+    assert_eq!(fields.len(), 1, "one field per slot: {fields:?}");
+    assert_eq!(LibraryAbi::read(&abi.write()).expect("round trip"), abi);
+    validate(&module.finish().expect("a module whose lengths all fit"));
+}
+
+/// The counterpart: a library whose calls all close over its own classes publishes nothing, and a
+/// consumer compiled against it is the module it was before realms existed.
+#[test]
+fn a_library_that_dispatches_nothing_publishes_no_realm() {
+    let (module, abi) = counter();
+    assert!(abi.realm.is_none(), "no open call, nothing to answer for");
+    assert!(
+        !exports(&module).iter().any(|name| name == "$jals$link"),
+        "and no linking export either"
+    );
+}
