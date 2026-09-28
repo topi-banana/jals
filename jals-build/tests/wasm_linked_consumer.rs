@@ -727,6 +727,105 @@ public class Main {
     );
 }
 
+/// The boxes and the arithmetic, and the one thing a box is for on this target: a value of a
+/// *supertype* whose method is implemented in the library.
+///
+/// Each check is worth one more bit than the last, so the seventeen of them answer `131071` — every
+/// bit set — and a failure says by its arithmetic which check went wrong instead of only that one
+/// did. The last two are the interesting ones: a `Number`-typed local dispatches to the override
+/// replayed out of the library's ABI, and an `Object`-typed one reaches a `toString` that is also
+/// a library function, which is what makes the boxes usable where an object is wanted.
+#[test]
+fn the_platform_boxes_and_computes() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        int score = 0;
+
+        Integer seven = Integer.valueOf(7);
+        if (seven.intValue() == 7 && seven.toString().equals("7")) {
+            score = score + 1;
+        }
+        if (seven.equals(Integer.valueOf(7)) && seven.hashCode() == 7) {
+            score = score + 2;
+        }
+
+        Long big = Long.valueOf(9000000000L);
+        if (big.longValue() == 9000000000L && big.toString().equals("9000000000")) {
+            score = score + 4;
+        }
+        if (big.intValue() == 410065408) {
+            score = score + 8;
+        }
+
+        Double half = Double.valueOf(2.5);
+        if (half.doubleValue() == 2.5 && half.floatValue() == 2.5f && half.intValue() == 2) {
+            score = score + 16;
+        }
+        if (Double.compare(0.0, -0.0) > 0 && Double.compare(-0.0, 0.0) < 0) {
+            score = score + 32;
+        }
+        if (Double.compare(0.0 / 0.0, 1.0) > 0) {
+            score = score + 64;
+        }
+        if (Double.valueOf(0.0 / 0.0).equals(Double.valueOf(0.0 / 0.0))) {
+            score = score + 128;
+        }
+
+        Float tiny = Float.valueOf(0.5f);
+        if (tiny.floatValue() == 0.5f && Float.compare(-0.0f, 0.0f) < 0) {
+            score = score + 256;
+        }
+
+        if (Boolean.valueOf(true).toString().equals("true")) {
+            score = score + 512;
+        }
+        if (Boolean.valueOf(false).toString().equals("false") && Boolean.valueOf(false).hashCode() == 1237) {
+            score = score + 1024;
+        }
+
+        Character letter = Character.valueOf('x');
+        if (letter.charValue() == 'x' && letter.toString().equals("x")) {
+            score = score + 2048;
+        }
+
+        if (Math.max(2, 5) == 5 && Math.min(-1, 3) == -1 && Math.abs(-4) == 4) {
+            score = score + 4096;
+        }
+        int mostNegative = -2147483647 - 1;
+        if (Math.abs(mostNegative) == mostNegative) {
+            score = score + 8192;
+        }
+        if (Math.sqrt(144.0) == 12.0 && Math.sqrt(-1.0) != Math.sqrt(-1.0)) {
+            score = score + 16384;
+        }
+
+        Number boxed = Integer.valueOf(9);
+        if (boxed.intValue() == 9 && boxed.longValue() == 9L) {
+            score = score + 32768;
+        }
+        Object word = Integer.valueOf(4);
+        if (word.toString().equals("4")) {
+            score = score + 65536;
+        }
+
+        return score;
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    // Every check held: the boxes, the widenings and narrowings, the orders `Double.compare` and
+    // `Float.compare` keep (NaN above every number and equal to itself, +0.0 above -0.0), the
+    // builder behind the boxes' `toString`, Newton's `sqrt`, and the two dispatch checks.
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(131_071)])
+    );
+}
+
 /// One link name cannot be two modules: a `wasm` dependency and a selected package that agree on
 /// a name are refused while both halves are still in hand, not at instantiation in the engine's
 /// vocabulary.
