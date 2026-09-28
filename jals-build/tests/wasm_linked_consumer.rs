@@ -275,6 +275,73 @@ fn a_project_constructs_a_linked_inner_class_through_its_outer_instance() {
     );
 }
 
+/// An interface the library declares is a type the project can hold and call through.
+///
+/// wasm has no interface types: a `Greeter` here is `anyref`, and what makes the local legal — and
+/// the call through it dispatch to the replayed `Shouter` — is the interface *name* in the ABI.
+/// The project's index reads the library's published Java, so it resolves `Greeter#greet`; the
+/// library's export list holds `Shouter#greet`; and the consumer's chain tests the concrete type
+/// it replayed. Without the name, the local's type is a class with no struct, and the report is
+/// "no wasm representation" for a class the library plainly declared.
+///
+/// The `(Greeter)` cast is the same fact from the other side: a cast to an interface is a cast to
+/// what every reference already is, and `val_type` and the cast target have to agree.
+///
+/// `twice` is a `default` method, and it is the *member import* the interface list adds: an
+/// abstract method has no export, but a default method has a function and the library exports it
+/// like any other. The call from the project goes straight to it — the dispatch over the receiver
+/// happens inside the library, where `Shouter` is a class its own compile replayed.
+const INTERFACE_LIBRARY: &str = r"
+package demo;
+
+public interface Greeter {
+    int greet();
+
+    default int twice() {
+        return this.greet() + this.greet();
+    }
+}
+";
+
+const INTERFACE_IMPLEMENTATION: &str = r"
+package demo;
+
+public class Shouter extends Object implements Greeter {
+    public int greet() {
+        return 41;
+    }
+}
+";
+
+const INTERFACE_PROJECT: &str = r"
+package app;
+
+import demo.Greeter;
+import demo.Shouter;
+
+public class Main {
+    public static int run() {
+        Object value = new Shouter();
+        Greeter greeter = (Greeter) value;
+        return greeter.greet() + greeter.twice();
+    }
+}
+";
+
+#[test]
+fn a_project_holds_and_calls_through_a_linked_interface() {
+    assert_eq!(
+        linked_run(
+            INTERFACE_PROJECT,
+            &[
+                ("demo/Greeter.java", INTERFACE_LIBRARY),
+                ("demo/Shouter.java", INTERFACE_IMPLEMENTATION),
+            ]
+        ),
+        123
+    );
+}
+
 /// A `catch` catches the library's tag because the project *imports* it.
 ///
 /// The project declares no tag of its own when a library exports one: two tags with the same

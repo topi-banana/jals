@@ -228,6 +228,21 @@ enum Surface {
     Library,
 }
 
+/// What a library surface publishes, as [`CompileWasm::build`] hands it back.
+///
+/// The three lists travel together because they are one answer: a consumer replays the classes'
+/// structs, knows the interfaces by name, and imports the exports. A project has none of the
+/// three — its surface is the bare-name exports its own pass recorded.
+#[derive(Debug, Default)]
+struct LibrarySurface {
+    /// Every class the module declared and the type index its struct occupies.
+    classes: Vec<ClassType>,
+    /// Every interface the module declared, by internal name.
+    interfaces: Vec<String>,
+    /// Every function the module exports and the type its signature occupies.
+    functions: Vec<ExportType>,
+}
+
 /// A library a project links against: what to call it and what it said about itself.
 ///
 /// The ABI is carried by the module's own `jals.library` section, decoded by the host — a
@@ -316,7 +331,8 @@ impl CompileWasm {
     ///   global and a global's name is not a Java signature.
     /// - The module's exception tag is exported, so a consumer can catch what the library throws.
     /// - The [`LibraryAbi`] travels in a custom section beside the code: the type groups a
-    ///   consumer must replay, the class-to-struct map, and the package's Java for the index.
+    ///   consumer must replay, the class-to-struct map, the interface names, and the package's
+    ///   Java for the index.
     ///
     /// One boundary is stated rather than discovered: a consumer class cannot extend a library
     /// class through this surface. `super(...)` needs a `(this, params) -> ()` constructor, and a
@@ -332,14 +348,15 @@ impl CompileWasm {
         version: u32,
         sources: Vec<Source>,
     ) -> Result<(Module, LibraryAbi)> {
-        let (mut module, (classes, functions)) =
+        let (mut module, surface) =
             Self::build(inputs, &[], &[], index, options, Surface::Library)?;
         let abi = LibraryAbi {
             package: package.to_owned(),
             version,
             sources,
-            classes,
-            functions,
+            classes: surface.classes,
+            interfaces: surface.interfaces,
+            functions: surface.functions,
             groups: module.groups().to_vec(),
             types: module.types().to_vec(),
         };
@@ -374,7 +391,7 @@ impl CompileWasm {
         index: &ProjectIndex,
         options: WasmOptions,
         surface: Surface,
-    ) -> Result<(Module, (Vec<ClassType>, Vec<ExportType>))> {
+    ) -> Result<(Module, LibrarySurface)> {
         // Everything below reads one list. A library class is laid out, has its bodies lowered and
         // is called exactly as a project class is — the *only* thing the two lists decide is which
         // declarations reach the export section, which is what `exported` carries into
@@ -632,13 +649,18 @@ impl CompileWasm {
         // A linked library's surface is added last: its factories and accessors are functions the
         // lowering above knows nothing about, and they may only be pushed once every index they
         // name exists.
-        let (classes, functions) = match surface {
-            Surface::Project => (Vec::new(), Vec::new()),
-            Surface::Library => {
-                Self::export_library(&classes, &compiled, index, &layout, &mut module)?
-            }
+        let published = match surface {
+            Surface::Project => LibrarySurface::default(),
+            Surface::Library => Self::export_library(
+                &classes,
+                &interface_items,
+                &compiled,
+                index,
+                &layout,
+                &mut module,
+            )?,
         };
-        Ok((module, (classes, functions)))
+        Ok((module, published))
     }
 
     /// Add the entry points a linked library's consumers call.
@@ -655,13 +677,17 @@ impl CompileWasm {
     ///
     /// Host imports (a `native` method's function) are skipped: they are what the library's own
     /// embedder supplies, not what the library defines.
+    ///
+    /// What is described here goes into the [`LibraryAbi`]: the class-to-struct map, the interface
+    /// names, and the export list a consumer imports through.
     fn export_library(
         classes: &[ItemId],
+        interfaces: &[ItemId],
         compiled: &BTreeSet<ItemId>,
         index: &ProjectIndex,
         layout: &Layout,
         module: &mut Module,
-    ) -> Result<(Vec<ClassType>, Vec<ExportType>)> {
+    ) -> Result<LibrarySurface> {
         let first_defined = module.func_index(0);
         let mut functions = Vec::new();
 
@@ -878,7 +904,19 @@ impl CompileWasm {
                 });
             }
         }
-        Ok((map, functions))
+        // A name each, because a name is all an interface has: no struct to index and no enclosing
+        // instance to construct one through. What the consumer does with it is the same thing this
+        // module does — hold its values as `anyref` and dispatch its methods over the classes that
+        // implement it.
+        let interfaces = interfaces
+            .iter()
+            .map(|&item| Descriptor::internal_name_of(item, index))
+            .collect();
+        Ok(LibrarySurface {
+            classes: map,
+            interfaces,
+            functions,
+        })
     }
 
     /// The type index a defined function carries, which is what an export entry records.
@@ -1027,6 +1065,16 @@ impl CompileWasm {
                 layout.inner.insert(item, outer);
             }
         }
+        // An interface the library declares is an interface here too: its values are held as
+        // `anyref`, and a call through it dispatches over the replayed classes that implement it.
+        // Without this the consumer reports the type as one it cannot represent — there is no
+        // struct to find, and the name is what says there should not be one.
+        for name in &library.abi.interfaces {
+            let Some(item) = index.item_by_fqn(&Self::fqn_of_internal(name)) else {
+                continue;
+            };
+            layout.interfaces.insert(item);
+        }
         Ok(())
     }
 
@@ -1101,8 +1149,18 @@ impl CompileWasm {
     ) -> Result<()> {
         let mut base = 0u32;
         for library in libraries {
-            for class in &library.abi.classes {
-                let Some(item) = index.item_by_fqn(&Self::fqn_of_internal(&class.name)) else {
+            // Classes and interfaces alike. An interface's `default` and `static` methods and its
+            // implicitly-`static final` fields are exports exactly as a class's are; an abstract
+            // method has no export at all, so the lookup below finds nothing for it and the call
+            // site dispatches over the replayed classes that implement it instead.
+            let names = library
+                .abi
+                .classes
+                .iter()
+                .map(|class| class.name.as_str())
+                .chain(library.abi.interfaces.iter().map(String::as_str));
+            for name in names {
+                let Some(item) = index.item_by_fqn(&Self::fqn_of_internal(name)) else {
                     continue;
                 };
                 for &member in index.own_members(item) {
@@ -5674,6 +5732,12 @@ impl Lowering<'_> {
             .resolve_type_name(self.input.file(), &name, qualified.as_deref())
             .project_id()
             .ok_or_else(|| WasmError::Unresolved(name.clone()))?;
+        // An interface is `anyref`, exactly as `Object` is: wasm has no interface types, so a cast
+        // to one is a cast to the type every reference already has. The same answer `val_type`
+        // gives, and it has to be — the two describe the same value.
+        if self.layout.interfaces.contains(&item) || self.layout.object == Some(item) {
+            return Ok(HeapType::Any);
+        }
         let index = self
             .layout
             .structs

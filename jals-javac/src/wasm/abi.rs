@@ -32,9 +32,10 @@ pub const CUSTOM_SECTION: &str = "jals.library";
 ///
 /// Bumped when a shape changes meaning. Version 2 added the `functions` list — the export names
 /// and the type index each import has to be declared at, `$jals$tag` included — and the class
-/// map's `enclosing` name. A consumer that reads a version it does not know refuses the library
-/// rather than guessing, which is the only answer a linker can give about an ABI.
-pub const VERSION: u32 = 2;
+/// map's `enclosing` name; version 3 added the `interfaces` list. A consumer that reads a version
+/// it does not know refuses the library rather than guessing, which is the only answer a linker
+/// can give about an ABI.
+pub const VERSION: u32 = 3;
 
 /// The magic that opens the section, so a mangled file is refused before it is parsed.
 const MAGIC: &[u8; 8] = b"JALSLIB\0";
@@ -98,6 +99,15 @@ pub struct LibraryAbi {
     pub sources: Vec<Source>,
     /// Every class the module declared and where its struct sits.
     pub classes: Vec<ClassType>,
+    /// Every interface the module declared, by internal name (`java/util/List`).
+    ///
+    /// An interface is not a class with a missing struct: its values are `anyref`, as `Object`'s
+    /// are, and a consumer that does not know the name is an interface reports a type it cannot
+    /// represent rather than the one every reference already is. The members are resolved through
+    /// the published sources, exactly as a class's are, so a name is all a consumer needs — for a
+    /// local or parameter of the type, for a `default` method it imports, and for the virtual call
+    /// chain that dispatches an abstract one to whichever replayed class implements it.
+    pub interfaces: Vec<String>,
     /// Every function the module exports and the type its signature occupies.
     pub(crate) functions: Vec<ExportType>,
     /// The type index each declared recursive group starts at — the boundaries a consumer must
@@ -179,6 +189,10 @@ impl LibraryAbi {
                 }
             }
         }
+        out.count(self.interfaces.len());
+        for interface in &self.interfaces {
+            out.name(interface);
+        }
         out.count(self.functions.len());
         for export in &self.functions {
             out.name(&export.name).u32(export.type_index);
@@ -228,6 +242,10 @@ impl LibraryAbi {
                 enclosing,
             });
         }
+        let mut interfaces = Vec::new();
+        for _ in 0..reader.u32()? {
+            interfaces.push(reader.string()?);
+        }
         let mut functions = Vec::new();
         for _ in 0..reader.u32()? {
             functions.push(ExportType {
@@ -248,6 +266,7 @@ impl LibraryAbi {
             version,
             sources,
             classes,
+            interfaces,
             functions,
             groups,
             types,
@@ -518,6 +537,9 @@ mod tests {
                     enclosing: Some("demo/Counter".to_owned()),
                 },
             ],
+            // An interface travels by name alone: it has no struct to index, and what a consumer
+            // needs is the knowledge that the name is one, not a class whose struct went missing.
+            interfaces: alloc::vec!["demo/Listener".to_owned()],
             functions: alloc::vec![ExportType {
                 name: "demo/Counter#twice(I)I".to_owned(),
                 type_index: 0,

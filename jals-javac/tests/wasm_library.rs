@@ -339,7 +339,7 @@ public interface Greeter {
 
 #[test]
 fn an_interface_contributes_its_default_static_and_field_surface() {
-    let (module, _) = library_of(&[("demo/Greeter.java", GREETER)], "demo");
+    let (module, abi) = library_of(&[("demo/Greeter.java", GREETER)], "demo");
     let names = exports(&module);
     for expected in [
         "demo/Greeter#twice(I)I",
@@ -355,6 +355,14 @@ fn an_interface_contributes_its_default_static_and_field_surface() {
     assert!(
         !names.iter().any(|name| name == "demo/Greeter#base()I"),
         "an abstract method has no body to export: {names:?}"
+    );
+    // The name, and nothing else: an interface has no struct to index, so what a consumer needs is
+    // to know the name is one — otherwise a local of the type reads as a class whose struct went
+    // missing, and the report is "no wasm representation" for a type the library declared.
+    assert_eq!(
+        abi.interfaces,
+        ["demo/Greeter"],
+        "the interface travels by name"
     );
     validate(&module.finish().expect("a module whose lengths all fit"));
 }
