@@ -293,6 +293,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: sources,
             classpath: &[],
+            libraries: &[],
             options,
         }
     }

@@ -40,6 +40,17 @@ use jals_progress::{Activity, Outcome, Progress};
 use tinywasm::types::{ImportType, WasmType};
 use tinywasm::{ExternItem, FuncContext, HostFunction, Imports, ModuleInstance, RefValue, Store};
 
+/// A library module to instantiate and link before the project's own.
+///
+/// The same bytes the compile linked against, resolved by the host from a `wasm` dependency. The
+/// compile consumed the module's ABI; the run consumes the module.
+pub struct WasmLibrary<'a> {
+    /// The link name, which is the module name every import from it is spelled with.
+    pub name: &'a str,
+    /// The module's bytes.
+    pub bytes: &'a [u8],
+}
+
 /// What to run, and what to call in it.
 pub struct WasmRunRequest<'a> {
     /// The module, as the backend emitted it.
@@ -59,6 +70,18 @@ pub struct WasmRunRequest<'a> {
     /// — so passing [`NativeBindings::new`] is not a degraded mode, it is what "this module needs
     /// nothing from the host" looks like.
     pub natives: &'a NativeBindings,
+    /// The precompiled libraries the module imports from, in the order they are instantiated:
+    /// each links against what the ones before it contributed, so a library that imports another
+    /// has to come after it.
+    ///
+    /// Empty for the ordinary single-module build, which is what a project with no `wasm`
+    /// dependency produces.
+    ///
+    /// The CLI passes them in the manifest's dependency-key order. Nothing declares that order and
+    /// nothing needs to yet: `CompileWasm::library` takes no linked list, so a library module
+    /// cannot import another library — an ordering *edge* would have to exist before the order
+    /// could matter.
+    pub libraries: &'a [WasmLibrary<'a>],
     /// Where the run reports what it is doing.
     pub progress: &'a Progress,
 }
@@ -124,6 +147,13 @@ pub enum WasmRunError {
     /// project's own code running, and it comes back as [`Trap`](Self::Trap) or
     /// [`Exception`](Self::Exception) like any other execution failure.
     Instantiate(String),
+    /// A linked library could not be decoded, instantiated, or registered under its name.
+    Library {
+        /// The link name the library was declared under.
+        name: String,
+        /// What the engine said.
+        message: String,
+    },
     /// Nothing is exported under that name.
     ///
     /// Carries the names that *are* exported, because the one thing a caller cannot see from here
@@ -236,6 +266,9 @@ impl fmt::Display for WasmRunError {
                     return f.write_str(" (no package is selected)");
                 }
                 write!(f, "; the selection binds {}", available.join(", "))
+            }
+            Self::Library { name, message } => {
+                write!(f, "the library `{name}` could not be linked: {message}")
             }
             Self::NoSuchExport { name, available } => {
                 write!(f, "the module exports no function named `{name}`")?;
@@ -438,7 +471,14 @@ impl WasmRunner {
     pub fn run(request: &WasmRunRequest<'_>) -> Result<WasmRunOutcome, WasmRunError> {
         Self::reporting(request.progress, request.invoke, || {
             let module = Self::parse(request.module)?;
-            Self::invoke(&module, request.invoke, request.args, request.natives)
+            let libraries = Self::parse_libraries(request.libraries)?;
+            Self::invoke(
+                &module,
+                &libraries,
+                request.invoke,
+                request.args,
+                request.natives,
+            )
         })
     }
 
@@ -449,14 +489,30 @@ impl WasmRunner {
     #[cfg(feature = "native")]
     pub(crate) fn run_parsed(
         module: &ParsedModule,
+        libraries: &[(String, ParsedModule)],
         invoke: Option<&str>,
         args: &[String],
         natives: &NativeBindings,
         progress: &Progress,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         Self::reporting(progress, invoke, || {
-            Self::invoke(module, invoke, args, natives)
+            Self::invoke(module, libraries, invoke, args, natives)
         })
+    }
+
+    /// Decode every library once, in the order given, against the name it links under.
+    pub(crate) fn parse_libraries(
+        libraries: &[WasmLibrary<'_>],
+    ) -> Result<Vec<(String, ParsedModule)>, WasmRunError> {
+        let mut parsed = Vec::with_capacity(libraries.len());
+        for library in libraries {
+            let module = Self::parse(library.bytes).map_err(|error| WasmRunError::Library {
+                name: library.name.to_owned(),
+                message: format!("{error}"),
+            })?;
+            parsed.push((library.name.to_owned(), module));
+        }
+        Ok(parsed)
     }
 
     /// Decode and validate the bytes, without running anything.
@@ -513,13 +569,35 @@ impl WasmRunner {
     /// The run itself, minus the decode: instantiate, then call the named export when there is one.
     fn invoke(
         module: &ParsedModule,
+        libraries: &[(String, ParsedModule)],
         invoke: Option<&str>,
         args: &[String],
         natives: &NativeBindings,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         let module = &module.0;
-        let imports = Self::link(module, natives)?;
+        let mut imports = Self::link(module, natives, libraries)?;
         let mut store = Store::default();
+        // The libraries first, in the order given: a project's imports are resolved when it is
+        // instantiated, so everything it imports has to exist by then. Each library links against
+        // what the ones before it contributed and runs its own start — where a class's `static`
+        // initialisers are lowered.
+        for (name, library) in libraries {
+            let instance =
+                ModuleInstance::instantiate_no_start(&mut store, &library.0, Some(&imports))
+                    .map_err(|error| WasmRunError::Library {
+                        name: name.clone(),
+                        message: error.to_string(),
+                    })?;
+            instance
+                .start(&mut store)
+                .map_err(Self::execution_failure)?;
+            imports
+                .link_module(name, instance)
+                .map_err(|error| WasmRunError::Library {
+                    name: name.clone(),
+                    message: error.to_string(),
+                })?;
+        }
         // Instantiating in two halves rather than through `instantiate`, which is exactly these
         // two calls. Only the first is *linking* — a malformed module, an unknown import, a
         // segment that traps. The second runs the start function, which is where a class's
@@ -597,9 +675,31 @@ impl WasmRunner {
     /// What is left to check is therefore only whether a name is bound at all — and because the
     /// import's field name carries the method's descriptor, a Rust half that spelled the signature
     /// differently shows up exactly here, as an unresolved import listing what *is* registered.
-    fn link(module: &tinywasm::Module, natives: &NativeBindings) -> Result<Imports, WasmRunError> {
+    ///
+    /// Every *library*'s import section is swept too. A library is a module of its own: a `native`
+    /// method its Java declares is an import there whether or not the project ever calls it, and
+    /// the project's own table says nothing about it — so a library whose embedder supplies a host
+    /// function could never be instantiated. `define` overwrites, so an import both modules carry
+    /// is bound once.
+    fn link(
+        module: &tinywasm::Module,
+        natives: &NativeBindings,
+        libraries: &[(String, ParsedModule)],
+    ) -> Result<Imports, WasmRunError> {
         let mut imports = Imports::new();
-        for import in module.imports() {
+        let library_imports = libraries
+            .iter()
+            .flat_map(|(_, library)| library.0.imports());
+        for import in module.imports().chain(library_imports) {
+            // A library import is not a host function: it is satisfied when the library instance
+            // is registered under its name, after it has been instantiated. Its type check happens
+            // there, against the type both modules replayed.
+            if libraries
+                .iter()
+                .any(|(name, _)| name.as_str() == &*import.module)
+            {
+                continue;
+            }
             let ImportType::Func(signature) = import.ty else {
                 // The backend emits function imports and nothing else. A module carrying another
                 // kind did not come from it, and guessing at one is worse than saying so.
@@ -808,6 +908,7 @@ mod tests {
         let request = BackendRequest {
             tree: &tree,
             classpath: &[],
+            libraries: &[],
             options: &options,
             progress: &Progress::SILENT,
         };
@@ -839,6 +940,7 @@ mod tests {
         natives: &NativeBindings,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         WasmRunner::run(&WasmRunRequest {
+            libraries: &[],
             module,
             invoke,
             args,
