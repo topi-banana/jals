@@ -312,8 +312,8 @@ public class App {
     assert_invoke(&[helper, main], "run", &["20"], "41");
 }
 
-/// A library type has no wasm representation, and saying so is the honest answer — there is no
-/// `java.base` on a wasm host, and inventing one is a separate decision from compiling.
+/// A library type has no wasm representation here, and saying so is the honest answer — this
+/// compile links no package, and inventing one is a separate decision from compiling.
 #[test]
 fn a_library_type_is_reported_rather_than_guessed() {
     let source = r#"
@@ -1489,8 +1489,8 @@ public class Areas {
 /// methods are a class's, and `==` on two constants is `ref.eq`, which is exactly what enum identity is.
 ///
 /// What an enum cannot have here is anything from `java.lang.Enum`: `name()`, `toString()`, and
-/// `valueOf(String)` all involve a `String`, which has no wasm representation by this backend's existing
-/// design. A call to one reports rather than being guessed at.
+/// `valueOf(String)` all involve a `String`, which these compiles do not link a package to provide.
+/// A call to one reports rather than being guessed at.
 #[test]
 fn an_enum_gets_its_constants_as_globals() {
     let source = r"
@@ -1630,8 +1630,8 @@ fn a_type_in_an_enum_constant_body_has_no_owning_type() {
 /// to write directly: the constructor stores each parameter into its slot and an accessor reads one back.
 ///
 /// `equals`, `hashCode`, and `toString` are *not* synthesised here. All three come from
-/// `java.lang.Record`, and two of them involve a `String`, which has no wasm representation by this
-/// backend's design — a call to one reports rather than being guessed at.
+/// `java.lang.Record`, and two of them involve a `String`, which these compiles do not link a
+/// package to provide — a call to one reports rather than being guessed at.
 #[test]
 fn a_record_gets_a_constructor_and_accessors() {
     let source = r"
@@ -2587,7 +2587,7 @@ public class Reader {
 /// unconditionally (§14.30.2), including a `null` component that a `ref.test` would reject. `var` is that
 /// same case spelled without the type, and its binding takes the component's.
 ///
-/// The selector is an interface rather than `Object`: a wasm host has no `java.base`, and an interface
+/// The selector is an interface rather than `Object`: this compile links no package, and an interface
 /// type is held at the top of the reference hierarchy, which is exactly what a pattern narrows from.
 #[test]
 fn a_record_pattern_deconstructs() {
@@ -3141,7 +3141,8 @@ public class Through {
     assert_invoke(&[declared, implemented], "run", &["21"], "42");
 }
 
-/// `java.lang.Object` is represented, and it is the one library type that needs no `java.base`.
+/// `java.lang.Object` is represented, and it is the one library type representable with no package
+/// linked.
 ///
 /// It is the root of Java's reference hierarchy and `anyref` is wasm's, so a value of it sits
 /// exactly where an interface-typed one does. Refusing it put every file that so much as declares an

@@ -200,11 +200,11 @@ impl JalsBackend {
             analyses.push(FileAnalysis::of(root).await);
         }
 
-        // The stdlib stubs stand in for `java.base`: the JVM supplies the implementations at run
-        // time, so a compile only ever needs the signatures. A native package's Java is the
-        // opposite case and is folded in as its own origin: it *is* compiled into the artifact, so
-        // what it does not declare the program does not have, and it outranks a stub of the same
-        // name.
+        // The stdlib stubs stand in for the JDK types a compile does not implement: on the JVM the
+        // implementations are supplied at run time, so a compile only ever needs the signatures —
+        // and on this target, where the implementations are linked in as a package, a package's Java
+        // outranks the stub of the same name. A native package's Java is that opposite case: it *is*
+        // compiled into the artifact, so what it does not declare the program does not have.
         let (project_roots, native_roots) = roots.split_at(project_files);
         let index = ProjectIndex::builder(project_roots)
             .with_native_packages(native_roots)

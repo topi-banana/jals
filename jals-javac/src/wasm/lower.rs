@@ -24,13 +24,12 @@
 //! Exceptions (`throw` / `try` / `catch`, over one declared tag) and interface dispatch (a
 //! `ref.test` chain over the classes this module compiles) are in too.
 //!
-//! Library types are out of scope by design — there is no `java.base` on a wasm host, and supplying
-//! one is a separate decision from compiling. So no `String` and no boxing.
-//!
-//! The exception is a **linked library**: a package that was itself compiled by this backend,
-//! whose types are replayed and whose members are imports (see [`LinkedLibrary`]). It is not a
-//! `java.base` supplied at run time by the host; it is the same compiler's output, linked at
-//! instantiation rather than merged into the module.
+//! Library types are **a linked package's** to supply: a class the project does not declare is
+//! replayed into the layout and its members become imports, and with no package linked the name is
+//! refused rather than given a representation nothing implements. `jals-platform` is the package
+//! that provides `java.base`. Nothing is supplied at run time by the host — a package is the same
+//! compiler's output, linked at instantiation rather than merged into the module (see
+//! [`LinkedLibrary`]).
 //!
 //! # Where wasm and the JVM genuinely differ
 //!
@@ -75,7 +74,8 @@ pub enum WasmError {
     Unsupported(&'static str),
     /// A name the index did not resolve.
     Unresolved(String),
-    /// A type with no wasm representation — every library type, by design.
+    /// A type with no wasm representation here — a library type no linked package provides, or a
+    /// class this compile never lays out.
     NoRepresentation(String),
     /// A method this module declares but supplies no body for, called somewhere a body is needed.
     ///
@@ -99,8 +99,9 @@ impl core::fmt::Display for WasmError {
             Self::Unresolved(name) => write!(f, "`{name}` did not resolve"),
             Self::NoRepresentation(ty) => write!(
                 f,
-                "`{ty}` has no wasm representation: this backend compiles primitives and \
-                 project-declared classes, and a wasm host has no `java.base` to supply the rest"
+                "`{ty}` has no wasm representation: this module lays out the classes the project \
+                 declares and the classes a linked package provides, and no package linked into \
+                 this compile provides this one"
             ),
             Self::NoImplementation(what) => write!(
                 f,
@@ -2043,7 +2044,7 @@ struct Layout {
     interfaces: BTreeSet<ItemId>,
     /// `java.lang.Object`, when the index holds it.
     ///
-    /// The one library type this backend needs no `java.base` to represent: it is the root of Java's
+    /// The one library type representable with no package linked: it is the root of Java's
     /// reference hierarchy and `anyref` is wasm's, so a value of it is held exactly where an
     /// interface-typed one is. Refusing it instead put every file that so much as declares an
     /// `Object` field outside the subset, over a type whose representation the target already has.
@@ -4144,15 +4145,15 @@ impl Lowering<'_> {
             guard,
             is_default,
         } = self.facts().switch_arm(labels)?;
-        // A `String` key is a fact the source states and a value this target cannot hold — this
-        // backend compiles primitives and project classes, and a host with no `java.base` has no
-        // `String` to hash. So it is read there and refused here.
+        // A `String` key is a fact the source states and a value this lowering does not dispatch
+        // on: with the platform linked a `String` *is* representable, but the switch would need a
+        // `hashCode`/`equals` pair of calls and a table shape this backend has not written. Refused
+        // as the construct it is, rather than as a type it is not.
         let keys = keys
             .into_iter()
             .map(|key| {
-                key.as_int().ok_or_else(|| {
-                    WasmError::NoRepresentation("a `String` `case` label".to_owned())
-                })
+                key.as_int()
+                    .ok_or(WasmError::Unsupported("a `String` `case` label"))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Arm {
@@ -4693,9 +4694,9 @@ impl Lowering<'_> {
     /// section into a `char[]`, then handed to `String(char[])`.
     ///
     /// The constructor is the one the index resolved for `java.lang.String` — the platform's, when
-    /// a library provides it. Nothing here invents a representation for the stub: a `String` with no
-    /// constructor to run is a missing java.base, and refusing names the gap instead of building an
-    /// object whose methods would be absent.
+    /// a library provides it. Nothing here invents a representation for the stub: a `String` whose
+    /// package is not linked has no constructor to run, and refusing names the gap instead of
+    /// building an object whose methods would be absent.
     ///
     /// The two shapes are the boundary's: a linked library exports its constructor as a *factory*
     /// that allocates and returns the object, while the module's own constructor takes a receiver
@@ -5295,9 +5296,12 @@ impl Lowering<'_> {
                     && self.index.resolved_param_tys(id).is_empty()
             })
             .ok_or_else(missing)?;
-        let ty = self.layout.class_ref(builder)?;
-        let slot = self.scratch(ty);
+        // A linked library's factory: the class is replayed into the layout, so `class_ref` has a
+        // struct to name. Checked first because with no package the class has none — and the
+        // report below is the one that says which class the source needed, where `class_ref`'s
+        // generic "an undeclared class" would not.
         if let Some(&factory) = self.layout.external_constructors.get(&constructor) {
+            let slot = self.scratch(self.layout.class_ref(builder)?);
             insn.call(factory).local_set(slot);
             return Ok(slot);
         }
@@ -5307,6 +5311,9 @@ impl Lowering<'_> {
             .get(&builder)
             .copied()
             .ok_or_else(|| WasmError::NoRepresentation("java.lang.StringBuilder".to_owned()))?;
+        let slot = self.scratch(ValType::Ref(RefType::nullable(HeapType::Concrete(
+            structure,
+        ))));
         let function = self
             .layout
             .functions
@@ -6796,7 +6803,7 @@ impl Lowering<'_> {
     ///
     /// A primitive where a reference is wanted is a boxing conversion (JLS §5.1.7) and a reference
     /// where a primitive is wanted an unboxing one, and both go through a **wrapper** — a
-    /// `java.lang` type a wasm host has no `java.base` to supply. Erasure is what makes the pair
+    /// `java.lang` type only a linked package can supply. Erasure is what makes the pair
     /// common rather than exotic: a type variable is `anyref` here, so `List<Integer>.add(1)` puts
     /// an `i32` where a reference belongs. Reported as the library type it needs, which is the same
     /// answer every other unrepresentable type gets, rather than as a compiler gap it is not.

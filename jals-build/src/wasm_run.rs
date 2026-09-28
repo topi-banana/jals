@@ -9,12 +9,13 @@
 //! # There is no `main`
 //!
 //! wasm has no entry-point convention, and the one Java has cannot be lowered here: `main` takes a
-//! `String[]`, and a wasm host has no `java.base` to supply `String`. So the entry point is
-//! *named*: an exported function, called by the name the source spells it with. The
-//! [`jals_javac::wasm`] backend exports every `static` method that is not a constructor, which is
-//! wider than "public" and is why an export can turn out to take a parameter no command line can
-//! write — a reference to an object the embedder's collector owns. That is refused with the
-//! position that caused it rather than mis-parsed.
+//! `String[]`, and this runner has no way to build one — its elements are references the
+//! embedder's collector owns, so building the array is a platform's job and not a command line's.
+//! So the entry point is *named*: an exported function, called by the name the source spells it
+//! with. The [`jals_javac::wasm`] backend exports every `static` method that is not a constructor,
+//! which is wider than "public" and is why an export can turn out to take a parameter no command
+//! line can write — a reference to an object the embedder's collector owns. That is refused with
+//! the position that caused it rather than mis-parsed.
 //!
 //! Naming no export at all is still a run: instantiating a module executes its start function,
 //! which is where this backend lowers a class's `static` initialisers. A project with no static
