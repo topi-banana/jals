@@ -218,14 +218,27 @@ pub enum Dependency {
     Wasm(WasmDependency),
 }
 
-/// The `wasm` form of a [`Dependency`]: a module this workspace's own wasm backend (or a foreign
-/// one that speaks the same ABI) emitted.
+/// The `wasm` form of a [`Dependency`]: a precompiled core module.
+///
+/// [`foreign`](WasmDependency::foreign) picks between its two kinds. The ordinary one is a
+/// **linked library**: a module this workspace's wasm backend emitted, whose `jals.library`
+/// section the compile reads so the project can call into it. A `foreign = true` module was
+/// emitted by something else and carries no ABI: the project's own `native` declarations are the
+/// interface, and the module's exports satisfy them at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WasmDependency {
     /// A `.wasm` location, relative to the manifest directory. Read by the host, never here: the
     /// module's ABI, not its path, is what a compile consumes.
     pub wasm: String,
+    /// Whether the module is a **foreign** one: a core module this workspace's backend did not
+    /// emit, without a `jals.library` section.
+    ///
+    /// A foreign module provides implementations for the project's `native` declarations, matched
+    /// by the canonical key `owner#name+descriptor` on each export — the WIT-and-Rust side of the
+    /// same seam, where the library route is the Java side. Its boundary is scalars for now: a
+    /// function reference to a GC object is not something a core module can hold.
+    pub foreign: Option<bool>,
     /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
     /// See [`Dependency::is_optional`].
     optional: Option<bool>,
@@ -4474,6 +4487,7 @@ mod tests {
                 "demo".to_owned(),
                 Dependency::Wasm(WasmDependency {
                     wasm: "../demo/demo.wasm".to_owned(),
+                    foreign: None,
                     optional: None,
                 }),
             );
@@ -4493,6 +4507,7 @@ mod tests {
                 "demo".to_owned(),
                 Dependency::Wasm(WasmDependency {
                     wasm: "../demo/demo.wasm".to_owned(),
+                    foreign: None,
                     optional: None,
                 }),
             );
@@ -4512,6 +4527,7 @@ mod tests {
             "demo".to_owned(),
             Dependency::Wasm(WasmDependency {
                 wasm: "../demo/demo.wasm".to_owned(),
+                foreign: None,
                 optional: None,
             }),
         );
