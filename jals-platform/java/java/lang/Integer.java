@@ -8,13 +8,13 @@ package java.lang;
  * widen: {@code longValue} is exact, and {@code floatValue} and {@code doubleValue} round to
  * nearest as the JLS says.
  *
- * <p>{@code parseInt} is deliberately absent. A parser that cannot throw
- * {@code NumberFormatException} cannot report bad input, and one that returned {@code 0} for
- * {@code "x"} would be worse than one that does not exist: today the call is refused with the name
- * it asked for, which is a compile error at the line that needs it. The method lands with the
- * exception model. {@code TYPE} is absent for a reason of the same shape: this platform has no
- * {@code Class} value to put in it, and a field that could only ever hold {@code null} is a promise
- * no code can keep.
+ * <p>{@code parseInt} is the JDK's decimal parser: an optional minus sign, ASCII digits, and no
+ * tolerance for anything else. It accumulates through the *negative* range, so
+ * {@code Integer.MIN_VALUE} — which has no positive counterpart to negate — parses like any other
+ * value, and it throws {@link NumberFormatException} rather than truncating or wrapping, which is
+ * exactly what it was waiting for. {@code TYPE} is still absent for a reason of its own shape: this
+ * platform has no {@code Class} value to put in it, and a field that could only ever hold
+ * {@code null} is a promise no code can keep.
  */
 public class Integer extends Number implements Comparable {
 
@@ -27,6 +27,68 @@ public class Integer extends Number implements Comparable {
     /** The box, for the widening conversions a call site used to do implicitly. */
     public static Integer valueOf(int i) {
         return new Integer(i);
+    }
+
+    /** The digit a code unit spells, or {@code -1} when it spells none. */
+    private static int digitOf(char c) {
+        int value = c - '0';
+        if (value < 0 || value > 9) {
+            return -1;
+        }
+        return value;
+    }
+
+    /**
+     * The {@code int} that {@code s} spells in decimal.
+     *
+     * <p>JDK semantics: an optional leading {@code -} — not {@code +} — one or more ASCII digits,
+     * and a value that fits. Anything else, a null included, is a {@link NumberFormatException}.
+     *
+     * <p>The accumulation runs through the *negative* range, which is what lets
+     * {@code -2147483648} parse: its magnitude has no {@code int} to be built in, so the parser
+     * builds the value itself and negates only a result that is not negative. The limit is one
+     * more for a negative result, and the two comparisons against it are the whole overflow check —
+     * a ten-digit string never has to be compared as a number.
+     */
+    public static int parseInt(String s) {
+        if (s == null) {
+            throw new NumberFormatException("Cannot parse null string");
+        }
+        int length = s.length();
+        if (length == 0) {
+            throw new NumberFormatException("For input string: \"" + s + "\"");
+        }
+        int index = 0;
+        boolean negative = false;
+        if (s.charAt(0) == '-') {
+            if (length == 1) {
+                throw new NumberFormatException("For input string: \"" + s + "\"");
+            }
+            negative = true;
+            index = 1;
+        }
+        int limit = -2147483647;
+        if (negative) {
+            limit = -2147483647 - 1;
+        }
+        int multmin = limit / 10;
+        int result = 0;
+        while (index < length) {
+            int digit = digitOf(s.charAt(index));
+            if (digit < 0 || result < multmin) {
+                throw new NumberFormatException("For input string: \"" + s + "\"");
+            }
+            result = result * 10;
+            if (result < limit + digit) {
+                throw new NumberFormatException("For input string: \"" + s + "\"");
+            }
+            result = result - digit;
+            index = index + 1;
+        }
+        if (negative) {
+            return result;
+        }
+        return -result;
     }
 
     public int intValue() {

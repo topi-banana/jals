@@ -893,6 +893,98 @@ public class Main {
     );
 }
 
+/// The exception classes are linkable platform classes, and one tag carries them all.
+///
+/// The project's `throw` and the platform's parser throw the *same* tag — the consumer imports the
+/// one the library exports, because two tags with the same payload are still two tags — and the
+/// class tests are `ref.test`s against the replayed structs, so the declared subtyping travels:
+/// the object below is an `IllegalArgumentException` caught as a `RuntimeException`.
+///
+/// `toString` is a second virtual call, one level down: it is written once on `Throwable` and asks
+/// `className()`, which each class in the platform answers for itself. The score is the message's
+/// length (12) plus the rendered exception's (34 for the name, 2 for the separator, 12 for the
+/// message), which says the message crossed the link and the name is the class that was thrown.
+#[test]
+fn the_platform_throws_and_catches() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        int score = 0;
+        try {
+            throw new IllegalArgumentException("bad argument");
+        } catch (RuntimeException e) {
+            score = e.getMessage().length() + e.toString().length();
+        }
+        return score;
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(60)])
+    );
+}
+
+/// `parseInt` and `parseLong` are the two parsers the platform could not have before the
+/// exceptions existed: a parser that cannot report bad input has to invent an answer.
+///
+/// The checks are the corners — both ends of `int`, both of `long`, and three refusals: a digit
+/// where there is none, an empty string, and `null`. The first refusal is caught as its exact
+/// class, the second as `IllegalArgumentException` (declared subtyping again), and the third as
+/// `NumberFormatException` — a null argument is bad input, not a crash.
+#[test]
+fn the_platform_parses_the_corners_and_refuses_bad_input() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        int score = 0;
+        if (Integer.parseInt("-2147483648") == -2147483647 - 1) {
+            score = score + 1;
+        }
+        if (Integer.parseInt("2147483647") == 2147483647) {
+            score = score + 2;
+        }
+        if (Long.parseLong("-9223372036854775808") == -9223372036854775807L - 1L) {
+            score = score + 4;
+        }
+        if (Long.parseLong("9223372036854775807") == 9223372036854775807L) {
+            score = score + 8;
+        }
+        try {
+            Integer.parseInt("12x");
+        } catch (NumberFormatException e) {
+            if (e.getMessage().length() > 0) {
+                score = score + 16;
+            }
+        }
+        try {
+            Long.parseLong("");
+        } catch (IllegalArgumentException e) {
+            score = score + 32;
+        }
+        try {
+            Integer.parseInt(null);
+        } catch (NumberFormatException e) {
+            score = score + 64;
+        }
+        return score;
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(127)])
+    );
+}
+
 /// The overload a concatenation operand names has to exist, and the report says which one is
 /// missing.
 ///

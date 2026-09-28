@@ -17,8 +17,7 @@ package java.lang;
 public abstract class Number extends Object {
 
     /** Never called directly — a subclass's constructor reaches it — but every class needs one. */
-    public Number() {
-    }
+    public Number() {}
 
     public abstract int intValue();
 
