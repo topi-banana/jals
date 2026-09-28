@@ -826,6 +826,44 @@ public class Main {
     );
 }
 
+/// The overload a concatenation operand names has to exist, and the report says which one is
+/// missing.
+///
+/// A `double` names `append(double)`, which the platform has not written yet, and the JDK's
+/// fallback — boxing into `append(Object)` — is exactly what §15.18.1 says *not* to do: `"" + d`
+/// renders the decimal text, not the identity of a `Double`. So the call is refused with the
+/// method it asked for, which is a compile error at the `+`, rather than a rendering that would be
+/// almost right.
+#[test]
+fn a_concatenation_names_the_overload_the_platform_must_have() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        double ratio = 1.5;
+        String text = "ratio=" + ratio;
+        return text.length();
+    }
+}
+"#;
+
+    let selection = platform_selection();
+    let outcome = compile_against_packages(project, &selection, &[]);
+    assert!(
+        !outcome.success(),
+        "the platform has no `append(double)` yet"
+    );
+    assert!(
+        outcome
+            .messages
+            .iter()
+            .any(|message| message.contains("java.lang.StringBuilder.append(double)")),
+        "the report names the overload it asked for: {:?}",
+        outcome.messages
+    );
+}
+
 /// One link name cannot be two modules: a `wasm` dependency and a selected package that agree on
 /// a name are refused while both halves are still in hand, not at instantiation in the engine's
 /// vocabulary.
