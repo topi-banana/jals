@@ -49,7 +49,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
-use jals_hir::{DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, TypedFile};
+use jals_hir::{ClassTy, DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, TypedFile};
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_DECL,
     FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
@@ -127,6 +127,31 @@ impl From<crate::facts::FactError> for WasmError {
 }
 
 type Result<T> = core::result::Result<T, WasmError>;
+
+/// The parameter an `append` overload has to take, for one operand of a concatenation.
+///
+/// The operand's *static* type names one overload and no other (JLS §15.18.1), and the two shapes
+/// a parameter can have are a primitive — matched by the primitive itself — and a class, matched by
+/// fully-qualified name. A class is not matched by identity because the same class has two
+/// spellings in one index: a name written in source resolves to the class the index holds, while a
+/// `String` inferred as an operand's type may be the *external* one the operator synthesised.
+enum Appended {
+    /// A primitive parameter, matched exactly — except that `byte` and `short` have already become
+    /// `int` by the time a concatenation sees them, so `Appended::Primitive` never holds either.
+    Primitive(Primitive),
+    /// A class parameter, matched by fully-qualified name.
+    Named(&'static str),
+}
+
+impl Appended {
+    /// The spelling a diagnostic uses for the overload that is missing.
+    fn name(&self) -> alloc::string::String {
+        match self {
+            Self::Primitive(primitive) => alloc::format!("{}", Ty::Primitive(*primitive)),
+            Self::Named(name) => (*name).to_owned(),
+        }
+    }
+}
 
 /// A method the module defines: where its body is and what it compiled to.
 struct Method {
@@ -5114,6 +5139,13 @@ impl Lowering<'_> {
         }
         let op = Self::num_op(operator).ok_or(WasmError::Unsupported("this binary operator"))?;
 
+        // A `+` whose result is a `String` is concatenation, not addition, and it shares this node
+        // kind. Asked of the recorded type rather than required of it: `someInteger + 1`'s result is
+        // an `int` that inference leaves unknown, and an unknown result is certainly not a `String`.
+        if op == NumOp::Add && self.is_string_node(binary.syntax()) {
+            return self.concat(&left, &right, insn);
+        }
+
         // A reference `==` / `!=` is identity, not arithmetic, and wasm spells it `ref.eq`.
         if matches!(op, NumOp::Eq | NumOp::Ne) && self.is_reference(left.syntax()) {
             return self.reference_equality(&left, &right, op == NumOp::Ne, insn);
@@ -5216,6 +5248,239 @@ impl Lowering<'_> {
             insn.i32_eqz();
         }
         Ok(ValType::I32)
+    }
+
+    /// `left + right` where the result is a `String`: the builder chain the JVM backend emits,
+    /// over whichever `java.lang.StringBuilder` the index resolved.
+    ///
+    /// A concatenation is not arithmetic, and the builder is why: which rendering an operand gets
+    /// is decided by its *static* type — a `long` appends as a `long`, a `char` as a character
+    /// rather than its code point — and the class that knows those renderings is `java.base`, not
+    /// this backend. The calls below are imports from the linked platform, so a module that links
+    /// nothing declaring `java.lang.StringBuilder` is refused with the overload it asked for,
+    /// rather than getting a silent wrong rendering.
+    ///
+    /// The chain is flattened along the left spine, as the JVM lowering flattens it: `a + b + c`
+    /// is one builder with three appends, so a loop of concatenations stays linear. Parentheses
+    /// group the *tree*, not the chain — `("a" + 1) + 2` is still one builder.
+    fn concat(&mut self, left: &ast::Expr, right: &ast::Expr, insn: &mut Insn) -> Result<ValType> {
+        let builder = self.string_builder()?;
+        let slot = self.builder_start(builder, insn)?;
+        self.builder_append(builder, slot, left, insn)?;
+        self.builder_append(builder, slot, right, insn)?;
+        self.builder_string(builder, slot, insn)
+    }
+
+    /// The `java.lang.StringBuilder` the index resolved, or a refusal naming it.
+    fn string_builder(&self) -> Result<ItemId> {
+        self.index
+            .item_by_fqn("java.lang.StringBuilder")
+            .ok_or_else(|| WasmError::Unresolved("java.lang.StringBuilder".to_owned()))
+    }
+
+    /// `new StringBuilder()`, left in a fresh local; the slot is returned.
+    ///
+    /// Two shapes again, and the boundary decides which: a consumer calls the factory the ABI
+    /// exports, which allocates and runs the constructor, while a module that *owns* the class
+    /// allocates here and calls the constructor with the object underneath it.
+    fn builder_start(&mut self, builder: ItemId, insn: &mut Insn) -> Result<u32> {
+        let missing = || WasmError::Unresolved("java.lang.StringBuilder.<init>()".to_owned());
+        let constructor = self
+            .index
+            .own_members(builder)
+            .iter()
+            .copied()
+            .find(|&id| {
+                self.index.member(id).kind == DefKind::Constructor
+                    && self.index.resolved_param_tys(id).is_empty()
+            })
+            .ok_or_else(missing)?;
+        let ty = self.layout.class_ref(builder)?;
+        let slot = self.scratch(ty);
+        if let Some(&factory) = self.layout.external_constructors.get(&constructor) {
+            insn.call(factory).local_set(slot);
+            return Ok(slot);
+        }
+        let structure = self
+            .layout
+            .structs
+            .get(&builder)
+            .copied()
+            .ok_or_else(|| WasmError::NoRepresentation("java.lang.StringBuilder".to_owned()))?;
+        let function = self
+            .layout
+            .functions
+            .get(&constructor)
+            .copied()
+            .ok_or_else(missing)?;
+        insn.struct_new_default(structure).local_set(slot);
+        insn.local_get(slot).call(function);
+        Ok(slot)
+    }
+
+    /// Append one operand of a chain, flattening a nested concatenation into the same builder.
+    fn builder_append(
+        &mut self,
+        builder: ItemId,
+        slot: u32,
+        expr: &ast::Expr,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        // A parenthesised expression groups the tree, not the chain.
+        let unwrapped;
+        let expr = match expr {
+            ast::Expr::Paren(paren) => {
+                unwrapped = paren
+                    .expr()
+                    .ok_or(WasmError::Unsupported("an empty parenthesis"))?;
+                &unwrapped
+            }
+            _ => expr,
+        };
+        if let ast::Expr::Binary(binary) = expr
+            && Operator::binary(binary.syntax()) == Some(Operator::Add)
+            && self.is_string_node(binary.syntax())
+        {
+            let left = binary
+                .lhs()
+                .ok_or(WasmError::Unsupported("a binary with no left operand"))?;
+            let right = binary
+                .rhs()
+                .ok_or(WasmError::Unsupported("a binary with no right operand"))?;
+            self.builder_append(builder, slot, &left, insn)?;
+            return self.builder_append(builder, slot, &right, insn);
+        }
+        let ty = self
+            .input
+            .type_of_expr(Facts::span(expr.syntax()))
+            .cloned()
+            .ok_or(WasmError::Unsupported(
+                "a concatenation operand with no inferred type",
+            ))?;
+        insn.local_get(slot);
+        self.expr(expr, insn)?.ok_or(WasmError::Unsupported(
+            "a concatenation operand with no value",
+        ))?;
+        self.append_top(builder, &ty, insn)
+    }
+
+    /// `builder.toString()`, leaving a `String` on the stack.
+    fn builder_string(&self, builder: ItemId, slot: u32, insn: &mut Insn) -> Result<ValType> {
+        let missing = || WasmError::Unresolved("java.lang.StringBuilder.toString()".to_owned());
+        let to_string = self
+            .index
+            .own_members(builder)
+            .iter()
+            .copied()
+            .find(|&id| {
+                let info = self.index.member(id);
+                info.kind == DefKind::Method
+                    && !info.modifiers.is_static
+                    && info.name == "toString"
+                    && self.index.resolved_param_tys(id).is_empty()
+            })
+            .ok_or_else(missing)?;
+        let function = self
+            .layout
+            .functions
+            .get(&to_string)
+            .copied()
+            .ok_or_else(missing)?;
+        insn.local_get(slot).call(function);
+        let string = self
+            .index
+            .item_by_fqn("java.lang.String")
+            .ok_or_else(|| WasmError::NoRepresentation("java.lang.String".to_owned()))?;
+        self.layout.class_ref(string)
+    }
+
+    /// Call the `append` overload the operand's static type names, with the builder and the value
+    /// already on the stack.
+    fn append_top(&self, builder: ItemId, ty: &Ty, insn: &mut Insn) -> Result<()> {
+        let member = self.append_overload(builder, ty)?;
+        let function = self.layout.functions.get(&member).copied().ok_or_else(|| {
+            let info = self.index.member(member);
+            WasmError::Unresolved(alloc::format!(
+                "{}.{}",
+                self.index.item(info.owner).fqn,
+                info.name
+            ))
+        })?;
+        insn.call(function).drop();
+        Ok(())
+    }
+
+    /// The `append` overload one concatenation operand needs.
+    ///
+    /// The choice is §15.18.1's: the operand's own type names the overload, and only that overload.
+    /// A `byte` or a `short` has none of its own — the JLS widens it to `int` first — and a
+    /// reference that is not a `String` goes to `append(Object)`, which is the one that runs
+    /// `String.valueOf` and renders a `null` as `"null"` rather than throwing.
+    fn append_overload(&self, builder: ItemId, ty: &Ty) -> Result<MemberId> {
+        let wanted = self.appended(ty);
+        let member = self.index.own_members(builder).iter().copied().find(|&id| {
+            let info = self.index.member(id);
+            info.kind == DefKind::Method
+                && !info.modifiers.is_static
+                && info.name == "append"
+                && matches!(
+                    self.index.resolved_param_tys(id).as_slice(),
+                    [only] if self.appended_matches(only, &wanted)
+                )
+        });
+        member.ok_or_else(|| {
+            WasmError::Unresolved(alloc::format!(
+                "java.lang.StringBuilder.append({})",
+                wanted.name()
+            ))
+        })
+    }
+
+    /// The overload shape one operand's static type names.
+    fn appended(&self, ty: &Ty) -> Appended {
+        match ty {
+            Ty::Primitive(Primitive::Byte | Primitive::Short) => {
+                Appended::Primitive(Primitive::Int)
+            }
+            Ty::Primitive(primitive) => Appended::Primitive(*primitive),
+            _ if self.is_string_ty(ty) => Appended::Named("java.lang.String"),
+            _ => Appended::Named("java.lang.Object"),
+        }
+    }
+
+    /// Whether a resolved parameter type is the overload shape one operand names.
+    fn appended_matches(&self, param: &Ty, wanted: &Appended) -> bool {
+        match (param, wanted) {
+            (Ty::Primitive(param), Appended::Primitive(wanted)) => param == wanted,
+            (Ty::Class(_), Appended::Named(name)) => self.class_name(param) == Some(*name),
+            _ => false,
+        }
+    }
+
+    /// Whether `ty` is `java.lang.String`, however it was named.
+    ///
+    /// Both spellings count, for the reason the JVM backend's twin gives: a concatenation's own
+    /// type comes out of inference as an *external* `String` — the operator synthesises it rather
+    /// than reading it off a declaration — while a name written in source resolves to the class the
+    /// index holds.
+    fn is_string_ty(&self, ty: &Ty) -> bool {
+        matches!(self.class_name(ty), Some("String" | "java.lang.String"))
+    }
+
+    /// Whether the expression's recorded type is a `String`.
+    fn is_string_node(&self, node: &SyntaxNode) -> bool {
+        self.input
+            .type_of_expr(Facts::span(node))
+            .is_some_and(|ty| self.is_string_ty(ty))
+    }
+
+    /// The fully-qualified name a class type has, resolved where the index can be.
+    fn class_name<'t>(&'t self, ty: &'t Ty) -> Option<&'t str> {
+        match ty {
+            Ty::Class(ClassTy::Project { id, .. }) => Some(self.index.item(*id).fqn.as_str()),
+            Ty::Class(ClassTy::External { name, .. }) => Some(name.as_str()),
+            _ => None,
+        }
     }
 
     /// `e instanceof T`.
@@ -5452,7 +5717,29 @@ impl Lowering<'_> {
             place.store(insn, keep);
         } else {
             let operation = Self::compound_operator(assignment.syntax())?;
-            self.compound(&place, &target, &value, operation, keep, insn)?;
+            // A `String +=` is a concatenation, not arithmetic: it is `s = s + value`, and the
+            // builder does the rendering. Caught here because `compound`'s first act is
+            // `num_of(target)`, which has no answer for a `String`.
+            if operation == NumOp::Add && self.is_string_node(target.syntax()) {
+                place.address(insn);
+                let ty = self
+                    .input
+                    .type_of_expr(Facts::span(target.syntax()))
+                    .cloned()
+                    .ok_or(WasmError::Unsupported(
+                        "a concatenation target with no inferred type",
+                    ))?;
+                let builder = self.string_builder()?;
+                let slot = self.builder_start(builder, insn)?;
+                insn.local_get(slot);
+                place.read(insn);
+                self.append_top(builder, &ty, insn)?;
+                self.builder_append(builder, slot, &value, insn)?;
+                self.builder_string(builder, slot, insn)?;
+                place.store(insn, keep);
+            } else {
+                self.compound(&place, &target, &value, operation, keep, insn)?;
+            }
         }
 
         if keep { Ok(Some(place.ty())) } else { Ok(None) }

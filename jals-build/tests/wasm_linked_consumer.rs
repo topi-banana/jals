@@ -689,6 +689,44 @@ public class Main {
     );
 }
 
+/// `+` with a `String` operand is not addition: it is a builder chain, and the builder — with the
+/// rendering each overload gives its operand — is the platform's.
+///
+/// The expected string is written out and compared with `String.equals`, so a wrong rendering (a
+/// `char` appended as its code point, a `long` truncated to `int`) fails on the text and not on a
+/// length that happens to agree. `+=` goes through the same path, because it *is* `s = s + value`.
+#[test]
+fn the_platform_renders_concatenations() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        String joined = "n=" + 7 + ", ok=" + true + ", c=" + 'x' + ", big=" + 9000000000L;
+        String expected = "n=7, ok=true, c=x, big=9000000000";
+        String message = "a";
+        message += 'b';
+        message += 12;
+        int score = 0;
+        if (joined.equals(expected)) {
+            score = score + 1;
+        }
+        if (message.equals("ab12")) {
+            score = score + 2;
+        }
+        return score;
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    // Both: the flattened chain rendered every operand by its own type, and `+=` built `"ab12"`.
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(3)])
+    );
+}
+
 /// One link name cannot be two modules: a `wasm` dependency and a selected package that agree on
 /// a name are refused while both halves are still in hand, not at instantiation in the engine's
 /// vocabulary.
