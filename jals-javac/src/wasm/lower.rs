@@ -432,25 +432,6 @@ impl CompileWasm {
             &mut inner_items,
             &mut captured_items,
         )?;
-        // A project class may not extend a linked library's class: the constructor chain would
-        // have to call the library's factory *as a super constructor*, and the factory allocates
-        // — there is no `this` to pass. Reported here, where the class is, rather than at the
-        // `super()` that would fail with a call the library never exported.
-        for &item in &classes {
-            let mut seen = BTreeSet::new();
-            let mut parent = index.direct_superclass(item);
-            while let Some(ancestor) = parent {
-                if layout.external_classes.contains_key(&ancestor) {
-                    return Err(WasmError::Unsupported(
-                        "a class extending a linked library's class",
-                    ));
-                }
-                if !seen.insert(ancestor) {
-                    break;
-                }
-                parent = index.direct_superclass(ancestor);
-            }
-        }
         for (item, enclosing) in inner_items {
             layout.inner.insert(item, enclosing);
         }
@@ -671,6 +652,8 @@ impl CompileWasm {
     ///
     /// - A **constructor** takes a `this` and returns nothing, which no consumer can call. A
     ///   factory is synthesized beside it: allocate, run the constructor, hand back the object.
+    ///   Its *body* is exported too, under the factory's key with `#init` appended, because a
+    ///   consumer's `super(…)` has an object already and the factory would allocate a second one.
     /// - A **`static` field** is a wasm global in this module, and a global's name is not a Java
     ///   signature. An accessor pair is synthesized instead, each triggering the class's
     ///   initialiser first — the same thing an in-module read does.
@@ -721,8 +704,21 @@ impl CompileWasm {
                         .exports
                         .push((key.clone(), ExportKind::Func, factory));
                     functions.push(ExportType {
-                        name: key,
+                        name: key.clone(),
                         type_index,
+                    });
+                    // The body beside the factory. A consumer's `super(…)` has an object already
+                    // and the factory would allocate a second one, so the constructor's own
+                    // `(this, arguments…) -> ()` shape is exported too, under a name the consumer
+                    // derives from the same key.
+                    let init_key = Self::initializer_key(&key);
+                    let body_type = Self::defined_type_index(module, function, first_defined)?;
+                    module
+                        .exports
+                        .push((init_key.clone(), ExportKind::Func, function));
+                    functions.push(ExportType {
+                        name: init_key,
+                        type_index: body_type,
                     });
                 }
                 _ => {}
@@ -777,7 +773,14 @@ impl CompileWasm {
                     .local_get(0)
                     .struct_set(structure, field);
             }
-            if let Some(&init) = layout.default_constructors.get(&item) {
+            // The initialisers to run are not always this class's: a class with none of its own
+            // still runs its nearest ancestor's, and the in-module `new` asks the same question
+            // through [`Body::inherited_initialiser`] — shared here so a factory and a `new`
+            // cannot disagree about which chain runs. A library subclass whose initialisers all
+            // live in an ancestor runs none of them when this asks only about the class itself,
+            // and the object comes out with every inherited field at its default.
+            let initializer = Body::inherited_initialiser(item, index, layout)?;
+            if let Some(init) = initializer {
                 insn.local_get(slot).call(init);
             }
             insn.local_get(slot);
@@ -795,9 +798,23 @@ impl CompileWasm {
                 .exports
                 .push((key.clone(), ExportKind::Func, factory));
             functions.push(ExportType {
-                name: key,
+                name: key.clone(),
                 type_index: factory_ty,
             });
+            // What the factory ran is also what a consumer's implicit `super()` runs, so the
+            // function is exported for it under the initializer key, exactly as a declared
+            // constructor's body is.
+            if let Some(init) = initializer {
+                let init_key = Self::initializer_key(&key);
+                let type_index = Self::defined_type_index(module, init, first_defined)?;
+                module
+                    .exports
+                    .push((init_key.clone(), ExportKind::Func, init));
+                functions.push(ExportType {
+                    name: init_key,
+                    type_index,
+                });
+            }
         }
 
         // A `static` field is module state; the surface is a getter and a setter.
@@ -917,6 +934,15 @@ impl CompileWasm {
             interfaces,
             functions,
         })
+    }
+
+    /// The export name of a constructor's **body**, beside the factory that allocates and calls it.
+    ///
+    /// One more `#` than a member key ever has — a key holds exactly one — so the pair cannot
+    /// collide with each other or with a method's, and the two consumers that derive the name (this
+    /// module's export loop and a consumer's import loop) both derive it from the same key.
+    fn initializer_key(key: &str) -> String {
+        alloc::format!("{key}#init")
     }
 
     /// The type index a defined function carries, which is what an export entry records.
@@ -1055,6 +1081,19 @@ impl CompileWasm {
             layout
                 .external_classes
                 .insert(item, library.name.to_owned());
+            // The struct's field list is kept beside it, as the prefix a project subclass has to
+            // extend: its own fields have to start after exactly this many slots, and the list is
+            // the library's own answer — synthetic entries included — rather than a re-derivation
+            // from the declarations. See [`Slot::External`].
+            let type_index =
+                usize::try_from(base.saturating_add(class.index)).unwrap_or(usize::MAX);
+            if let Some(CompType::Struct(fields)) =
+                module.types().get(type_index).map(|ty| &ty.comp)
+            {
+                layout
+                    .fields
+                    .insert(item, fields.iter().copied().map(Slot::External).collect());
+            }
             // The enclosing link is replayed too: an inner class the project constructs is reached
             // as `outer.new Inner()`, and the factory's first parameter is the enclosing instance.
             if let Some(outer) = class
@@ -1188,10 +1227,24 @@ impl CompileWasm {
                             };
                             let function = module.add_shared_import(
                                 library.name.to_owned(),
-                                key,
+                                key.clone(),
                                 local.saturating_add(base),
                             );
                             layout.external_constructors.insert(member, function);
+                            // The body beside the factory, for the `super(…)` that has an object
+                            // already. A library compiled before this carried no such export; the
+                            // consumer then simply has no initializer to call, which is the same
+                            // state the refusal above it describes.
+                            let init_key = Self::initializer_key(&key);
+                            let Some(local) = library.abi.export_type(&init_key) else {
+                                continue;
+                            };
+                            let function = module.add_shared_import(
+                                library.name.to_owned(),
+                                init_key,
+                                local.saturating_add(base),
+                            );
+                            layout.external_initializers.insert(member, function);
                         }
                         DefKind::Field if info.modifiers.is_static => {
                             let owner = Descriptor::internal_name_of(item, index);
@@ -1429,7 +1482,10 @@ impl CompileWasm {
                     .flatten()
                     .filter_map(|slot| match slot {
                         Slot::Declared(member) => Some(*member),
-                        Slot::Enclosing(_) | Slot::Capture(_) => None,
+                        // A library's replayed fields and the synthetic ones carry no Java member
+                        // this module can name, so a record's components — the ones it declared —
+                        // are exactly the declared slots.
+                        Slot::External(_) | Slot::Enclosing(_) | Slot::Capture(_) => None,
                     })
                     .collect();
 
@@ -2139,6 +2195,13 @@ struct Layout {
     external_classes: BTreeMap<ItemId, String>,
     /// A linked library's constructors: the factory import that allocates and runs one.
     external_constructors: BTreeMap<MemberId, u32>,
+    /// A linked library's constructor *bodies*: the import a `super(…)` calls to initialise an
+    /// object that already exists.
+    ///
+    /// The factory beside it allocates, so it cannot be handed the `this` a constructor invocation
+    /// has; the body is the same `(this, arguments…) -> ()` function an in-module constructor is,
+    /// exported under a name of its own.
+    external_initializers: BTreeMap<MemberId, u32>,
     /// A linked library's `static` fields: the accessor imports a read and a write call.
     external_statics: BTreeMap<MemberId, (u32, u32)>,
 }
@@ -2170,6 +2233,19 @@ enum Arg<'e> {
 enum Slot {
     /// A field the source declared.
     Declared(MemberId),
+    /// One field of a linked library's class, kept as the wasm type — and mutability — the library
+    /// declared it with.
+    ///
+    /// The slots were laid out by the library's own compile, synthetic entries and all, and the
+    /// replayed struct type *is* that layout's answer, so the field is read from it rather than
+    /// rebuilt from the declarations: rebuilding would guess at the order, and a wrong guess is a
+    /// subtype whose fields do not extend its supertype's, which the validator refuses.
+    ///
+    /// The member is deliberately not recorded. An inherited library field therefore still reports
+    /// the missing capability it always did — this module cannot name the slot — and what the entry
+    /// is *for* is position: a project subclass's own fields have to start after exactly this many
+    /// slots.
+    External(FieldType),
     /// The enclosing instance an inner class holds, and the type of it.
     Enclosing(ItemId),
     /// One local a local or anonymous class captured, with the type it was captured at — read from
@@ -2276,17 +2352,32 @@ impl Layout {
         let slots = self.fields.get(&item).cloned().unwrap_or_default();
         let mut fields = Vec::with_capacity(slots.len());
         for slot in &slots {
-            let ty = match slot {
-                Slot::Declared(member) => self.val_type(&index.resolved_member_ty(*member))?,
-                Slot::Enclosing(enclosing) => self.class_ref(*enclosing)?,
-                Slot::Capture(ty) => self.val_type(ty)?,
+            let field = match slot {
+                Slot::Declared(member) => {
+                    let ty = self.val_type(&index.resolved_member_ty(*member))?;
+                    FieldType {
+                        storage: StorageType::Val(ty),
+                        // Every Java field is assignable unless `final`, and even a `final` one is
+                        // written once by a constructor — after `struct.new_default` has already
+                        // made it.
+                        mutable: true,
+                    }
+                }
+                Slot::Enclosing(enclosing) => FieldType {
+                    storage: StorageType::Val(self.class_ref(*enclosing)?),
+                    mutable: true,
+                },
+                Slot::Capture(ty) => FieldType {
+                    storage: StorageType::Val(self.val_type(ty)?),
+                    mutable: true,
+                },
+                // A library's field is copied exactly as the library declared it, mutability
+                // included: a mutable field is invariant in wasm's declared subtyping, so
+                // recomputing either half would put a field here that does not extend the
+                // supertype's — a module the validator refuses.
+                Slot::External(field) => *field,
             };
-            fields.push(FieldType {
-                storage: StorageType::Val(ty),
-                // Every Java field is assignable unless `final`, and even a `final` one is written
-                // once by a constructor — after `struct.new_default` has already made it.
-                mutable: true,
-            });
+            fields.push(field);
         }
         module.set_type(
             type_index,
@@ -2620,11 +2711,24 @@ impl Layout {
     /// declaration order. The data is reachable — the struct is shared — but only through the
     /// library's own methods, so the report says what is missing rather than pretending a field
     /// of a class that exists in the index is not there.
-    fn field_slot_or(&self, owner: ItemId, member: MemberId, name: String) -> Result<u32> {
+    fn field_slot_or(
+        &self,
+        index: &ProjectIndex,
+        owner: ItemId,
+        member: MemberId,
+        name: String,
+    ) -> Result<u32> {
         if let Some(slot) = self.field_slot(owner, member) {
             return Ok(slot);
         }
-        if self.external_classes.contains_key(&owner) {
+        // The *declaring* class, not the receiver's. A project class that inherits a library field
+        // reaches here with an owner this module lays out, and reporting the name as unresolved
+        // would send a reader looking for a typo in legal Java; the slot is the library's — its
+        // position came with the replayed struct and its member name deliberately did not.
+        if self
+            .external_classes
+            .contains_key(&index.member(member).owner)
+        {
             return Err(WasmError::Unsupported(
                 "an instance field of a linked library class",
             ));
@@ -3058,6 +3162,38 @@ impl Body {
         for item in core::iter::successors(layout.parent_item.get(&owner).copied(), |&item| {
             layout.parent_item.get(&item).copied()
         }) {
+            // A linked library's class is where the walk stops, because its own compile already
+            // ran its whole chain: each constructor body — declared or the synthesised one that
+            // runs the initialisers — was exported under its own key, and the one to call is the
+            // same one the library's `new` would have called.
+            if layout.external_classes.contains_key(&item) {
+                let mut declared = index
+                    .own_members(item)
+                    .iter()
+                    .copied()
+                    .filter(|&member| {
+                        let info = index.member(member);
+                        info.kind == DefKind::Constructor && info.name_range != (0..0)
+                    })
+                    .peekable();
+                if declared.peek().is_some() {
+                    return declared
+                        .find(|&member| index.member(member).params.is_empty())
+                        .and_then(|member| layout.external_initializers.get(&member).copied())
+                        .map(|function| (item, function));
+                }
+                // No declared constructor: the library synthesised one exactly when there was
+                // something to run — its own initialisers or an ancestor's — so the answer is that
+                // export, and its absence is "nothing to run" rather than "keep climbing". The
+                // library's own chain, whatever it held, was compiled into that one function.
+                return index
+                    .own_members(item)
+                    .iter()
+                    .copied()
+                    .find(|&member| index.member(member).kind == DefKind::Constructor)
+                    .and_then(|member| layout.external_initializers.get(&member).copied())
+                    .map(|function| (item, function));
+            }
             let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared
@@ -4904,7 +5040,7 @@ impl Lowering<'_> {
         let item = self.load_unqualified_receiver(self.index.member(member).owner, insn)?;
         let slot = self
             .layout
-            .field_slot_or(item, member, text.trim().to_owned())?;
+            .field_slot_or(self.index, item, member, text.trim().to_owned())?;
         insn.struct_get(self.layout.structs[&item], slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
     }
@@ -5057,9 +5193,12 @@ impl Lowering<'_> {
         // At the owner's type, for the reason a call's receiver is: `struct.get` names one struct.
         let receiver_ty = self.layout.class_ref(owner)?;
         self.expr_as(&receiver, receiver_ty, insn)?;
-        let slot = self
-            .layout
-            .field_slot_or(owner, member, access.field().unwrap_or_default())?;
+        let slot = self.layout.field_slot_or(
+            self.index,
+            owner,
+            member,
+            access.field().unwrap_or_default(),
+        )?;
         insn.struct_get(self.layout.structs[&owner], slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
     }
@@ -6022,9 +6161,12 @@ impl Lowering<'_> {
                     self.ensure_initialised(member, insn);
                     return Ok(Place::Global { index: global, ty });
                 }
-                let slot =
-                    self.layout
-                        .field_slot_or(owner, member, access.field().unwrap_or_default())?;
+                let slot = self.layout.field_slot_or(
+                    self.index,
+                    owner,
+                    member,
+                    access.field().unwrap_or_default(),
+                )?;
                 let receiver = access.receiver().ok_or(WasmError::Unsupported(
                     "a field assignment with no receiver",
                 ))?;
@@ -6925,6 +7067,15 @@ impl Lowering<'_> {
         // interface call, which named the wrong problem.
         let function = match self.layout.functions.get(&member).copied() {
             Some(function) => function,
+            // A `super(…)` whose superclass came from a linked library. The library exports the
+            // constructor's *body* beside the factory precisely for this: the factory allocates,
+            // and this object already exists. The shape is the same `(this, arguments…) -> ()` an
+            // in-module constructor has, so the receiver and argument pushing below is unchanged.
+            None if info.kind == DefKind::Constructor
+                && self.layout.external_initializers.contains_key(&member) =>
+            {
+                self.layout.external_initializers[&member]
+            }
             // No function, the call is a *dispatch*, and the owner is a class this module lays
             // out: the method has no body anywhere in the module and nothing above overrides it, so
             // no object carrying an implementation can exist here and the call is dynamically

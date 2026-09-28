@@ -275,6 +275,173 @@ fn a_project_constructs_a_linked_inner_class_through_its_outer_instance() {
     );
 }
 
+/// A project class extends a linked library's class.
+///
+/// The layout is split across the two modules and neither half is guessed: the replayed struct
+/// carries the library's fields — synthetic entries and all — and they become the prefix the
+/// project's own fields follow, which is what wasm's declared subtyping requires. Construction is
+/// likewise two calls: the project's constructor runs, and its `super(x, y)` calls the library
+/// constructor's *body* — exported under the factory's key with `#init` appended, because the
+/// factory allocates and this object already exists. `tag` and `weight` are fields of the
+/// subclass, so the answer also says the project's own slots landed *after* the library's rather
+/// than on top of them.
+const SUBCLASS_LIBRARY: &str = r"
+package demo;
+
+public class Point {
+    protected int x;
+    protected int y;
+
+    public Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    public int sum() {
+        return this.x + this.y;
+    }
+}
+";
+
+const SUBCLASS_PROJECT: &str = r"
+package app;
+
+import demo.Point;
+
+public class Main {
+    public static int run() {
+        Tagged p = new Tagged(3, 4, 5);
+        return p.sum() * 100 + p.tag() * 10 + p.weight();
+    }
+}
+
+class Tagged extends Point {
+    private int tag;
+    private int weight = 2;
+
+    Tagged(int x, int y, int tag) {
+        super(x, y);
+        this.tag = tag;
+    }
+
+    int tag() {
+        return this.tag;
+    }
+
+    int weight() {
+        return this.weight;
+    }
+}
+";
+
+#[test]
+fn a_project_class_extends_a_linked_class_and_calls_super() {
+    assert_eq!(
+        linked_run(SUBCLASS_PROJECT, &[("demo/Point.java", SUBCLASS_LIBRARY)]),
+        // 7 * 100 + 5 * 10 + 2
+        752
+    );
+}
+
+/// The same arrangement with no constructor written anywhere in the project or the middle of the
+/// library's own chain.
+///
+/// `Middle` declares nothing and initialises nothing, so its own implicit constructor *is* its
+/// ancestor's initialisers; the project subclass's implicit `super()` reaches that same export.
+/// And `Mine` has one initialiser of its own, so its synthesized constructor has to run the
+/// library chain first and then its own `own = 5` — the order JLS §12.5 requires.
+const CHAIN_BASE: &str = r"
+package demo;
+
+public class Base {
+    protected int base = 7;
+
+    public int value() {
+        return this.base;
+    }
+}
+";
+
+const CHAIN_MIDDLE: &str = r"
+package demo;
+
+public class Middle extends Base {
+}
+";
+
+const CHAIN_PROJECT: &str = r"
+package app;
+
+import demo.Middle;
+
+public class Main {
+    public static int run() {
+        Mine m = new Mine();
+        return m.value() * 10 + m.own();
+    }
+}
+
+class Mine extends Middle {
+    private int own = 5;
+
+    int own() {
+        return this.own;
+    }
+}
+";
+
+#[test]
+fn an_inherited_initialiser_runs_through_a_linked_chain() {
+    assert_eq!(
+        linked_run(
+            CHAIN_PROJECT,
+            &[
+                ("demo/Base.java", CHAIN_BASE),
+                ("demo/Middle.java", CHAIN_MIDDLE)
+            ]
+        ),
+        // 7 * 10 + 5
+        75
+    );
+}
+
+/// A field a project class *inherits* from a linked class reports the missing capability rather
+/// than an unresolved name.
+///
+/// The slot positions travelled with the replayed struct; the members deliberately did not, so
+/// there is no wasm slot this module could name. Saying "`x` does not resolve" would send a reader
+/// looking for a typo in legal Java — the same wrong-diagnostic the direct case was pinned
+/// against, now reachable through a subclass.
+#[test]
+#[should_panic(expected = "an instance field of a linked library class")]
+fn a_field_inherited_from_a_linked_class_is_refused_by_capability() {
+    linked_run(
+        r"
+package app;
+
+import demo.Point;
+
+public class Main {
+    public static int run() {
+        Inside p = new Inside();
+        return p.probe();
+    }
+}
+
+class Inside extends Point {
+    Inside() {
+        super(0, 0);
+    }
+
+    int probe() {
+        return this.x;
+    }
+}
+",
+        &[("demo/Point.java", SUBCLASS_LIBRARY)],
+    );
+}
+
 /// An interface the library declares is a type the project can hold and call through.
 ///
 /// wasm has no interface types: a `Greeter` here is `anyref`, and what makes the local legal — and
@@ -926,6 +1093,44 @@ public class Main {
     assert_eq!(
         outcome,
         jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(60)])
+    );
+}
+
+/// The same machinery a user reaches for: a class of the project's own that extends a platform
+/// class, with the exception it names caught as the platform class above it.
+///
+/// `AppError` is laid out in the consumer, on top of the replayed `IllegalArgumentException`
+/// struct, and its `super(message)` runs the library constructor's *body* — the `#init` export —
+/// because the factory allocates and this object already exists. The catch tests the replayed
+/// supertype, so the declared chain travels: `AppError` is caught as a `RuntimeException` and
+/// `getMessage()` reads what the platform's constructor stored.
+#[test]
+fn a_project_exception_class_extends_the_platforms() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        try {
+            throw new AppError("nope");
+        } catch (RuntimeException e) {
+            return e.getMessage().length() * 10 + 1;
+        }
+    }
+}
+
+class AppError extends IllegalArgumentException {
+    AppError(String message) {
+        super(message);
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    // `"nope".length()` is 4, and the `+ 1` says the catch ran rather than an early return.
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(41)])
     );
 }
 

@@ -149,6 +149,7 @@ fn a_library_exports_its_members_under_canonical_keys() {
     let names = exports(&module);
     for expected in [
         "demo/Counter#<init>(I)V",
+        "demo/Counter#<init>(I)V#init",
         "demo/Counter#next()I",
         "demo/Counter#twice(I)I",
         "demo/Counter#TOTAL#get",
@@ -237,6 +238,41 @@ fn a_constructor_is_exported_as_a_factory() {
     );
 }
 
+/// The constructor's *body* is exported beside the factory, because a consumer's `super(…)` has
+/// an object already and the factory would allocate a second one.
+///
+/// The two exports name different functions and the pair is what distinguishes them: the factory
+/// allocates and returns the object, the body takes `this` and returns nothing. A consumer
+/// derives the body's name from the factory's key, so the mapping is a naming rule rather than a
+/// second table.
+#[test]
+fn a_constructor_body_is_exported_beside_its_factory() {
+    let (module, _) = counter();
+    let function = |name: &str| {
+        let (_, _, index) = module
+            .exports
+            .iter()
+            .find(|(exported, ..)| exported == name)
+            .unwrap_or_else(|| panic!("`{name}` is exported"));
+        *index
+    };
+    let factory = function("demo/Counter#<init>(I)V");
+    let body = function("demo/Counter#<init>(I)V#init");
+    assert_ne!(factory, body, "the body is a function of its own");
+    let defined = usize::try_from(body).expect("an index that fits")
+        - usize::try_from(module.func_index(0)).expect("a function import count that fits");
+    let body = &module.funcs[defined];
+    assert!(
+        body.body.iter().all(|instruction| !matches!(
+            instruction,
+            jals_javac::wasm::Instr::StructNewDefault(_)
+        )),
+        "the body initialises, it does not allocate: {:?}",
+        body.body
+    );
+    validate(&module.finish().expect("a module whose lengths all fit"));
+}
+
 /// A class that declares no constructor still has one (JLS §8.8.9), and the surface has to offer
 /// it: the constructor the language gives the class has no lowered function, so its factory is
 /// synthesized here — allocate, run the class's initialisers when it has any, return.
@@ -276,12 +312,20 @@ fn an_implicit_constructor_is_exported_as_a_factory() {
         "demo",
     );
     let names = exports(&module);
-    for expected in ["demo/Initialised#<init>()V", "demo/Empty#<init>()V"] {
+    for expected in [
+        "demo/Initialised#<init>()V",
+        "demo/Initialised#<init>()V#init",
+        "demo/Empty#<init>()V",
+    ] {
         assert!(
             names.iter().any(|name| name == expected),
             "expected `{expected}` among {names:?}"
         );
     }
+    assert!(
+        !names.iter().any(|name| name == "demo/Empty#<init>()V#init"),
+        "nothing to run is no body to export: {names:?}"
+    );
 
     let factory_body = |name: &str| {
         let (_, _, index) = module
@@ -312,6 +356,63 @@ fn an_implicit_constructor_is_exported_as_a_factory() {
         1,
         "the initialised factory runs the synthesized initialiser once: {:?}",
         factory_body("demo/Initialised#<init>()V")
+    );
+    validate(&module.finish().expect("a module whose lengths all fit"));
+}
+
+/// A class whose initialisers all live in an ancestor exports the **ancestor's** function as its
+/// implicit constructor's body, and its factory runs it.
+///
+/// `Stem` declares nothing and initialises nothing, so asking only about `Stem` found no body and
+/// its factory allocated without running anything — every inherited field left at its default, in
+/// a module that validates. The in-module `new` already asked the ancestor question through
+/// `inherited_initialiser`; the factory asks the same one now, which is why the two exports name
+/// the same function.
+const ROOT: &str = r"
+package demo;
+
+public class Root {
+    protected int value = 7;
+}
+";
+
+const STEM: &str = r"
+package demo;
+
+public class Stem extends Root {
+}
+";
+
+#[test]
+fn a_class_without_initialisers_exports_its_ancestor_constructor_as_its_implicit_body() {
+    let (module, _) = library_of(
+        &[("demo/Root.java", ROOT), ("demo/Stem.java", STEM)],
+        "demo",
+    );
+    let function = |name: &str| {
+        module
+            .exports
+            .iter()
+            .find(|(exported, ..)| exported == name)
+            .map_or_else(|| panic!("`{name}` is exported"), |(_, _, index)| *index)
+    };
+    assert_eq!(
+        function("demo/Stem#<init>()V#init"),
+        function("demo/Root#<init>()V#init"),
+        "the chain's initialisers are one function, exported under both keys"
+    );
+    // The factory's call is what makes the answer observable, so it is asserted rather than the
+    // equality alone: a body export nothing calls would leave `value` at zero.
+    let factory = function("demo/Stem#<init>()V");
+    let defined = usize::try_from(factory).expect("an index that fits")
+        - usize::try_from(module.func_index(0)).expect("a function import count that fits");
+    assert!(
+        module.funcs[defined]
+            .body
+            .iter()
+            .any(|instruction| matches!(instruction, jals_javac::wasm::Instr::Call(_))),
+        "the factory runs the inherited initialisers: {:?}",
+        module.funcs[defined].body
     );
     validate(&module.finish().expect("a module whose lengths all fit"));
 }

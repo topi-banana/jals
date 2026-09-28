@@ -82,7 +82,10 @@ pub struct ClassType {
 /// signature is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportType {
-    /// The export name — a member key, or an ABI name like `$jals$tag`.
+    /// The export name — a member key, or an ABI name like `$jals$tag`. A constructor's *body*
+    /// carries its factory's key with `#init` appended: one more `#` than a member key ever has,
+    /// so the two names cannot collide, and a consumer derives the body's from the same key it
+    /// already computed for the factory.
     pub(crate) name: String,
     /// The function type's local index into [`LibraryAbi::types`].
     pub(crate) type_index: u32,
@@ -108,7 +111,8 @@ pub struct LibraryAbi {
     /// local or parameter of the type, for a `default` method it imports, and for the virtual call
     /// chain that dispatches an abstract one to whichever replayed class implements it.
     pub interfaces: Vec<String>,
-    /// Every function the module exports and the type its signature occupies.
+    /// Every function the module exports and the type its signature occupies — a member's, a
+    /// constructor's factory and body, and the exception tag.
     pub(crate) functions: Vec<ExportType>,
     /// The type index each declared recursive group starts at — the boundaries a consumer must
     /// reproduce *exactly*.
