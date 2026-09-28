@@ -985,6 +985,139 @@ public class Main {
     );
 }
 
+/// A `List` is a type a project holds, an interface it calls through, and a sequence it walks.
+///
+/// Every call in the test crosses the link twice over: the receiver is an interface — `List`,
+/// `Collection`, `Iterable` — so the consumer's chain of `ref.test`s picks `ArrayList`, whose
+/// methods are imports; and the elements are `String`s from the same platform, so `equals` and
+/// `length` are imports too. What makes the chain work is the ABI's interface names: without them
+/// the local's type has no representation, and with them the dispatch is the ordinary one — no
+/// `$jals$link`, because every class that could answer was replayed from the library.
+///
+/// Each check is worth one more bit than the last, so all eight answer 255 and a failure says which
+/// one by its arithmetic. They cover the growth path (`add` past ten elements), insertion in the
+/// middle, `set` returning what was replaced, iteration to the end, and the two refusals the
+/// platform throws: a negative capacity and a `get` past the end, caught by their own classes.
+#[test]
+fn the_platform_holds_a_list() {
+    let project = r#"
+package app;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+public class Main {
+    public static int run() {
+        int score = 0;
+
+        List<String> names = new ArrayList<String>();
+        names.add("moss");
+        names.add("fern");
+        names.add(1, "lichen");
+        if (names.size() == 3 && !names.isEmpty()) {
+            score = score + 1;
+        }
+        if (names.get(1).equals("lichen")) {
+            score = score + 2;
+        }
+        String replaced = names.set(0, "stone");
+        if (replaced.equals("moss") && names.get(0).equals("stone")) {
+            score = score + 4;
+        }
+
+        Iterator<String> it = names.iterator();
+        int total = 0;
+        while (it.hasNext()) {
+            String name = it.next();
+            total = total + name.length();
+        }
+        if (total == 15) {
+            score = score + 8;
+        }
+
+        names.clear();
+        if (names.isEmpty() && names.size() == 0) {
+            score = score + 16;
+        }
+
+        try {
+            new ArrayList<String>(-1);
+        } catch (IllegalArgumentException e) {
+            score = score + 32;
+        }
+        try {
+            names.get(5);
+        } catch (IndexOutOfBoundsException e) {
+            score = score + 64;
+        }
+
+        List<String> many = new ArrayList<String>(1);
+        int i = 0;
+        while (i < 20) {
+            many.add("x");
+            i = i + 1;
+        }
+        if (many.size() == 20) {
+            score = score + 128;
+        }
+
+        return score;
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(255)])
+    );
+}
+
+/// An element-comparing method the platform leaves out is a compile error, not a wrong answer.
+///
+/// `contains` would have to run `equals` on an element that may be a consumer's object, and a
+/// library body cannot dispatch a method on a consumer type yet. The method is therefore not
+/// declared, and the call is refused while the source is in hand — the alternative, comparing with
+/// `==`, would be false for two equal strings and true only by accident of identity (`ArrayList`'s
+/// element slots are erased, and a string read off one heap is not the same object on another).
+#[test]
+fn a_container_method_the_platform_leaves_out_is_refused_by_name() {
+    let project = r#"
+package app;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Main {
+    public static int run() {
+        List<String> names = new ArrayList<String>();
+        names.add("moss");
+        if (names.contains("moss")) {
+            return 1;
+        }
+        return 0;
+    }
+}
+"#;
+
+    let selection = platform_selection();
+    let outcome = compile_against_packages(project, &selection, &[]);
+    assert!(
+        !outcome.success(),
+        "`contains` is not declared, so the call cannot resolve: {:?}",
+        outcome.messages
+    );
+    assert!(
+        outcome
+            .messages
+            .iter()
+            .any(|message| message.contains("contains")),
+        "the report names the method that was asked for: {:?}",
+        outcome.messages
+    );
+}
+
 /// The overload a concatenation operand names has to exist, and the report says which one is
 /// missing.
 ///
