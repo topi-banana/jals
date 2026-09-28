@@ -44,6 +44,7 @@
 //!   *before* the operand rather than after it.
 
 use alloc::borrow::ToOwned as _;
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
@@ -463,6 +464,12 @@ impl CompileWasm {
                 let ty = input.type_of_def(def.id).clone();
                 layout.declare_array(&ty, &mut module)?;
             }
+        }
+        // Then the string literals, whose characters are module data rather than an instruction. A
+        // segment has to exist before any body names it, and the `char[]` it copies into has to
+        // exist before that.
+        for input in inputs {
+            Self::collect_literals(input, &mut layout, &mut module)?;
         }
         // Every `native` method becomes a host import, and every import occupies the function
         // index space *before* the first defined function — so they are all declared here, in a
@@ -956,6 +963,22 @@ impl CompileWasm {
                 next += 1;
             }
             module.add_type(Self::rebase(ty, base));
+            // An array type the library declares is this module's declaration of that array type
+            // too. wasm array types are *invariant*, so a `char[]` built here and passed to a
+            // library method has to be the very type that method's signature names: a structurally
+            // equal declaration in the project's own group is a different heap type, and passing it
+            // is a module the validator refuses. Recording it here is what makes `new char[n]` in
+            // the project produce a value the library accepts.
+            if let CompType::Array(element) = &ty.comp
+                && let StorageType::Val(value) = element.storage
+                && !layout
+                    .arrays
+                    .iter()
+                    .any(|&(candidate, _)| candidate == value)
+            {
+                let index = base.saturating_add(u32::try_from(local).unwrap_or(u32::MAX));
+                layout.arrays.push((value, index));
+            }
         }
         module.begin_group();
         for class in &library.abi.classes {
@@ -1675,6 +1698,55 @@ impl CompileWasm {
         Ok(())
     }
 
+    /// Give every distinct string literal in `input` a passive data segment.
+    ///
+    /// A string literal is not a value this target can write into an instruction: it is an object
+    /// built at run time from a `char[]`, and the characters live in module *data*. So each distinct
+    /// text gets one passive segment — UTF-16 code units, because that is what a Java `String` is a
+    /// sequence of, each stored as the 4-byte `i32` a `char` is here — and the expression that names
+    /// the literal copies it out with `array.new_data`.
+    ///
+    /// Collected before any body is lowered because a data segment is module state and a body may
+    /// not add one: the module's sections are fixed by then, so the expression only reports which
+    /// segment it reads.
+    fn collect_literals(
+        input: &TypedFile<'_>,
+        layout: &mut Layout,
+        module: &mut Module,
+    ) -> Result<()> {
+        for node in input.root().descendants() {
+            let Some(literal) = ast::Literal::cast(node) else {
+                continue;
+            };
+            let Some(token) = literal.token() else {
+                continue;
+            };
+            if token.kind() != jals_syntax::SyntaxKind::STRING_LITERAL {
+                continue;
+            }
+            let text = Literal::text(token.text())?;
+            // One segment per distinct text: the same literal twice is one copy in the module, and
+            // a table of repeated labels costs what the labels cost rather than what the uses do.
+            if layout.literals.iter().any(|(value, ..)| *value == text) {
+                continue;
+            }
+            let mut bytes = Vec::with_capacity(text.len() * 4);
+            let mut units = 0u32;
+            for unit in text.encode_utf16() {
+                bytes.extend_from_slice(&i32::from(unit).to_le_bytes());
+                units += 1;
+            }
+            let data = module.add_data(bytes);
+            layout.literals.push((text, data, units));
+        }
+        // The array the literal is copied into. Idempotent, and the same type a `char[]` the source
+        // writes by hand gets — which is what lets a `String` constructor accept either.
+        if !layout.literals.is_empty() {
+            layout.declare_array(&Ty::Array(Box::new(Ty::Primitive(Primitive::Char))), module)?;
+        }
+        Ok(())
+    }
+
     /// `<owner fqn>.<member name>`, the way every diagnostic in this module names a method.
     fn member_path(member: MemberId, index: &ProjectIndex) -> String {
         let owner = index.item(index.member(member).owner).fqn.as_str();
@@ -1963,7 +2035,20 @@ struct Layout {
     class_inits: BTreeMap<ItemId, (u32, u32)>,
     /// `(element type, array type index)`. A `Vec` because `ValType` has no ordering and a program
     /// has a handful of distinct element types.
+    ///
+    /// Starts out holding every array type a linked library declares, in the library's own index
+    /// space: an array that crosses the boundary has to be the type the other side names, and a
+    /// replayed declaration is the only one that does. The project's own arrays are declared after,
+    /// and only for element types no library already provides.
     arrays: Vec<(ValType, u32)>,
+    /// Every distinct string literal in the module: its text, the passive data segment holding its
+    /// UTF-16 code units, and how many units there are.
+    ///
+    /// Keyed by text rather than by occurrence — two literals that read the same share one segment,
+    /// which is what a constant pool would do — and collected before any body is lowered because a
+    /// body cannot add a data segment: the module's is already written by then, so the expression
+    /// only reports which one it reads.
+    literals: Vec<(String, u32, u32)>,
     /// The classes a linked library declares, by item, with the library's link name. Their structs
     /// are already replayed into [`structs`](Self::structs), so `reserve_class` leaves them alone
     /// and a value of the type is a concrete reference rather than `anyref`.
@@ -4510,9 +4595,9 @@ impl Lowering<'_> {
         Ok((self.index.member(member).owner, member))
     }
 
-    fn literal(&self, literal: &ast::Literal, insn: &mut Insn) -> Result<ValType> {
+    fn literal(&mut self, literal: &ast::Literal, insn: &mut Insn) -> Result<ValType> {
         use jals_syntax::SyntaxKind::{
-            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW,
+            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, STRING_LITERAL, TRUE_KW,
         };
         let token = literal
             .token()
@@ -4521,6 +4606,12 @@ impl Lowering<'_> {
         if token.kind() == NULL_KW {
             insn.ref_null(HeapType::None);
             return Ok(ValType::Ref(RefType::nullable(HeapType::None)));
+        }
+        // A string literal is not a value the target holds: it is a `String` object built at run
+        // time from a `char[]` compiled into the module. So it too is answered before `ty_of`,
+        // which would refuse the `String` type itself rather than the operation that builds one.
+        if token.kind() == STRING_LITERAL {
+            return self.string_literal(literal.syntax(), token.text(), insn);
         }
         let ty = self.ty_of(literal.syntax())?;
         let text = token.text();
@@ -4570,6 +4661,88 @@ impl Lowering<'_> {
             }
             _ => return Err(WasmError::Unsupported("this literal kind")),
         }
+        Ok(ty)
+    }
+
+    /// Build a `String` from a string literal: its characters copied out of the module's data
+    /// section into a `char[]`, then handed to `String(char[])`.
+    ///
+    /// The constructor is the one the index resolved for `java.lang.String` — the platform's, when
+    /// a library provides it. Nothing here invents a representation for the stub: a `String` with no
+    /// constructor to run is a missing java.base, and refusing names the gap instead of building an
+    /// object whose methods would be absent.
+    ///
+    /// The two shapes are the boundary's: a linked library exports its constructor as a *factory*
+    /// that allocates and returns the object, while the module's own constructor takes a receiver
+    /// first and returns nothing, so the object is allocated here and stored while the array is
+    /// pushed underneath it.
+    fn string_literal(
+        &mut self,
+        node: &SyntaxNode,
+        source: &str,
+        insn: &mut Insn,
+    ) -> Result<ValType> {
+        // The report names the *type* the expression was inferred as, in the words every other
+        // unrepresentable type gets: a literal that cannot be built is a `String` this target has
+        // no representation for, not a missing feature of literals.
+        let name = self
+            .input
+            .type_of_expr(Facts::span(node))
+            .map_or_else(|| "String".to_owned(), alloc::string::ToString::to_string);
+        let missing = || WasmError::NoRepresentation(name.clone());
+        let item = self
+            .index
+            .item_by_fqn("java.lang.String")
+            .ok_or_else(missing)?;
+        let text = Literal::text(source)?;
+        let &(_, data, units) = self
+            .layout
+            .literals
+            .iter()
+            .find(|(value, ..)| *value == text)
+            .ok_or_else(missing)?;
+        let array = self.layout.array_type(ValType::I32).ok_or_else(missing)?;
+        let constructor = self
+            .index
+            .own_members(item)
+            .iter()
+            .copied()
+            .find(|&member| {
+                self.index.member(member).kind == DefKind::Constructor
+                    && matches!(
+                        self.index.resolved_param_tys(member).as_slice(),
+                        [Ty::Array(element)] if **element == Ty::Primitive(Primitive::Char)
+                    )
+            })
+            .ok_or_else(missing)?;
+        let count = i32::try_from(units).map_err(|_| WasmError::TooLarge)?;
+        if let Some(&factory) = self.layout.external_constructors.get(&constructor) {
+            insn.i32_const(0)
+                .i32_const(count)
+                .array_new_data(array, data);
+            insn.call(factory);
+            return self.layout.class_ref(item);
+        }
+        let ty = self.layout.class_ref(item)?;
+        let structure = self
+            .layout
+            .structs
+            .get(&item)
+            .copied()
+            .ok_or_else(missing)?;
+        let function = self
+            .layout
+            .functions
+            .get(&constructor)
+            .copied()
+            .ok_or_else(missing)?;
+        let slot = self.scratch(ty);
+        insn.struct_new_default(structure).local_set(slot);
+        insn.local_get(slot)
+            .i32_const(0)
+            .i32_const(count)
+            .array_new_data(array, data);
+        insn.call(function).local_get(slot);
         Ok(ty)
     }
 

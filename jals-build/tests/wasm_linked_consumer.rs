@@ -639,3 +639,95 @@ fn a_wasm_dependency_and_a_package_cannot_share_a_link_name() {
         outcome.messages
     );
 }
+
+/// A string literal is built by a package, not by the compiler: the characters travel as a passive
+/// data segment, `array.new_data` copies them into a `char[]`, and `java.lang.String`'s own
+/// constructor turns that into an object.
+///
+/// The library here is a *fragment* of java.base — `String` alone — which is the shape the real
+/// platform has: the compiler holds no built-in `String`, and the stub `java.lang.String` in the
+/// index is shadowed by the library's published source, so the literal, the class, and the array
+/// type all resolve to the same declarations on both sides of the link. The characters picked here
+/// say whether the data segment is read at all: `length` would be 0 from an empty array, and an
+/// off-by-one in the copy would show as the wrong code unit.
+const STRING_LIBRARY: &str = r"
+package java.lang;
+
+public class String {
+    private char[] value;
+
+    public String(char[] value) {
+        this.value = value;
+    }
+
+    public int length() {
+        return this.value.length;
+    }
+
+    public char charAt(int index) {
+        return this.value[index];
+    }
+}
+";
+
+const STRING_PROJECT: &str = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        String text = "a\tb";
+        return text.length() * 100 + text.charAt(1);
+    }
+}
+"#;
+
+/// `"a\tb"` is three code units, and the second is a tab — 9.
+#[test]
+fn a_string_literal_is_built_from_module_data_by_the_linked_package() {
+    assert_eq!(
+        linked_run(STRING_PROJECT, &[("java/lang/String.java", STRING_LIBRARY)]),
+        309
+    );
+}
+
+/// The library's own code uses a literal the same way, except that *it* holds the class: its
+/// constructor is an in-module function taking a receiver, not a factory import, so the object is
+/// allocated here and the copied `char[]` pushed underneath it. The string then crosses the
+/// boundary as an ordinary replayed reference, which is what makes a library-built `String` usable
+/// by the project that links it.
+const GREETING_LIBRARY: &str = r#"
+package demo;
+
+public class Greeting {
+    public static String text() {
+        return "ok";
+    }
+}
+"#;
+
+const GREETING_PROJECT: &str = r"
+package app;
+
+import demo.Greeting;
+
+public class Main {
+    public static int run() {
+        return Greeting.text().length() * 10 + Greeting.text().charAt(0);
+    }
+}
+";
+
+/// `"ok"` is two code units and the first is `o` — 111.
+#[test]
+fn a_library_builds_its_own_literals_and_hands_the_string_across_the_link() {
+    assert_eq!(
+        linked_run(
+            GREETING_PROJECT,
+            &[
+                ("java/lang/String.java", STRING_LIBRARY),
+                ("demo/Greeting.java", GREETING_LIBRARY),
+            ]
+        ),
+        131
+    );
+}

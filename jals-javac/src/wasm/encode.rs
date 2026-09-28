@@ -461,6 +461,12 @@ pub struct Module {
     /// `static` initialiser lives: a global's own initialiser is a constant expression and cannot
     /// compute anything.
     pub start: Option<u32>,
+    /// Passive data segments, in index order.
+    ///
+    /// Passive because there is no linear memory in this subset at all: the bytes are read by
+    /// `array.new_data` directly, which is how a Java string literal becomes the `char[]` behind a
+    /// `String`. An active segment is an initialiser for a memory, and this backend has none.
+    data: Vec<Vec<u8>>,
     /// Custom sections, written after the code section.
     ///
     /// A linked library carries its ABI in one — an artifact that travels as one file is an
@@ -490,6 +496,7 @@ impl Module {
             globals: Vec::new(),
             exports: Vec::new(),
             start: None,
+            data: Vec::new(),
             custom: Vec::new(),
         }
     }
@@ -629,6 +636,17 @@ impl Module {
             kind: ImportKind::Tag { type_index },
         });
         u32::try_from(self.tag_import_count().saturating_sub(1)).unwrap_or(u32::MAX)
+    }
+
+    /// Append a passive data segment and return the index an `array.new_data` names.
+    ///
+    /// A segment is bytes until an instruction copies out of it, and the element size is the
+    /// instruction's business: `array.new_data $charArray` reads one 4-byte little-endian `i32` per
+    /// element, so the caller writes the elements in their wasm representation rather than in
+    /// whatever encoding the Java side started from.
+    pub fn add_data(&mut self, bytes: Vec<u8>) -> u32 {
+        self.data.push(bytes);
+        u32::try_from(self.data.len() - 1).unwrap_or(u32::MAX)
     }
 
     /// Append a custom section, by name and contents.
@@ -899,6 +917,17 @@ impl Module {
             Self::section(&mut out, 9, &section);
         }
 
+        // The data count section comes *before* the code section even though the data section's own
+        // id comes after it: the format's grammar puts it there, because a validator reading a body
+        // that names a data index has to know the index space already. Omitting it while a body uses
+        // `array.new_data` makes the module invalid, which is why it is written whenever any segment
+        // exists rather than tracked per use.
+        if !self.data.is_empty() {
+            let mut section = Bytes::new();
+            section.count(self.data.len());
+            Self::section(&mut out, 12, &section);
+        }
+
         if !self.funcs.is_empty() {
             let mut section = Bytes::new();
             section.count(self.funcs.len());
@@ -917,6 +946,19 @@ impl Module {
                 section.append(&body);
             }
             Self::section(&mut out, 10, &section);
+        }
+
+        // Passive segments: flags 1, then the bytes. A flatter arrangement than an active segment's
+        // needs — there is no memory index and no offset expression, since nothing here runs one.
+        if !self.data.is_empty() {
+            let mut section = Bytes::new();
+            section.count(self.data.len());
+            for segment in &self.data {
+                section.byte(0x01);
+                section.count(segment.len());
+                section.raw(segment);
+            }
+            Self::section(&mut out, 11, &section);
         }
 
         for (name, contents) in &self.custom {
