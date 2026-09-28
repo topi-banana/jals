@@ -47,6 +47,9 @@ toml.workspace = true
 
 [dev-dependencies]
 jals-exec = { workspace = true, features = ["tokio"] }
+# The real `java.base`, so the tests that link a platform link the one a binary ships rather than a
+# fragment written for the test.
+jals-platform.workspace = true
 tempfile = "3"
 
 [lints]

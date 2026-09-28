@@ -1130,6 +1130,7 @@ dependencies = [
  "jals-hir",
  "jals-javac",
  "jals-native",
+ "jals-platform",
  "jals-progress",
  "jals-storage",
  "jals-syntax",
@@ -1335,6 +1336,17 @@ dependencies = [
 [[package]]
 name = "jals-native"
 version = "0.1.0"
+
+[[package]]
+name = "jals-platform"
+version = "0.1.0"
+dependencies = [
+ "jals-exec",
+ "jals-hir",
+ "jals-javac",
+ "jals-native",
+ "jals-syntax",
+]
 
 [[package]]
 name = "jals-playground"

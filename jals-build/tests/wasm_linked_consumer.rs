@@ -606,6 +606,89 @@ fn a_package_ships_a_modules_own_native_methods_too() {
     );
 }
 
+/// The real platform, selected by name the way `[build] native-packages` would.
+fn platform_selection() -> jals_native::NativePackageSet {
+    let mut registry = jals_native::NativeRegistry::new();
+    registry.add(jals_platform::Platform::package());
+    registry
+        .select(&[jals_platform::Platform::NAME.to_owned()])
+        .expect("the platform is registered")
+}
+
+/// Run `project` against the real platform and return what `run()` answered.
+fn run_against_platform(project: &str) -> jals_build::WasmRunOutcome {
+    let selection = platform_selection();
+    let outcome = compile_against_packages(project, &selection, &[]);
+    assert!(outcome.success(), "messages: {:?}", outcome.messages);
+    let project_bytes = outcome
+        .artifact(jals_build::JalsBackend::WASM_MODULE)
+        .expect("the compile produced a module");
+    jals_build::WasmRunner::run(&jals_build::WasmRunRequest {
+        module: project_bytes,
+        invoke: Some("run"),
+        args: &[],
+        natives: &selection.bindings(),
+        libraries: &[jals_build::WasmLibrary {
+            name: jals_platform::Platform::NAME,
+            bytes: jals_platform::Platform::MODULE,
+        }],
+        foreign: &[],
+        progress: &jals_progress::Progress::SILENT,
+    })
+    .expect("the run links and executes")
+}
+
+/// `java.base` itself, through the route a build script reaches it by.
+///
+/// The platform is a package like any other: it ships a module, the Java it publishes travels in
+/// that module's ABI section — so there is no host `java.base` anywhere in this test — and a
+/// program that selects it links it by name. What this pins is that the platform is *sufficient*
+/// for the code a script is made of: literals and the array constructor, the accessors, the builder
+/// with its overloads, and the one crossing that is easy to get wrong, a `char[]` built by the
+/// project into a constructor the library owns.
+#[test]
+fn the_platform_links_strings_and_builders() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        String text = "hello";
+        String greeting = text.concat(" world");
+        String part = greeting.substring(0, 5);
+        boolean same = part.equals(text);
+        char[] chars = new char[3];
+        chars[0] = 'a';
+        chars[1] = 'b';
+        chars[2] = 'c';
+        String abc = new String(chars);
+        chars[0] = 'z';
+        StringBuilder builder = new StringBuilder(greeting);
+        builder.append('/');
+        builder.append(part);
+        String built = builder.toString();
+        int score = built.length() * 10000 + greeting.indexOf('w') * 100;
+        if (same && abc.charAt(0) == 'a' && "abc".equals(abc)) {
+            score = score + 11;
+        }
+        if (new String().isEmpty()) {
+            score = score + 1;
+        }
+        return score;
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    // `built` is "hello world/hello" (17 code units), `indexOf('w')` is 6, the three equality
+    // checks hold (including that copying the array kept `abc` at "abc" while `chars` became
+    // "zbc"), and the empty string is empty: 170000 + 600 + 11 + 1.
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(170_612)])
+    );
+}
+
 /// One link name cannot be two modules: a `wasm` dependency and a selected package that agree on
 /// a name are refused while both halves are still in hand, not at instantiation in the engine's
 /// vocabulary.

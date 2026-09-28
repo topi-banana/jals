@@ -1,0 +1,20 @@
+[package]
+name = "jals-platform"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# The package *is* a `NativePackage`: the compiled module under the name its imports are spelled
+# with. Featureless, like every package a binary ships.
+jals-native.workspace = true
+
+[build-dependencies]
+# The compiler that produces the module this crate embeds. It runs over `src/java` at build time, so
+# a binary that ships `java.base` carries the artifact rather than a JVM.
+jals-exec.workspace = true
+jals-hir.workspace = true
+jals-javac.workspace = true
+jals-syntax.workspace = true
+
+[lints]
+workspace = true
