@@ -14,10 +14,9 @@ package java.lang;
  * the used prefix and nothing else, so a builder that once held a large string costs nothing to keep
  * afterwards.
  *
- * <p>What is <em>not</em> here yet: the {@code Object}, {@code float} and {@code double} overloads.
- * {@code append(Object)} needs the object's {@code toString} dispatched at run time, and the two
- * floating-point forms need a correct shortest-round-trip conversion; both arrive with the stacks
- * that make them honest rather than approximately right.
+ * <p>What is <em>not</em> here yet: {@code append(Object)}, which needs the object's
+ * {@code toString} dispatched at run time — and the stub {@code Object} declares no default to
+ * dispatch to — so the call is refused by name rather than appended by identity.
  */
 public class StringBuilder extends Object implements CharSequence {
 
@@ -90,6 +89,16 @@ public class StringBuilder extends Object implements CharSequence {
     /** Append {@code l} in decimal. */
     public StringBuilder append(long l) {
         return this.appendLong(l);
+    }
+
+    /** Append {@code d} as {@link Double#toString(double)} renders it. */
+    public StringBuilder append(double d) {
+        return this.append(Double.toString(d));
+    }
+
+    /** Append {@code f} as {@link Float#toString(float)} renders it. */
+    public StringBuilder append(float f) {
+        return this.append(Float.toString(f));
     }
 
     /** A new string with the builder's code units, copied out of the buffer. */

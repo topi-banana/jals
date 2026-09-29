@@ -1390,6 +1390,148 @@ public class Main {
     assert_eq!(written, "moss\n41\nno newline\ntrue\nx\n7\n");
 }
 
+/// Floating-point printing is the JDK's, to the last digit.
+///
+/// The platform's `Double.toString`/`Float.toString` take the digits from the host — the shortest
+/// decimal that reads back, and among those the nearest — and own sign, zero, infinities, and the
+/// JDK's fixed-versus-scientific notation. Every expected line below was produced by Temurin 25 on
+/// this same program, which is the only oracle that matters for "renders like Java": the corner
+/// cases are exactly the ones a shorter rule gets wrong, from `0.1 + 0.2` and the smallest
+/// subnormals (`4.9E-324`) to the shortest-form-crosses-a-decade case (`9.999999999999999E22`
+/// prints as `1.0E23`, because that *is* the same `double`).
+#[test]
+fn the_platform_renders_floats_like_the_jdk() {
+    let project = r"
+package app;
+
+public class Main {
+    public static int run() {
+        System.out.println(0.1);
+        System.out.println(0.1 + 0.2);
+        System.out.println(1.0 / 3.0);
+        System.out.println(1.0E7);
+        System.out.println(0.001);
+        System.out.println(1.0E-4);
+        System.out.println(9999999.0);
+        System.out.println(-12.34);
+        System.out.println(0.0);
+        System.out.println(-0.0);
+        System.out.println(1.0 / 0.0);
+        System.out.println(-1.0 / 0.0);
+        System.out.println(0.0 / 0.0);
+        System.out.println(4.9E-324);
+        System.out.println(1.7976931348623157E308);
+        System.out.println(2.2250738585072014E-308);
+        System.out.println(9007199254740993.0);
+        System.out.println(123456789.0);
+        System.out.println(1.0E23);
+        System.out.println(9.999999999999999E22);
+        System.out.println(1.5);
+        System.out.println(100.0);
+        System.out.println(1.0E-3);
+        System.out.println(1.0E-2);
+        System.out.println(1.2345678901234567);
+        System.out.println(3.141592653589793);
+        System.out.println(2.0E-3);
+        System.out.println(0.1f);
+        System.out.println(1.0f / 3.0f);
+        System.out.println(1.4E-45f);
+        System.out.println(3.4028235E38f);
+        System.out.println(1.1754944E-38f);
+        System.out.println(100.0f);
+        System.out.println(1.0E7f);
+        System.out.println(1.0E-4f);
+        System.out.println(-0.0f);
+        System.out.println(0.0f / 0.0f);
+        System.out.println(1.0f / 0.0f);
+        System.out.println(16777217.0f);
+        return 0;
+    }
+}
+";
+
+    let (outcome, written) = run_against_platform_capturing(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(0)])
+    );
+    let expected = "\
+0.1
+0.30000000000000004
+0.3333333333333333
+1.0E7
+0.001
+1.0E-4
+9999999.0
+-12.34
+0.0
+-0.0
+Infinity
+-Infinity
+NaN
+4.9E-324
+1.7976931348623157E308
+2.2250738585072014E-308
+9.007199254740992E15
+1.23456789E8
+1.0E23
+1.0E23
+1.5
+100.0
+0.001
+0.01
+1.2345678901234567
+3.141592653589793
+0.002
+0.1
+0.33333334
+1.4E-45
+3.4028235E38
+1.1754944E-38
+100.0
+1.0E7
+1.0E-4
+-0.0
+NaN
+Infinity
+1.6777216E7
+";
+    assert_eq!(written, expected);
+}
+
+/// A concatenation of a floating-point value lowers to the platform's `append` overload, and the
+/// consumer — not the library — is the one that calls it.
+///
+/// This is the route that has to survive the module boundary: `"ratio=" + ratio` becomes
+/// `new StringBuilder().append("ratio=").append(ratio).toString()` in the *consumer's* module, so
+/// `append(double)` and `append(float)` are imports of the platform the program links, resolved
+/// from its published Java and flattened into the same `StringBuilder` the library's own code
+/// uses.
+#[test]
+fn a_concatenation_lowers_to_the_platforms_float_overloads() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        double ratio = 1.5;
+        String text = "ratio=" + ratio;
+        System.out.println(text);
+        float half = 0.1f;
+        System.out.println("half=" + half + " third=" + (1.0f / 3.0f));
+        return text.length();
+    }
+}
+"#;
+
+    let (outcome, written) = run_against_platform_capturing(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(9)])
+    );
+    assert_eq!(written, "ratio=1.5\nhalf=0.1 third=0.33333334\n");
+}
+
 /// An element-comparing method the platform leaves out is a compile error, not a wrong answer.
 ///
 /// `contains` would have to run `equals` on an element that may be a consumer's object, and a
@@ -1437,20 +1579,19 @@ public class Main {
 /// The overload a concatenation operand names has to exist, and the report says which one is
 /// missing.
 ///
-/// A `double` names `append(double)`, which the platform has not written yet, and the JDK's
-/// fallback — boxing into `append(Object)` — is exactly what §15.18.1 says *not* to do: `"" + d`
-/// renders the decimal text, not the identity of a `Double`. So the call is refused with the
-/// method it asked for, which is a compile error at the `+`, rather than a rendering that would be
-/// almost right.
+/// A non-`String` reference names `append(Object)`, which would run the object's `toString` at run
+/// time — a dispatch into the consumer's code that a library body cannot make yet, and one the
+/// stub `Object` declares no default for. The call is therefore refused with the method it asked
+/// for, a compile error at the `+`, rather than an appended identity hash or an empty string.
 #[test]
-fn a_concatenation_names_the_overload_the_platform_must_have() {
+fn a_concatenation_names_the_overload_the_platform_leaves_out() {
     let project = r#"
 package app;
 
 public class Main {
     public static int run() {
-        double ratio = 1.5;
-        String text = "ratio=" + ratio;
+        Main marker = new Main();
+        String text = "main=" + marker;
         return text.length();
     }
 }
@@ -1460,13 +1601,13 @@ public class Main {
     let outcome = compile_against_packages(project, &selection, &[]);
     assert!(
         !outcome.success(),
-        "the platform has no `append(double)` yet"
+        "the platform has no `append(Object)` yet"
     );
     assert!(
         outcome
             .messages
             .iter()
-            .any(|message| message.contains("java.lang.StringBuilder.append(double)")),
+            .any(|message| message.contains("java.lang.StringBuilder.append(java.lang.Object)")),
         "the report names the overload it asked for: {:?}",
         outcome.messages
     );

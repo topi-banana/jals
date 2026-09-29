@@ -17,10 +17,9 @@ package java.io;
  * a surrogate pair split across two {@code print(char)} calls arrives as two code units, exactly
  * as it would through a byte stream.
  *
- * <p>What is not here yet: the {@code float} and {@code double} overloads, which need a decimal
- * renderer the platform has not chosen, and the two {@code Object} ones, which would dispatch
- * {@code toString} and inherit the stub {@code Object}'s missing default. Those calls are refused
- * by name until then rather than answered with something almost right.
+ * <p>What is not here yet: the two {@code Object} overloads, which would dispatch {@code toString}
+ * and inherit the stub {@code Object}'s missing default. The call is refused by name until then
+ * rather than answered with something almost right.
  */
 public class PrintStream extends Object {
 
@@ -69,6 +68,28 @@ public class PrintStream extends Object {
 
     /** Write {@code value} in decimal, then a line break. */
     public void println(long value) {
+        this.print(value);
+        this.println();
+    }
+
+    /** Write {@code value} as {@link Double#toString(double)} renders it, without a line break. */
+    public void print(double value) {
+        this.print(Double.toString(value));
+    }
+
+    /** Write {@code value} as {@link Double#toString(double)} renders it, then a line break. */
+    public void println(double value) {
+        this.print(value);
+        this.println();
+    }
+
+    /** Write {@code value} as {@link Float#toString(float)} renders it, without a line break. */
+    public void print(float value) {
+        this.print(Float.toString(value));
+    }
+
+    /** Write {@code value} as {@link Float#toString(float)} renders it, then a line break. */
+    public void println(float value) {
         this.print(value);
         this.println();
     }

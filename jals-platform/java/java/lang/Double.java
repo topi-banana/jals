@@ -8,12 +8,14 @@ package java.lang;
  * and {@code +0.0} is greater than {@code -0.0}. Both facts follow from the sign of a zero, which
  * {@code 1.0 / 0.0} exposes as an infinity without needing the bit pattern.
  *
- * <p>{@code doubleToLongBits}, {@code hashCode} and {@code toString} are absent until there is a
- * way to see the bits or render the decimals. A hash that ignored {@code -0.0} and {@code NaN}
- * would put two values in the same bucket that {@code equals} calls different, and a decimal
- * renderer that printed the shortest text that reads back is a format this platform has not
- * chosen yet. The calls are refused by name until then, rather than answered with something almost
- * right.
+ * <p>{@code toString} is here in full, and its digits are the one algorithmic thing this platform
+ * asks its host for: almost always the shortest decimal that reads back as the same {@code double},
+ * and among those the nearest — which needs exact arithmetic over the significand, a big-integer
+ * core in Java's own terms, rather than anything a loop over {@code double}s can decide. Everything
+ * the JDK's notation adds to those digits, and every special value, is this class's. {@code
+ * doubleToLongBits} and {@code hashCode} remain absent until there is a way to see the bits: a hash
+ * that ignored {@code -0.0} and {@code NaN} would put two values in the same bucket that
+ * {@code equals} calls different.
  */
 public class Double extends Number implements Comparable {
 
@@ -25,6 +27,45 @@ public class Double extends Number implements Comparable {
 
     public static Double valueOf(double d) {
         return new Double(d);
+    }
+
+    /**
+     * The JDK's rendering of {@code d}: almost always the shortest decimal that reads back as the
+     * same {@code double}, and among those the nearest, in the JDK's notation.
+     */
+    public static String toString(double d) {
+        if (d != d) {
+            return "NaN";
+        }
+        if (d - d != 0.0) {
+            // An infinity is the one value finite arithmetic cannot make a zero out of: `i - i`
+            // is NaN there, while every finite value subtracts to zero.
+            if (d > 0.0) {
+                return "Infinity";
+            }
+            return "-Infinity";
+        }
+        if (d == 0.0) {
+            // The sign of a zero, which `==` cannot see, through the sign of its reciprocal.
+            if (1.0 / d > 0.0) {
+                return "0.0";
+            }
+            return "-0.0";
+        }
+        boolean negative = d < 0.0;
+        double magnitude = d;
+        if (negative) {
+            magnitude = -d;
+        }
+        char[] digits = new char[32];
+        int[] point = new int[1];
+        int length = writeDigits(magnitude, digits, point);
+        return FloatingDecimal.toJavaFormatString(negative, digits, length, point[0]);
+    }
+
+    /** The JDK's rendering of this value. */
+    public String toString() {
+        return toString(this.value);
     }
 
     public double doubleValue() {
@@ -87,4 +128,17 @@ public class Double extends Number implements Comparable {
         }
         return this.value != this.value && other != other;
     }
+
+    /**
+     * Write the significant digits of {@code value} into {@code out}, the power of ten of the first
+     * one into {@code point[0]}, and return how many digits there are.
+     *
+     * <p>The one thing this class cannot compute by itself, and the reason it is a binding rather
+     * than a loop: the digits are almost always the shortest that read back as {@code value}, and
+     * among those the nearest, which takes exact arithmetic over the significand. The values that
+     * are not digits — the zeros, the infinities, the NaN — never reach here;
+     * {@link #toString(double)} answers those first, and the host refuses one that somehow does
+     * anyway.
+     */
+    private static native int writeDigits(double value, char[] out, int[] point);
 }
