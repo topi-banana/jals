@@ -1027,15 +1027,23 @@ mod tests {
             write(
                 "dep/jals.toml",
                 "[features]\nhello = []\n\
-                 [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                 [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
             );
             write(
-                "dep/build.rhai",
+                "dep/build.java",
                 r#"
-                    for name in ["hello", "root-only"] {
-                        if build.feature(name) {
-                            let source = output.write_text(name + ".java", "class X {}");
-                            build.add_source(source);
+                    import jals.build.Build;
+                    import jals.build.Output;
+
+                    class build {
+                        public static void main() {
+                            String[] names = { "hello", "root-only" };
+                            for (String name : names) {
+                                if (Build.feature(name)) {
+                                    String source = Output.writeText(name + ".java", "class X {}");
+                                    Build.addSource(source);
+                                }
+                            }
                         }
                     }
                 "#,

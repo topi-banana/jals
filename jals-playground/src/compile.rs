@@ -326,7 +326,7 @@ impl Compile {
         // The `[build.frontend]` decision — and the dialect features that override it — belongs to
         // `jals-frontend`, which is why this reads like the CLI's call rather than mirroring its
         // body. No command line in a browser, so `#[cfg(feature = "…")]` sees the manifest's own
-        // `default` list: the same selection the Rhai build script ran under. A malformed
+        // `default` list: the same selection the Java build script ran under. A malformed
         // `[features]` table degrades to the empty set here rather than failing the compile — the
         // manifest editor is live, and the build script already ran under the same fallback.
         let build_features = manifest
@@ -424,7 +424,7 @@ mod tests {
         ]
     }
 
-    /// The seed Rhai script generates a `public static final String MESSAGE = …` class, and every
+    /// The seed Java script generates a `public static final String MESSAGE = …` class, and every
     /// compile sees it — the build script runs on page load and its output joins the index. A
     /// `String`-typed `static` field must therefore be inert on *both* backends, or flipping
     /// `[build] backend` to `jals-wasm` would fail on a file the user never wrote.

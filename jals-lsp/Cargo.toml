@@ -7,7 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 async-lsp = { workspace = true, features = ["tokio"] }
 futures.workspace = true
-jals-build = { workspace = true, features = ["native", "rhai"] }
+jals-build = { workspace = true, features = ["native", "build-script"] }
 jals-classfile.workspace = true
 jals-classpath.workspace = true
 jals-config.workspace = true

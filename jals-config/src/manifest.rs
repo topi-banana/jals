@@ -3496,24 +3496,24 @@ mod tests {
     fn parses_build_script_inline_and_dotted_syntax() {
         let m: Manifest = r#"
             [build]
-            script = { type = "rhai", file = "build.rhai" }
+            script = { type = "java", file = "build.java" }
             "#
         .parse()
         .unwrap();
         assert_eq!(
             m.build.script,
-            Some(BuildScript::Rhai {
-                file: "build.rhai".to_owned(),
+            Some(BuildScript::Java {
+                file: "build.java".to_owned(),
             })
         );
 
-        let m: Manifest = "build.script = { type = \"rhai\", file = \"scripts/build.rhai\" }\n"
+        let m: Manifest = "build.script = { type = \"java\", file = \"scripts/build.java\" }\n"
             .parse()
             .unwrap();
         assert_eq!(
             m.build.script,
-            Some(BuildScript::Rhai {
-                file: "scripts/build.rhai".to_owned(),
+            Some(BuildScript::Java {
+                file: "scripts/build.java".to_owned(),
             })
         );
     }
@@ -3522,35 +3522,35 @@ mod tests {
     fn parses_build_script_table_syntax() {
         let m: Manifest = r#"
             [build.script]
-            type = "rhai"
-            file = "build.rhai"
+            type = "java"
+            file = "build.java"
             "#
         .parse()
         .unwrap();
         assert_eq!(
             m.build.script,
-            Some(BuildScript::Rhai {
-                file: "build.rhai".to_owned(),
+            Some(BuildScript::Java {
+                file: "build.java".to_owned(),
             })
         );
     }
 
     #[test]
     fn build_script_tag_name_matches_serde_tag() {
-        let script = BuildScript::Rhai {
-            file: "build.rhai".to_owned(),
+        let script = BuildScript::Java {
+            file: "build.java".to_owned(),
         };
-        assert_eq!(script.tag_name(), "rhai");
+        assert_eq!(script.tag_name(), "java");
     }
 
     #[test]
     fn build_script_rejects_missing_and_unknown_fields() {
         for text in [
-            "[build]\nscript = { file = \"build.rhai\" }\n",
-            "[build]\nscript = { type = \"rhai\" }\n",
-            "[build]\nscript = { type = \"unknown\", file = \"build.rhai\" }\n",
-            "[build]\nscript = { type = \"rhai\", file = \"build.rhai\", extra = true }\n",
-            "[build.script]\ntype = \"rhai\"\nfile = \"build.rhai\"\nextra = true\n",
+            "[build]\nscript = { file = \"build.java\" }\n",
+            "[build]\nscript = { type = \"java\" }\n",
+            "[build]\nscript = { type = \"unknown\", file = \"build.java\" }\n",
+            "[build]\nscript = { type = \"java\", file = \"build.java\", extra = true }\n",
+            "[build.script]\ntype = \"java\"\nfile = \"build.java\"\nextra = true\n",
         ] {
             assert!(
                 toml::from_str::<Manifest>(text).is_err(),
@@ -3561,9 +3561,9 @@ mod tests {
 
     #[test]
     fn build_script_file_must_be_a_non_root_portable_file_key() {
-        for file in ["../build.rhai", ""] {
+        for file in ["../build.java", ""] {
             let text =
-                alloc::format!("[build]\nscript = {{ type = \"rhai\", file = \"{file}\" }}\n");
+                alloc::format!("[build]\nscript = {{ type = \"java\", file = \"{file}\" }}\n");
             let error = text.parse::<Manifest>().unwrap_err();
             let ManifestParseError::Invalid { source, .. } = error else {
                 panic!("invalid build script file must be a validation error");
@@ -3587,11 +3587,11 @@ mod tests {
     fn build_script_file_must_be_outside_the_managed_build_root() {
         for file in [
             "target/jals/build",
-            "target/jals/build/build.rhai",
-            "target/jals/build/script/out/build.rhai",
+            "target/jals/build/build.java",
+            "target/jals/build/script/out/build.java",
         ] {
             let text =
-                alloc::format!("[build]\nscript = {{ type = \"rhai\", file = \"{file}\" }}\n");
+                alloc::format!("[build]\nscript = {{ type = \"java\", file = \"{file}\" }}\n");
             let error = text.parse::<Manifest>().unwrap_err();
             let ManifestParseError::Invalid { source, .. } = error else {
                 panic!("managed build script file must be a validation error");
@@ -3611,7 +3611,7 @@ mod tests {
         let error = r#"
             [build]
             classes-dir = "out"
-            script = { type = "rhai", file = "out/build.rhai" }
+            script = { type = "java", file = "out/build.java" }
             "#
         .parse::<Manifest>()
         .unwrap_err();
@@ -3621,7 +3621,7 @@ mod tests {
         assert_eq!(
             source,
             ValidationError::BuildScriptInClassesDir {
-                file: "out/build.rhai".to_owned(),
+                file: "out/build.java".to_owned(),
                 classes_dir: "out".to_owned(),
             }
         );
@@ -3649,7 +3649,7 @@ mod tests {
     fn rejects_an_unknown_build_key() {
         let error = r#"
             [build]
-            scripts = { type = "rhai", file = "build.rhai" }
+            scripts = { type = "java", file = "build.java" }
             "#
         .parse::<Manifest>()
         .unwrap_err();

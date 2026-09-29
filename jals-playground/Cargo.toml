@@ -11,9 +11,9 @@ yew = { git = "https://github.com/yewstack/yew/", features = ["csr"] }
 jals-classpath = { path = "../jals-classpath", default-features = false, features = [
   "archive",
 ] }
-# Portable Rhai build scripts over the playground's existing `MemoryStorage`; keep the native
-# JDK/process adapters out of the wasm graph.
-jals-build = { workspace = true, features = ["rhai", "wasm-run"] }
+# Portable Java build scripts (`build.java`) over the playground's existing `MemoryStorage`; keep
+# the native JDK/process adapters out of the wasm graph.
+jals-build = { workspace = true, features = ["build-script", "wasm-run"] }
 jals-progress.workspace = true
 jals-project.workspace = true
 jals-config = { workspace = true }

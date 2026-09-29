@@ -34,11 +34,22 @@ export function initMonaco() {
   return monacoReady;
 }
 
-// The Monaco language for `path`, by extension: TOML and Rhai pseudo-files are
-// plaintext, everything else is Java. Keeping pseudo-files off `java` also keeps
-// Java-only providers and formatting from firing on them.
+// Pseudo-files the app has declared plaintext (see `markPlaintext`), on top of the
+// extension rule below.
+const PLAINTEXT_PATHS = new Set();
+
+// Mark `path` as a plaintext pseudo-file. Must be called before its model is created: a
+// `build.java` script would otherwise select the Java language by extension, and the
+// Java-only providers would analyse the script text as if it were project Java.
+export function markPlaintext(path) {
+  PLAINTEXT_PATHS.add(path);
+}
+
+// The Monaco language for `path`: TOML and the marked pseudo-files are plaintext,
+// everything else is Java. Keeping pseudo-files off `java` also keeps Java-only
+// providers and formatting from firing on them.
 function langFor(path) {
-  return path.endsWith(".toml") || path.endsWith(".rhai")
+  return path.endsWith(".toml") || PLAINTEXT_PATHS.has(path)
     ? "plaintext"
     : "java";
 }
@@ -65,7 +76,9 @@ export function syncModels(files) {
     if (model !== active && model.getValue() !== text) model.setValue(text);
   }
   for (const [path, model] of models) {
-    if (path.endsWith(".java") && !indexed.has(path) && model !== active) {
+    // Generated Java models are the only ones `syncModels` owns; plaintext
+    // pseudo-files (including a `build.java` script) keep their models.
+    if (model.getLanguageId() === "java" && !indexed.has(path) && model !== active) {
       model.dispose();
       models.delete(path);
     }

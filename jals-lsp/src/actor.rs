@@ -1740,7 +1740,7 @@ impl AssembledWorkspace {
             limits: &limits,
         };
         // Analysis consumes what the user's own build already fetched and verified into the cache;
-        // it does not fetch. Opening a folder runs whatever `build.rhai` it contains, and nobody
+        // it does not fetch. Opening a folder runs whatever `build.java` it contains, and nobody
         // reviews a repository before opening it in an editor — reaching the network on that signal
         // alone would let an unread script pull (and send) whatever it likes the moment a project is
         // opened. `jals build` populates the cache, and the server picks it up from there.
@@ -2257,19 +2257,25 @@ mod tests {
             dir.path(),
             "dependency/jals.toml",
             "[build]\nsource-dirs = [\"src\"]\n\
-             script = { type = \"rhai\", file = \"build.rhai\" }\n",
+             script = { type = \"java\", file = \"build.java\" }\n",
         );
         write(
             dir.path(),
-            "dependency/build.rhai",
+            "dependency/build.java",
             r#"
-                let source = output.write_text(
-                    "p/Generated.java",
-                    "package p; public class Generated {}\n",
-                );
-                build.add_source(source);
-                build.add_javac_arg("-dependency-directive-must-not-propagate");
-                build.add_jvm_arg("-dependency-directive-must-not-propagate");
+                import jals.build.Build;
+                import jals.build.Output;
+
+                class build {
+                    public static void main() {
+                        String source = Output.writeText(
+                            "p/Generated.java",
+                            "package p; public class Generated {}\n");
+                        Build.addSource(source);
+                        Build.addJavacArg("-dependency-directive-must-not-propagate");
+                        Build.addJvmArg("-dependency-directive-must-not-propagate");
+                    }
+                }
             "#,
         );
         write(
@@ -2716,7 +2722,7 @@ mod tests {
     fn project_watch_policy_classifies_sources_dependencies_and_cache() {
         let root = Path::new("project");
         let manifest = root.join("jals.toml");
-        let script_path = root.join("build.rhai");
+        let script_path = root.join("build.java");
         let input_path = root.join("schema/model.json");
         let source_path = root.join("src/Main.java");
         let output_path = root.join("target/jals/build/script/out/Generated.java");
@@ -2724,7 +2730,7 @@ mod tests {
         let classpath = root.join("lib/api.jar");
         let source_dependency = root.join("deps/lib/Lib.java");
         let external_dependency = PathBuf::from("external/lib/External.java");
-        let script = FileKey::parse("build.rhai").unwrap();
+        let script = FileKey::parse("build.java").unwrap();
         let input = FileKey::parse("schema/model.json").unwrap();
         let ordinary = ProjectWatchPolicy {
             source_roots: vec![DirKey::parse("src").unwrap()],
@@ -2938,7 +2944,7 @@ mod tests {
                 .expect("the transitive dependency root is watched");
             for path in [
                 transitive_root.join("jals.toml"),
-                transitive_root.join("build.rhai"),
+                transitive_root.join("build.java"),
                 transitive_root.join("schema.rerun"),
                 transitive_root.join("src/Transitive.java"),
                 transitive_root.join("lib/local.jar"),
@@ -2959,9 +2965,9 @@ mod tests {
     #[test]
     fn build_script_diagnostics_shape_messages_and_clear_previous_state() {
         let root = tempfile::tempdir().unwrap();
-        let script = FileKey::parse("build.rhai").unwrap();
+        let script = FileKey::parse("build.java").unwrap();
 
-        // A run that called `build.error` carries every diagnostic it emitted, each under its own
+        // A run that called `Build.error` carries every diagnostic it emitted, each under its own
         // severity. The assembly decides that; this asserts the protocol shape it maps to.
         let reported = RootBuildScriptError::BuildScript(BuildScriptError::ReportedErrors(vec![
             BuildScriptDiagnostic::warning("generated fallback"),
@@ -3034,8 +3040,8 @@ mod tests {
     fn a_positioned_script_failure_points_at_the_line_it_names() {
         // The byte span the assembly resolved, converted to this protocol's coordinates — the only
         // thing this server still does with a script position.
-        let script = FileKey::parse("build.rhai").unwrap();
-        let source = "let a = 1;\nlet b = 2;\n";
+        let script = FileKey::parse("build.java").unwrap();
+        let source = "int a = 1;\nint b = 2;\n";
         let diagnostic = ProjectDiagnostic {
             anchor: ProjectAnchor::Script(script),
             span: Some(15..16),
@@ -3056,7 +3062,7 @@ mod tests {
 
         // Span-less but with the text: the placement rule puts it on the anchor's first line, which
         // is a range a client can actually show. This used to collapse to the same one-character
-        // stub as the no-text case, so `build.error("boom")` and "we could not read the script"
+        // stub as the no-text case, so `Build.error("boom")` and "we could not read the script"
         // were indistinguishable on screen.
         let span_less = ProjectDiagnostic {
             span: None,
@@ -3069,7 +3075,7 @@ mod tests {
         // And the `\r` of a CRLF script stays out of it — highlighting it would draw a character
         // the author cannot see.
         assert_eq!(
-            AssembledWorkspace::lsp_diagnostic(&span_less, Some("let a = 1;\r\nlet b = 2;\r\n"))
+            AssembledWorkspace::lsp_diagnostic(&span_less, Some("int a = 1;\r\nint b = 2;\r\n"))
                 .range,
             Range::new(Position::new(0, 0), Position::new(0, 10))
         );
@@ -3099,11 +3105,17 @@ mod tests {
             std::fs::write(
                 dir.path().join("jals.toml"),
                 "[build]\nsource-dirs = [\".\"]\n\
-                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+                 script = { type = \"java\", file = \"build.java\" }\n",
             )
             .unwrap();
-            let script = "build.warning(\"from Rhai\");\n";
-            let script_path = dir.path().join("build.rhai");
+            let script = concat!(
+                "class build {\n",
+                "    public static void main() {\n",
+                "        jals.build.Build.warning(\"from Java\");\n",
+                "    }\n",
+                "}\n",
+            );
+            let script_path = dir.path().join("build.java");
             let script_uri = Url::from_file_path(&script_path).unwrap();
             let (mut actor, mut receiver, _sender) = actor();
 
@@ -3114,7 +3126,7 @@ mod tests {
                 actor.workspaces[0]
                     .watch_policy()
                     .and_then(ProjectWatchPolicy::script),
-                Some(&FileKey::parse("build.rhai").unwrap())
+                Some(&FileKey::parse("build.java").unwrap())
             );
             actor.refresh_and_publish(&script_uri).await;
             assert!(
@@ -3132,10 +3144,20 @@ mod tests {
             std::fs::write(
                 dir.path().join("jals.toml"),
                 "[build]\nsource-dirs = [\"src\"]\n\
-                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+                 script = { type = \"java\", file = \"build.java\" }\n",
             )
             .unwrap();
-            std::fs::write(dir.path().join("build.rhai"), "build.warning(\"old\");\n").unwrap();
+            std::fs::write(
+                dir.path().join("build.java"),
+                concat!(
+                    "class build {\n",
+                    "    public static void main() {\n",
+                    "        jals.build.Build.warning(\"old\");\n",
+                    "    }\n",
+                    "}\n",
+                ),
+            )
+            .unwrap();
             let (mut actor, mut receiver, _sender) = actor();
             open(
                 &mut actor,
@@ -3179,60 +3201,99 @@ mod tests {
     }
 
     #[test]
-    fn compile_and_runtime_diagnostics_use_exact_rhai_positions() {
+    fn compile_and_runtime_diagnostics_use_exact_java_positions() {
         block_on_inline(async {
             let manifest: Manifest = r#"
                 [build]
-                script = { type = "rhai", file = "build.rhai" }
+                script = { type = "java", file = "build.java" }
             "#
             .parse()
             .unwrap();
             for (script, expected) in [
+                // A syntax error points at the expression the compiler stopped on. The in-process
+                // compiler silently recovers a malformed declaration like `int broken = ;`, so the
+                // failing statement is a `+` with no right operand — a syntax error it does report.
                 (
-                    "let valid = 1;\nlet broken = ;\n",
-                    Range::new(Position::new(1, 13), Position::new(1, 14)),
+                    concat!(
+                        "class build {\n",
+                        "    public static void main() {\n",
+                        "        int valid = 1;\n",
+                        "        int broken = 1 +;\n",
+                        "    }\n",
+                        "}\n",
+                    ),
+                    Range::new(Position::new(3, 21), Position::new(3, 22)),
                 ),
+                // An uncaught `throw` is reported at the statement it was written in.
                 (
-                    "let valid = 1;\nthrow \"boom\";\n",
-                    Range::new(Position::new(1, 0), Position::new(1, 1)),
+                    concat!(
+                        "class build {\n",
+                        "    public static void main() {\n",
+                        "        int valid = 1;\n",
+                        "        throw new IllegalStateException(\"boom\");\n",
+                        "    }\n",
+                        "}\n",
+                    ),
+                    Range::new(Position::new(3, 8), Position::new(3, 9)),
                 ),
+                // The statement after an emoji is placed by character, not by byte: the engine
+                // counts the emoji as one column even though it is four bytes of UTF-8, and this
+                // protocol then converts that byte span into UTF-16 coordinates.
                 (
-                    "let emoji = \"😀\"; throw \"boom\";\n",
-                    Range::new(Position::new(0, 18), Position::new(0, 19)),
+                    concat!(
+                        "class build {\n",
+                        "    public static void main() {\n",
+                        "        String emoji = \"😀\"; throw new IllegalStateException(\"boom\");\n",
+                        "    }\n",
+                        "}\n",
+                    ),
+                    Range::new(Position::new(2, 29), Position::new(2, 30)),
                 ),
-                // `build.error` is reported *by* the script rather than thrown by Rhai, so it
-                // carries no position at all. End to end, that lands on the script's first line —
-                // the placement rule running against the text `finish_assembly` supplies. It used
-                // to land on a one-character stub at the head of the file, indistinguishable from a
+                // `Build.error` is reported *by* the script rather than thrown, so it carries no
+                // position at all. End to end, that lands on the script's first line — the
+                // placement rule running against the text `finish_assembly` supplies. It used to
+                // land on a one-character stub at the head of the file, indistinguishable from a
                 // script this server could not read.
                 (
-                    "build.error(\"boom\");\n",
-                    Range::new(Position::new(0, 0), Position::new(0, 20)),
+                    concat!(
+                        "class build {\n",
+                        "    public static void main() {\n",
+                        "        jals.build.Build.error(\"boom\");\n",
+                        "    }\n",
+                        "}\n",
+                    ),
+                    Range::new(Position::new(0, 0), Position::new(0, 13)),
                 ),
                 // The same script with the line endings a Windows checkout has. The `\r` stays out
                 // of the range: the script is read back verbatim from the project snapshot, so
                 // without the rule the highlight would run one character past what the author can
-                // see. Written through `std::fs::write` rather than a literal in the loop above so
-                // no platform's newline translation can quietly undo the case.
+                // see. Written through `std::fs::write` with explicit `\r\n` escapes so no
+                // platform's newline translation can quietly undo the case.
                 (
-                    "build.error(\"boom\");\r\n",
-                    Range::new(Position::new(0, 0), Position::new(0, 20)),
+                    concat!(
+                        "class build {\r\n",
+                        "    public static void main() {\r\n",
+                        "        jals.build.Build.error(\"boom\");\r\n",
+                        "    }\r\n",
+                        "}\r\n",
+                    ),
+                    Range::new(Position::new(0, 0), Position::new(0, 13)),
                 ),
             ] {
                 let dir = tempfile::tempdir().unwrap();
                 std::fs::write(
                     dir.path().join("jals.toml"),
-                    "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                    "[build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 )
                 .unwrap();
-                std::fs::write(dir.path().join("build.rhai"), script).unwrap();
+                std::fs::write(dir.path().join("build.java"), script).unwrap();
 
                 let assembled = AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline())
                     .await
                     .unwrap();
                 assert_eq!(
                     assembled.configured_script,
-                    Some(FileKey::parse("build.rhai").unwrap())
+                    Some(FileKey::parse("build.java").unwrap())
                 );
                 assert_eq!(assembled.script_diagnostics.len(), 1);
                 assert_eq!(assembled.script_diagnostics[0].range, expected);
@@ -3248,21 +3309,26 @@ mod tests {
             std::fs::write(
                 dir.path().join("jals.toml"),
                 "[package]\nname = \"generated\"\n[build]\nsource-dirs = [\"src\"]\n\
-                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+                 script = { type = \"java\", file = \"build.java\" }\n",
             )
             .unwrap();
             std::fs::write(
-                dir.path().join("build.rhai"),
+                dir.path().join("build.java"),
                 r#"
-                    let source = output.write_text(
-                        "p/Generated.java",
-                        "package p; public class Generated {}\n",
-                    );
-                    output.write_text(
-                        "p/Sibling.java",
-                        "package p; public class Sibling {}\n",
-                    );
-                    build.add_source(source);
+                    import jals.build.Build;
+                    import jals.build.Output;
+
+                    class build {
+                        public static void main() {
+                            String source = Output.writeText(
+                                "p/Generated.java",
+                                "package p; public class Generated {}\n");
+                            Output.writeText(
+                                "p/Sibling.java",
+                                "package p; public class Sibling {}\n");
+                            Build.addSource(source);
+                        }
+                    }
                 "#,
             )
             .unwrap();
@@ -3302,19 +3368,25 @@ mod tests {
         block_on_inline(async {
             let dir = tempfile::tempdir().unwrap();
             std::fs::create_dir(dir.path().join("src")).unwrap();
-            let manifest_text = "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+            let manifest_text = "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"java\", file = \"build.java\" }\n";
             std::fs::write(dir.path().join("jals.toml"), manifest_text).unwrap();
             std::fs::write(dir.path().join("src/Main.java"), "class Main {}\n").unwrap();
             std::fs::write(
-                dir.path().join("build.rhai"),
+                dir.path().join("build.java"),
                 r#"
-                    let jar = tasks.fetch_jar(
-                        tasks.https_url("https://example.invalid/sources.jar"),
-                        tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-                        tasks.bytes(1024)
-                    );
-                    let sources = tasks.extract_java(jar, "generated");
-                    tasks.publish_tree("sources", sources, "src/generated", "replace-root", "navigation");
+                    import jals.build.Tasks;
+
+                    class build {
+                        public static void main() {
+                            int jar = Tasks.fetchJar(
+                                Tasks.httpsUrl("https://example.invalid/sources.jar"),
+                                Tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                                Tasks.bytes(1024)
+                            );
+                            int sources = Tasks.extractJava(jar, "generated");
+                            Tasks.publishTree("sources", sources, "src/generated", "navigation");
+                        }
+                    }
                 "#,
             )
             .unwrap();
@@ -3414,8 +3486,8 @@ mod tests {
                 ("[build]\nsource-dirs = [\n", None, "dependency-manifest"),
                 (
                     "[build]\nsource-dirs = [\"src\"]\n\
-                     script = { type = \"rhai\", file = \"build.rhai\" }\n",
-                    Some("let = ;"),
+                     script = { type = \"java\", file = \"build.java\" }\n",
+                    Some("class build { public static void main() { int x = 1 +; } }"),
                     "dependency-build-script",
                 ),
             ] {
@@ -3424,14 +3496,24 @@ mod tests {
                     dir.path(),
                     "jals.toml",
                     "[build]\nsource-dirs = [\"src\"]\n\
-                     script = { type = \"rhai\", file = \"root.rhai\" }\n\
+                     script = { type = \"java\", file = \"root.java\" }\n\
                      [dependencies]\nchild = { path = \"child\" }\n",
                 );
-                write(dir.path(), "root.rhai", "build.error(\"root diagnostic\");");
+                write(
+                    dir.path(),
+                    "root.java",
+                    concat!(
+                        "class build {\n",
+                        "    public static void main() {\n",
+                        "        jals.build.Build.error(\"root diagnostic\");\n",
+                        "    }\n",
+                        "}\n",
+                    ),
+                );
                 write(dir.path(), "src/Main.java", "class Main { Missing value; }");
                 write(dir.path(), "child/jals.toml", child_manifest);
                 if let Some(script) = child_script {
-                    write(dir.path(), "child/build.rhai", script);
+                    write(dir.path(), "child/build.java", script);
                 }
                 let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
                     .await
@@ -3688,10 +3770,14 @@ mod tests {
             std::fs::write(
                 dir.path().join("jals.toml"),
                 "[build]\nsource-dirs = [\"src\"]\n\
-                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+                 script = { type = \"java\", file = \"build.java\" }\n",
             )
             .unwrap();
-            std::fs::write(dir.path().join("build.rhai"), "let = ;").unwrap();
+            std::fs::write(
+                dir.path().join("build.java"),
+                "class build { public static void main() { int x = 1 +; } }",
+            )
+            .unwrap();
             std::fs::write(dir.path().join("src/Foo.java"), "package p; class Foo {}").unwrap();
             let main = "package p; class Main { Foo value; }";
             let main_path = dir.path().join("src/Main.java");
@@ -3719,18 +3805,25 @@ mod tests {
             std::fs::write(
                 dir.path().join("jals.toml"),
                 "[build]\nsource-dirs = [\"src\"]\n\
-                 script = { type = \"rhai\", file = \"build.rhai\" }\n",
+                 script = { type = \"java\", file = \"build.java\" }\n",
             )
             .unwrap();
             std::fs::write(
-                dir.path().join("build.rhai"),
+                dir.path().join("build.java"),
                 r#"
-                    let source = output.write_text(
-                        "p/Model.java",
-                        project.read_text("model.java.in"),
-                    );
-                    build.add_source(source);
-                    build.rerun_if_changed("model.java.in");
+                    import jals.build.Build;
+                    import jals.build.Output;
+                    import jals.build.Project;
+
+                    class build {
+                        public static void main() {
+                            String source = Output.writeText(
+                                "p/Model.java",
+                                Project.readText("model.java.in"));
+                            Build.addSource(source);
+                            Build.rerunIfChanged("model.java.in");
+                        }
+                    }
                 "#,
             )
             .unwrap();

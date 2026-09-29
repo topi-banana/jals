@@ -35,6 +35,11 @@ extern "C" {
     #[wasm_bindgen(js_name = switchModel)]
     pub fn switch_model(path: &str, value: &str);
 
+    /// Mark `path` as a plaintext pseudo-file, so its model never selects the Java language (and
+    /// the Java-only providers stay off the text). Call before the model is created.
+    #[wasm_bindgen(js_name = markPlaintext)]
+    pub fn mark_plaintext(path: &str);
+
     /// Replace the current model's text (as an undoable edit).
     #[wasm_bindgen(js_name = updateModel)]
     pub fn update_model(value: &str);

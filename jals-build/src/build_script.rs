@@ -271,7 +271,7 @@ impl BuildScriptEnvironment {
     /// A host environment carries credentials (`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, npm and
     /// cargo registry tokens, …), and a script that reads a value can forward it straight into a
     /// task fetch URL. Inheriting the whole environment would therefore hand every host secret to
-    /// an untrusted `build.rhai` — including a dependency's, which the user never reviewed.
+    /// an untrusted `build.java` — including a dependency's, which the user never reviewed.
     /// Passing host state stays possible, but only through names the user opted in by choosing
     /// this prefix.
     const HOST_PREFIX: &'static str = "JALS_";
@@ -537,7 +537,7 @@ impl BuildScriptSession {
     }
 
     /// Keys known to have been published through this session, in key order.
-    #[cfg(all(test, feature = "rhai"))]
+    #[cfg(all(test, feature = "build-script"))]
     fn known_outputs(&self) -> impl ExactSizeIterator<Item = &FileKey> {
         self.outputs.keys()
     }
@@ -2805,7 +2805,7 @@ mod api {
         }))
     }
 
-    /// Execute the configured Rhai build script and atomically publish its generated files.
+    /// Execute the configured build script and atomically publish its generated files.
     ///
     /// This is the root-project adapter over [`prepare_build_script`]. It reconciles root outputs
     /// with a revision check, updates aggregate-local ownership, then persists prepared cache
@@ -2813,7 +2813,7 @@ mod api {
     ///
     /// A test convenience over the two-phase `prepare_build_script` /
     /// `publish_prepared_build_script` API that the host drives directly.
-    #[cfg(all(test, feature = "rhai"))]
+    #[cfg(all(test, feature = "build-script"))]
     pub(crate) async fn execute_build_script<S: SourceBackend, C: CacheBackend>(
         storage: &mut ProjectStorage<S, C>,
         manifest: &Manifest,
@@ -2892,14 +2892,14 @@ mod api {
     }
 }
 
-#[cfg(all(test, feature = "rhai"))]
+#[cfg(all(test, feature = "build-script"))]
 pub(crate) use api::execute_build_script;
 pub use api::{clear_build_script_outputs, prepare_build_script, publish_prepared_build_script};
 
-// The Rhai engine's end-to-end suite. A `build-script`-only test build runs the Java engine,
-// whose own tests live beside it in `build_script/java.rs`; the engine-neutral preparation tests
-// are still written against `build.rhai` until the Java port replaces this module.
-#[cfg(all(test, feature = "rhai"))]
+// The engine-neutral suite: the cache, the fingerprint, the state wire, and publication are the
+// same machinery whichever engine ran, and this drives them through a real `build.java`. The
+// Java engine's own tests live beside it in `build_script/java.rs`.
+#[cfg(all(test, feature = "build-script"))]
 mod tests {
     use jals_config::{BuildScript, Manifest};
     use jals_exec::{Exec, block_on_inline};
@@ -2914,16 +2914,33 @@ mod tests {
         Entry::File(FileKey::parse(path).unwrap(), text.as_bytes().to_vec())
     }
 
-    fn storage(script: &str, extra: impl IntoIterator<Item = Entry>) -> MemoryStorage {
+    /// Wrap one script body in the entry-point shell every build script carries: a `build` class
+    /// whose static `main` holds the body. The four `jals.build` imports are always present, so a
+    /// body names `Build`, `Output`, `Project` and `Tasks` directly; unused imports are inert.
+    fn script(body: &str) -> String {
+        format!(
+            "import jals.build.Build;\nimport jals.build.Output;\nimport jals.build.Project;\n\
+             import jals.build.Tasks;\n\nclass build {{\n    public static void main() {{\n\
+             {body}\n    }}\n}}\n"
+        )
+    }
+
+    /// A project whose `build.java` is one script body inside the standard shell, plus `extra`.
+    fn storage(body: &str, extra: impl IntoIterator<Item = Entry>) -> MemoryStorage {
+        storage_of(&script(body), extra)
+    }
+
+    /// A project whose `build.java` is exactly `source`, for tests that pin positions.
+    fn storage_of(source: &str, extra: impl IntoIterator<Item = Entry>) -> MemoryStorage {
         MemoryStorage::memory(
-            CodeTree::new(core::iter::once(file("build.rhai", script)).chain(extra)).unwrap(),
+            CodeTree::new(core::iter::once(file("build.java", source)).chain(extra)).unwrap(),
         )
     }
 
     fn manifest() -> Manifest {
         let mut manifest = Manifest::default();
-        manifest.build.script = Some(BuildScript::Rhai {
-            file: "build.rhai".into(),
+        manifest.build.script = Some(BuildScript::Java {
+            file: "build.java".into(),
         });
         manifest
     }
@@ -2955,7 +2972,7 @@ mod tests {
         storage: &MemoryStorage,
         cache_scope: BuildScriptCacheScope,
     ) -> (CacheKey, Vec<u8>) {
-        let script = FileKey::parse("build.rhai").unwrap();
+        let script = FileKey::parse("build.java").unwrap();
         let key = storage
             .artifacts()
             .indexed_key(
@@ -3008,9 +3025,13 @@ mod tests {
         block_on_inline(async {
             let storage = storage(
                 r#"
-                    let side = if build.feature("client") { "client" } else { "server" };
-                    output.write_text("side.txt", side);
-                    output.write_text("all.txt", build.features()[0]);
+                    String side = "server";
+                    if (Build.feature("client")) {
+                        side = "client";
+                    }
+                    Output.writeText("side.txt", side);
+                    String[] all = Build.features();
+                    Output.writeText("all.txt", all[0]);
                 "#,
                 [],
             );
@@ -3037,7 +3058,7 @@ mod tests {
             // The script declares no `rerun_if_env_changed`, yet the resolved feature set must still
             // be a fingerprint input — otherwise a changed `--features` selection would silently
             // reuse the previous build.
-            let mut storage = storage(r#"output.write_text("generated.txt", "prepared");"#, []);
+            let mut storage = storage(r#"Output.writeText("generated.txt", "prepared");"#, []);
             let server =
                 BuildScriptEnvironment::new().with_features(BTreeSet::from(["server".to_owned()]));
 
@@ -3066,9 +3087,9 @@ mod tests {
     #[test]
     fn preparation_does_not_mutate_project_or_cache_storage() {
         block_on_inline(async {
-            let storage = storage(r#"output.write_text("generated.txt", "prepared");"#, []);
+            let storage = storage(r#"Output.writeText("generated.txt", "prepared");"#, []);
             let output = FileKey::parse("target/jals/build/script/out/generated.txt").unwrap();
-            let script = FileKey::parse("build.rhai").unwrap();
+            let script = FileKey::parse("build.java").unwrap();
             let scope = BuildScriptCacheScope::new(ContentDigest::of(b"dependency"));
 
             let prepared = prepare(&storage, scope, &BuildScriptEnvironment::new()).await;
@@ -3093,9 +3114,9 @@ mod tests {
         });
     }
 
-    /// Rhai parses and evaluates on the native stack, so an over-generous depth limit lets a
-    /// deeply nested script overflow it — and a stack overflow aborts the process, which no
-    /// caller can catch. These fields are public, so the ceiling has to be enforced here.
+    /// An engine that walks an AST on the native stack can be overflowed by a deep enough script,
+    /// and a stack overflow aborts the process, which no caller can catch. These fields are
+    /// public, so the ceiling has to be enforced here.
     #[test]
     fn rejects_recursion_limits_that_could_overflow_the_stack() {
         for (name, limits) in [
@@ -3132,7 +3153,7 @@ mod tests {
     #[test]
     fn derived_directories_stay_out_of_the_fingerprint() {
         block_on_inline(async {
-            let script = r#"output.write_text("g.txt", "generated");"#;
+            let script = r#"Output.writeText("g.txt", "generated");"#;
             let mut storage = storage(script, []);
             let scope = BuildScriptCacheScope::ROOT;
             let environment = BuildScriptEnvironment::new();
@@ -3173,14 +3194,14 @@ mod tests {
                 .iter()
                 .map(|file| file.path.as_str())
                 .collect();
-            assert_eq!(paths, vec!["build.rhai"]);
+            assert_eq!(paths, vec!["build.java"]);
         });
     }
 
     #[test]
     fn cache_scopes_isolate_identical_script_and_output_paths() {
         block_on_inline(async {
-            let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
+            let mut storage = storage(r#"Output.writeText("value.txt", Build.env("VALUE"));"#, []);
             let output = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             let first_digest = ContentDigest::of(b"dependency-one");
             let second_digest = ContentDigest::of(b"dependency-two");
@@ -3249,12 +3270,12 @@ mod tests {
         block_on_inline(async {
             let storage = storage(
                 r#"
-                    let generated_source = output.write_text("Generated.java", "class Generated {}");
-                    let generated_classpath = output.write("generated.jar", [1, 2, 3]);
-                    build.add_source(generated_source);
-                    build.add_source("src/Existing.java");
-                    build.add_classpath(generated_classpath);
-                    build.add_classpath("lib/existing.jar");
+                    String generatedSource = Output.writeText("Generated.java", "class Generated {}");
+                    String generatedClasspath = Output.write("generated.jar", new byte[] {1, 2, 3});
+                    Build.addSource(generatedSource);
+                    Build.addSource("src/Existing.java");
+                    Build.addClasspath(generatedClasspath);
+                    Build.addClasspath("lib/existing.jar");
                 "#,
                 [
                     file("src/Existing.java", "class Existing {}"),
@@ -3309,10 +3330,10 @@ mod tests {
     fn executes_and_generates_exact_text_and_binary_outputs() {
         block_on_inline(async {
             let script = r#"
-                let source = output.write_text("generated/App.java", "class App {}\n");
-                let resource = output.write("data.bin", [0, 127, 255]);
-                build.add_source(source);
-                build.add_classpath(resource);
+                String source = Output.writeText("generated/App.java", "class App {}\n");
+                String resource = Output.write("data.bin", new byte[] {0, 127, 255});
+                Build.addSource(source);
+                Build.addClasspath(resource);
             "#;
             let mut storage = storage(script, []);
             let mut session = BuildScriptSession::new();
@@ -3348,14 +3369,29 @@ mod tests {
     fn project_reads_are_typed_and_ordered() {
         block_on_inline(async {
             let script = r#"
-                if project.read_text("src/A.txt") != "A" { throw "bad text"; }
-                if project.read("src/z.bin") != [90] { throw "bad bytes"; }
-                if !project.exists("src/nested") || project.exists("missing") { throw "bad exists"; }
-                if project.read_dir("src") != ["src/A.txt", "src/nested", "src/z.bin"] {
-                    throw "bad children";
+                if (!Project.readText("src/A.txt").equals("A")) {
+                    throw new IllegalStateException("bad text");
                 }
-                if project.walk_files("src") != ["src/A.txt", "src/nested/B.txt", "src/z.bin"] {
-                    throw "bad walk";
+                byte[] z = Project.read("src/z.bin");
+                if (z.length != 1 || z[0] != 90) {
+                    throw new IllegalStateException("bad bytes");
+                }
+                if (!Project.exists("src/nested") || Project.exists("missing")) {
+                    throw new IllegalStateException("bad exists");
+                }
+                String[] children = Project.readDir("src");
+                if (children.length != 3
+                    || !children[0].equals("src/A.txt")
+                    || !children[1].equals("src/nested")
+                    || !children[2].equals("src/z.bin")) {
+                    throw new IllegalStateException("bad children");
+                }
+                String[] walked = Project.walkFiles("src");
+                if (walked.length != 3
+                    || !walked[0].equals("src/A.txt")
+                    || !walked[1].equals("src/nested/B.txt")
+                    || !walked[2].equals("src/z.bin")) {
+                    throw new IllegalStateException("bad walk");
                 }
             "#;
             let mut storage = storage(
@@ -3380,7 +3416,8 @@ mod tests {
     #[test]
     fn compile_errors_expose_the_script_path_and_source_position() {
         block_on_inline(async {
-            let mut storage = storage("let valid = 1;\nlet broken = ;\n", []);
+            let source = script(r#"int x = "text";"#);
+            let mut storage = storage_of(&source, []);
             let error = run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
@@ -3392,19 +3429,26 @@ mod tests {
 
             assert_eq!(
                 error.script_path(),
-                Some(&FileKey::parse("build.rhai").unwrap())
+                Some(&FileKey::parse("build.java").unwrap())
             );
             let BuildScriptError::Compile { position: at, .. } = &error else {
                 panic!("a compile failure is reported as one: {error:?}");
             };
-            assert_eq!(*at, Some(position(2, 14)));
+            let at = at.as_ref().expect("a compile error carries a position");
+            let range = at.byte_range(&source).expect("the position resolves");
+            assert_eq!(
+                u32::try_from(source[..range.start].matches('\n').count() + 1).unwrap(),
+                8,
+                "the position is the statement the expression was written in"
+            );
         });
     }
 
     #[test]
     fn runtime_throw_errors_expose_the_script_path_and_source_position() {
         block_on_inline(async {
-            let mut storage = storage("let valid = 1;\nthrow \"boom\";\n", []);
+            let source = script(r#"throw new IllegalStateException("boom");"#);
+            let mut storage = storage_of(&source, []);
             let error = run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
@@ -3416,18 +3460,24 @@ mod tests {
 
             assert_eq!(
                 error.script_path(),
-                Some(&FileKey::parse("build.rhai").unwrap())
+                Some(&FileKey::parse("build.java").unwrap())
             );
             let BuildScriptError::Execute { position: at, .. } = &error else {
                 panic!("a runtime failure is reported as one: {error:?}");
             };
-            assert_eq!(*at, Some(position(2, 1)));
+            let at = at.as_ref().expect("a thrown value carries a position");
+            let range = at.byte_range(&source).expect("the position resolves");
+            assert_eq!(
+                u32::try_from(source[..range.start].matches('\n').count() + 1).unwrap(),
+                8,
+                "the position is the statement the throw was written in"
+            );
         });
     }
 
     /// A script can forward anything `build.env` returns into a task fetch URL, so the host
     /// environment must not cross the boundary wholesale — otherwise every credential on the
-    /// machine is readable by an unreviewed `build.rhai`, including a dependency's.
+    /// machine is readable by an unreviewed `build.java`, including a dependency's.
     #[test]
     fn from_host_keeps_only_the_opt_in_prefix() {
         let environment = BuildScriptEnvironment::from_host([
@@ -3456,19 +3506,19 @@ mod tests {
     fn collects_directives_environment_diagnostics_and_metadata() {
         block_on_inline(async {
             let script = r#"
-                if build.env("PROFILE") != "debug" || build.env("MISSING") != () {
-                    throw "bad environment";
+                if (!Build.env("PROFILE").equals("debug") || Build.env("MISSING") != null) {
+                    throw new IllegalStateException("bad environment");
                 }
-                build.rerun_if_changed("inputs/schema.txt");
-                build.rerun_if_env_changed("PROFILE");
-                build.add_source("src/Main.java");
-                build.add_classpath("lib/api.jar");
-                build.add_javac_arg("-Xlint:all");
-                build.add_jvm_arg("-ea");
-                build.set_compile_env("LANG", "C");
-                build.set_run_env("MODE", "test");
-                build.warning("generated fallback");
-                build.metadata("schema", "v1");
+                Build.rerunIfChanged("inputs/schema.txt");
+                Build.rerunIfEnvChanged("PROFILE");
+                Build.addSource("src/Main.java");
+                Build.addClasspath("lib/api.jar");
+                Build.addJavacArg("-Xlint:all");
+                Build.addJvmArg("-ea");
+                Build.setCompileEnv("LANG", "C");
+                Build.setRunEnv("MODE", "test");
+                Build.warning("generated fallback");
+                Build.metadata("schema", "v1");
             "#;
             let mut storage = storage(
                 script,
@@ -3518,9 +3568,9 @@ mod tests {
     fn rejects_path_escapes_and_wrong_kinds() {
         block_on_inline(async {
             for script in [
-                r#"output.write_text("../escape.java", "bad");"#,
-                r#"project.read_text("src");"#,
-                r#"output.write_text("/absolute.java", "bad");"#,
+                r#"Output.writeText("../escape.java", "bad");"#,
+                r#"Project.readText("src");"#,
+                r#"Output.writeText("/absolute.java", "bad");"#,
             ] {
                 let mut storage = storage(script, [file("src/A.java", "class A {}")]);
                 let error = run(
@@ -3551,8 +3601,8 @@ mod tests {
     fn rejects_an_empty_output_path() {
         block_on_inline(async {
             for script in [
-                r#"output.write_text("", "bad");"#,
-                r#"output.write("", []);"#,
+                r#"Output.writeText("", "bad");"#,
+                r#"Output.write("", new byte[0]);"#,
             ] {
                 let mut storage = storage(script, []);
                 let error = run(
@@ -3579,10 +3629,10 @@ mod tests {
     #[test]
     fn rejects_managed_script_and_tracked_output_paths_defensively() {
         block_on_inline(async {
-            let managed_script = "target/jals/build/build.rhai";
+            let managed_script = "target/jals/build/build.java";
             let mut managed_storage = MemoryStorage::memory(CodeTree::default());
             let mut managed_manifest = Manifest::default();
-            managed_manifest.build.script = Some(BuildScript::Rhai {
+            managed_manifest.build.script = Some(BuildScript::Java {
                 file: managed_script.into(),
             });
             let error = execute_build_script(
@@ -3599,8 +3649,8 @@ mod tests {
 
             let mut tracked_output = storage(
                 r#"
-                    output.write_text("generated.txt", "generated");
-                    build.rerun_if_changed("target/jals/build/script/out/generated.txt");
+                    Output.writeText("generated.txt", "generated");
+                    Build.rerunIfChanged("target/jals/build/script/out/generated.txt");
                 "#,
                 [],
             );
@@ -3619,9 +3669,11 @@ mod tests {
     }
 
     #[test]
-    fn enforces_source_path_and_function_compile_limits() {
+    fn enforces_source_size_and_path_limits() {
         block_on_inline(async {
-            let mut oversized_source = storage("let value = 123456789;", []);
+            // 16 bytes: the smallest script this engine accepts is still over the limit, so the
+            // refusal happens on the size the storage reports, before anything parses it.
+            let mut oversized_source = storage_of("class build { }\n", []);
             let source_limits = BuildScriptLimits {
                 max_script_size: 8,
                 ..BuildScriptLimits::default()
@@ -3637,7 +3689,7 @@ mod tests {
             assert!(matches!(
                 error,
                 BuildScriptError::ScriptTooLarge {
-                    size: 22,
+                    size: 16,
                     limit: 8,
                     ..
                 }
@@ -3645,14 +3697,14 @@ mod tests {
 
             for (script, limits) in [
                 (
-                    r#"project.exists("long-path-value");"#,
+                    r#"Project.exists("long-path-value");"#,
                     BuildScriptLimits {
                         max_path_bytes: 10,
                         ..BuildScriptLimits::default()
                     },
                 ),
                 (
-                    r#"output.write_text("a/b", "value");"#,
+                    r#"Output.writeText("a/b", "value");"#,
                     BuildScriptLimits {
                         max_path_depth: 1,
                         ..BuildScriptLimits::default()
@@ -3671,22 +3723,6 @@ mod tests {
                 assert!(matches!(error, BuildScriptError::Execute { .. }));
                 assert_eq!(storage.revision(), Revision::INITIAL);
             }
-
-            let mut too_many_functions = storage("fn one() {} fn two() {}", []);
-            let function_limits = BuildScriptLimits {
-                max_functions: 1,
-                ..BuildScriptLimits::default()
-            };
-            assert!(matches!(
-                run(
-                    &mut too_many_functions,
-                    &BuildScriptEnvironment::new(),
-                    &function_limits,
-                    &mut BuildScriptSession::new(),
-                )
-                .await,
-                Err(BuildScriptError::Compile { .. })
-            ));
         });
     }
 
@@ -3698,11 +3734,11 @@ mod tests {
                 ..BuildScriptLimits::default()
             };
             let replacement_script = r#"
-                build.set_compile_env("A", "1234");
-                build.set_compile_env("A", "x");
-                build.metadata("B", "1234");
-                build.metadata("B", "");
-                build.add_javac_arg("12345");
+                Build.setCompileEnv("A", "1234");
+                Build.setCompileEnv("A", "x");
+                Build.metadata("B", "1234");
+                Build.metadata("B", "");
+                Build.addJavacArg("12345");
             "#;
             let mut replacement_storage = storage(replacement_script, []);
             let output = run(
@@ -3719,8 +3755,8 @@ mod tests {
 
             let mut aggregate_storage = storage(
                 r#"
-                    build.add_javac_arg("1234");
-                    build.warning("12345");
+                    Build.addJavacArg("1234");
+                    Build.warning("12345");
                 "#,
                 [],
             );
@@ -3741,7 +3777,7 @@ mod tests {
     #[test]
     fn enforces_operation_and_output_limits() {
         block_on_inline(async {
-            let mut operations = storage("while true {}", []);
+            let mut operations = storage("while (true) { }", []);
             let limits = BuildScriptLimits {
                 max_operations: 100,
                 ..BuildScriptLimits::default()
@@ -3759,21 +3795,21 @@ mod tests {
 
             let cases = [
                 (
-                    r#"output.write_text("large", "1234");"#,
+                    r#"Output.writeText("large", "1234");"#,
                     BuildScriptLimits {
                         max_output_file_size: 3,
                         ..BuildScriptLimits::default()
                     },
                 ),
                 (
-                    r#"output.write_text("a", "12"); output.write_text("b", "12");"#,
+                    r#"Output.writeText("a", "12"); Output.writeText("b", "12");"#,
                     BuildScriptLimits {
                         max_total_output_size: 3,
                         ..BuildScriptLimits::default()
                     },
                 ),
                 (
-                    r#"output.write_text("a", "1"); output.write_text("b", "2");"#,
+                    r#"Output.writeText("a", "1"); Output.writeText("b", "2");"#,
                     BuildScriptLimits {
                         max_output_files: 1,
                         ..BuildScriptLimits::default()
@@ -3797,41 +3833,21 @@ mod tests {
         });
     }
 
+    /// A host collection that is full refuses the next distinct name instead of replacing an
+    /// entry, and a refusal is a trap: the engine has no catchable exception, so the run stops
+    /// where the collection would have grown, and nothing is published.
     #[test]
-    fn caught_errors_do_not_overfill_host_collections() {
+    fn host_collection_limits_refuse_before_publishing() {
         block_on_inline(async {
-            let script = r#"
-                let caught = 0;
-
-                build.rerun_if_changed("inputs/kept.txt");
-                build.rerun_if_changed("inputs/kept.txt");
-                try { build.rerun_if_changed("inputs/rejected-1.txt"); } catch (error) { caught += 1; }
-                try { build.rerun_if_changed("inputs/rejected-2.txt"); } catch (error) { caught += 1; }
-
-                build.add_source("src/Kept.java");
-                build.add_source("src/Kept.java");
-                try { build.add_source("src/Rejected1.java"); } catch (error) { caught += 1; }
-                try { build.add_source("src/Rejected2.java"); } catch (error) { caught += 1; }
-
-                build.add_classpath("lib/kept.jar");
-                build.add_classpath("lib/kept.jar");
-                try { build.add_classpath("lib/rejected-1.jar"); } catch (error) { caught += 1; }
-                try { build.add_classpath("lib/rejected-2.jar"); } catch (error) { caught += 1; }
-
-                if caught != 6 { throw "expected six collection-limit errors"; }
-            "#;
             let mut storage = storage(
-                script,
+                r#"
+                    Build.rerunIfChanged("inputs/kept.txt");
+                    Build.rerunIfChanged("inputs/kept.txt");
+                    Build.rerunIfChanged("inputs/rejected.txt");
+                "#,
                 [
                     file("inputs/kept.txt", "kept"),
-                    file("inputs/rejected-1.txt", "rejected"),
-                    file("inputs/rejected-2.txt", "rejected"),
-                    file("src/Kept.java", "class Kept {}"),
-                    file("src/Rejected1.java", "class Rejected1 {}"),
-                    file("src/Rejected2.java", "class Rejected2 {}"),
-                    file("lib/kept.jar", "kept"),
-                    file("lib/rejected-1.jar", "rejected"),
-                    file("lib/rejected-2.jar", "rejected"),
+                    file("inputs/rejected.txt", "rejected"),
                 ],
             );
             let limits = BuildScriptLimits {
@@ -3839,27 +3855,16 @@ mod tests {
                 ..BuildScriptLimits::default()
             };
 
-            let output = run(
+            let error = run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
                 &limits,
                 &mut BuildScriptSession::new(),
             )
             .await
-            .unwrap();
-
-            assert_eq!(
-                output.rerun_files,
-                BTreeSet::from([FileKey::parse("inputs/kept.txt").unwrap()])
-            );
-            assert_eq!(
-                output.generated_sources,
-                BTreeSet::from([FileKey::parse("src/Kept.java").unwrap()])
-            );
-            assert_eq!(
-                output.additional_classpath,
-                BTreeSet::from([FileKey::parse("lib/kept.jar").unwrap()])
-            );
+            .unwrap_err();
+            assert!(matches!(error, BuildScriptError::Execute { .. }));
+            assert_eq!(storage.revision(), Revision::INITIAL);
         });
     }
 
@@ -3879,7 +3884,7 @@ mod tests {
     fn reported_errors_render_every_diagnostic_in_emission_order() {
         block_on_inline(async {
             let mut storage = storage(
-                r#"build.warning("check your features"); build.error("stop");"#,
+                r#"Build.warning("check your features"); Build.error("stop");"#,
                 [],
             );
             let error = run(
@@ -3904,7 +3909,7 @@ mod tests {
     #[test]
     fn a_cached_warning_round_trips_through_the_state_with_its_severity() {
         block_on_inline(async {
-            let mut storage = storage(r#"build.warning("kept");"#, []);
+            let mut storage = storage(r#"Build.warning("kept");"#, []);
             let environment = BuildScriptEnvironment::new();
             let limits = BuildScriptLimits::default();
             let mut session = BuildScriptSession::new();
@@ -3932,8 +3937,8 @@ mod tests {
     fn exceptions_and_error_diagnostics_publish_nothing() {
         block_on_inline(async {
             for script in [
-                r#"output.write_text("A.java", "partial"); throw "stop";"#,
-                r#"output.write_text("A.java", "partial"); build.error("stop");"#,
+                r#"Output.writeText("A.java", "partial"); throw new IllegalStateException("stop");"#,
+                r#"Output.writeText("A.java", "partial"); Build.error("stop");"#,
             ] {
                 let mut storage = storage(script, []);
                 let result = run(
@@ -3962,8 +3967,8 @@ mod tests {
             let modified_key = FileKey::parse("target/jals/build/script/out/modified.txt").unwrap();
             let mut storage = storage(
                 r#"
-                    output.write_text("A.java", "new");
-                    output.write_text("modified.txt", "generated");
+                    Output.writeText("A.java", "new");
+                    Output.writeText("modified.txt", "generated");
                 "#,
                 [Entry::File(output_key.clone(), b"old".to_vec())],
             );
@@ -3989,13 +3994,13 @@ mod tests {
             .unwrap();
             assert_eq!(second.revision, after_replace);
 
-            let script_key = FileKey::parse("build.rhai").unwrap();
+            let script_key = FileKey::parse("build.java").unwrap();
             let revision = storage.revision();
             let mut transaction = storage.transaction(revision).unwrap();
             transaction
                 .replace_file(
                     script_key,
-                    br#"output.write_text("B.java", "next");"#.to_vec(),
+                    script(r#"Output.writeText("B.java", "next");"#).into_bytes(),
                 )
                 .unwrap();
             transaction
@@ -4029,7 +4034,7 @@ mod tests {
     #[test]
     fn cache_hit_skips_evaluation_and_keeps_the_revision() {
         block_on_inline(async {
-            let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
+            let mut storage = storage(r#"Output.writeText("value.txt", Build.env("VALUE"));"#, []);
             let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             let mut first_environment = BuildScriptEnvironment::new();
             first_environment.insert("VALUE", "first");
@@ -4069,7 +4074,7 @@ mod tests {
     fn default_fingerprint_tracks_all_non_output_project_files() {
         block_on_inline(async {
             let mut storage = storage(
-                r#"output.write_text("value.txt", project.read_text("input.txt"));"#,
+                r#"Output.writeText("value.txt", Project.readText("input.txt"));"#,
                 [file("input.txt", "first")],
             );
             let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
@@ -4100,12 +4105,12 @@ mod tests {
     #[test]
     fn persisted_fingerprint_uses_the_pre_execution_view() {
         block_on_inline(async {
-            let script = r#"output.write_text("generated.txt", "generated");"#;
-            let mut storage = storage(script, [file("input.txt", "input")]);
+            let source = script(r#"Output.writeText("generated.txt", "generated");"#);
+            let mut storage = storage_of(&source, [file("input.txt", "input")]);
             let expected_inputs = vec![
                 FileFingerprintWire {
-                    path: "build.rhai".into(),
-                    digest: Some(ContentDigest::of(script.as_bytes()).to_hex()),
+                    path: "build.java".into(),
+                    digest: Some(ContentDigest::of(source.as_bytes()).to_hex()),
                 },
                 FileFingerprintWire {
                     path: "input.txt".into(),
@@ -4139,8 +4144,8 @@ mod tests {
         block_on_inline(async {
             let mut storage = storage(
                 r#"
-                    build.rerun_if_changed("watched.txt");
-                    output.write_text("value.txt", project.read_text("ignored.txt"));
+                    Build.rerunIfChanged("watched.txt");
+                    Output.writeText("value.txt", Project.readText("ignored.txt"));
                 "#,
                 [file("watched.txt", "one"), file("ignored.txt", "first")],
             );
@@ -4185,8 +4190,8 @@ mod tests {
         block_on_inline(async {
             let mut storage = storage(
                 r#"
-                    build.rerun_if_changed("watched.txt");
-                    output.write_text("value.txt", project.read_text("ignored.txt"));
+                    Build.rerunIfChanged("watched.txt");
+                    Output.writeText("value.txt", Project.readText("ignored.txt"));
                 "#,
                 [
                     file("jals.toml", "[package]\nname = \"first\"\n"),
@@ -4226,12 +4231,12 @@ mod tests {
         block_on_inline(async {
             let mut storage = storage(
                 r#"
-                    build.rerun_if_env_changed("VALUE");
-                    let value = build.env("VALUE");
-                    if value == () {
-                        output.write_text("value.txt", "missing");
+                    Build.rerunIfEnvChanged("VALUE");
+                    String value = Build.env("VALUE");
+                    if (value == null) {
+                        Output.writeText("value.txt", "missing");
                     } else {
-                        output.write_text("value.txt", value);
+                        Output.writeText("value.txt", value);
                     }
                 "#,
                 [],
@@ -4269,7 +4274,7 @@ mod tests {
     #[test]
     fn cache_hit_restores_a_missing_output() {
         block_on_inline(async {
-            let mut storage = storage(r#"output.write_text("value.txt", "cached");"#, []);
+            let mut storage = storage(r#"Output.writeText("value.txt", "cached");"#, []);
             let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             run(
                 &mut storage,
@@ -4302,8 +4307,8 @@ mod tests {
         block_on_inline(async {
             let mut storage = storage(
                 r#"
-                    output.write_text("owned.txt", "owned");
-                    output.write_text("edited.txt", "generated");
+                    Output.writeText("owned.txt", "owned");
+                    Output.writeText("edited.txt", "generated");
                 "#,
                 [],
             );
@@ -4348,7 +4353,7 @@ mod tests {
     #[test]
     fn cache_persistence_failure_keeps_successful_session_ownership() {
         block_on_inline(async {
-            let mut storage = storage(r#"output.write_text("owned.txt", "owned");"#, []);
+            let mut storage = storage(r#"Output.writeText("owned.txt", "owned");"#, []);
             let owned = FileKey::parse("target/jals/build/script/out/owned.txt").unwrap();
             let limits = BuildScriptLimits {
                 max_cache_state_size: 1,
@@ -4388,8 +4393,8 @@ mod tests {
             let new_key = FileKey::parse("target/jals/build/script/out/new.txt").unwrap();
             let mut storage = storage(
                 r#"
-                    output.write_text("old.txt", "old");
-                    output.write_text("edited.txt", "generated");
+                    Output.writeText("old.txt", "old");
+                    Output.writeText("edited.txt", "generated");
                 "#,
                 [],
             );
@@ -4404,8 +4409,8 @@ mod tests {
             let mut transaction = storage.transaction(storage.revision()).unwrap();
             transaction
                 .replace_file(
-                    FileKey::parse("build.rhai").unwrap(),
-                    br#"output.write_text("new.txt", "new");"#.to_vec(),
+                    FileKey::parse("build.java").unwrap(),
+                    script(r#"Output.writeText("new.txt", "new");"#).into_bytes(),
                 )
                 .unwrap();
             transaction
@@ -4434,9 +4439,9 @@ mod tests {
     #[test]
     fn malformed_state_and_missing_output_artifacts_fall_back_to_evaluation() {
         block_on_inline(async {
-            let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
+            let mut storage = storage(r#"Output.writeText("value.txt", Build.env("VALUE"));"#, []);
             let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
-            let script_key = FileKey::parse("build.rhai").unwrap();
+            let script_key = FileKey::parse("build.java").unwrap();
             let mut environment = BuildScriptEnvironment::new();
             environment.insert("VALUE", "first");
             run(
@@ -4516,9 +4521,9 @@ mod tests {
                 max_host_directive_bytes: 8,
                 ..BuildScriptLimits::default()
             };
-            let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
+            let mut storage = storage(r#"Output.writeText("value.txt", Build.env("VALUE"));"#, []);
             let output_path = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
-            let script = FileKey::parse("build.rhai").unwrap();
+            let script = FileKey::parse("build.java").unwrap();
             let mut environment = BuildScriptEnvironment::new();
             environment.insert("VALUE", "first");
             run(
@@ -4643,10 +4648,10 @@ mod tests {
         block_on_inline(async {
             let mut storage = storage(
                 r#"
-                    build.rerun_if_changed("watched.txt");
-                    output.write_text("value.txt", "stable");
-                    build.warning("stable warning");
-                    build.metadata("key", "value");
+                    Build.rerunIfChanged("watched.txt");
+                    Output.writeText("value.txt", "stable");
+                    Build.warning("stable warning");
+                    Build.metadata("key", "value");
                 "#,
                 [file("watched.txt", "original")],
             );
@@ -4688,11 +4693,13 @@ mod tests {
     #[test]
     fn nonempty_task_plan_round_trips_through_the_build_script_cache() {
         block_on_inline(async {
-            let script = r#"
-                let jar = tasks.project_jar("input.jar");
-                tasks.add_classpath(jar);
-            "#;
-            let mut storage = storage(script, [file("input.jar", "fixture")]);
+            let mut storage = storage(
+                r#"
+                    int jar = Tasks.projectJar("input.jar");
+                    Tasks.addClasspath(jar);
+                "#,
+                [file("input.jar", "fixture")],
+            );
             let first = run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
@@ -4722,9 +4729,9 @@ mod tests {
         block_on_inline(async {
             let mut storage = storage(
                 r#"
-                    let jar = tasks.project_jar("input.jar");
-                    tasks.add_classpath(jar);
-                    throw "stop";
+                    int jar = Tasks.projectJar("input.jar");
+                    Tasks.addClasspath(jar);
+                    throw new IllegalStateException("stop");
                 "#,
                 [file("input.jar", "fixture")],
             );
@@ -4745,7 +4752,7 @@ mod tests {
                         CacheNamespace::BuildScriptState,
                         CacheIdentity::state(
                             BuildScriptCacheScope::ROOT,
-                            &FileKey::parse("build.rhai").unwrap(),
+                            &FileKey::parse("build.java").unwrap(),
                         ),
                     )
                     .await
@@ -4772,7 +4779,7 @@ mod tests {
         });
     }
 
-    /// A position, built the way the Rhai adapter builds one. The fields are private and there is
+    /// A position, built the way an engine adapter builds one. The fields are private and there is
     /// no public constructor, which is the whole reason `byte_range` lives on this type rather than
     /// in the host that used to own the scan: a resolver anywhere else cannot be tested at all.
     const fn position(line: u32, column: u32) -> BuildScriptPosition {
@@ -4812,7 +4819,7 @@ mod tests {
 
     #[test]
     fn a_column_counts_characters_and_the_range_covers_whole_ones() {
-        // Rhai counts characters; the range is bytes. Conflating the two lands the start one byte
+        // Columns count characters; the range is bytes. Conflating the two lands the start one byte
         // inside a multi-byte character.
         let source = "😀x";
         assert_eq!(position(1, 1).byte_range(source), Some(0..4));

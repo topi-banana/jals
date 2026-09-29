@@ -377,7 +377,7 @@ impl BuildTaskExecutor {
             .collect();
         let view = storage.view();
         // The root's script phase, reported the way a dependency node's is — the two are the same
-        // phase, and a reader waiting on `build.rhai` should not have to know which project it
+        // phase, and a reader waiting on `build.java` should not have to know which project it
         // belongs to before the line appears.
         let script = options.progress.begin(Activity::Script, "");
         let prepared = match prepare_build_script(
@@ -1557,8 +1557,8 @@ mod tests {
 
     fn manifest() -> Manifest {
         let mut manifest = Manifest::default();
-        manifest.build.script = Some(BuildScript::Rhai {
-            file: "build.rhai".to_owned(),
+        manifest.build.script = Some(BuildScript::Java {
+            file: "build.java".to_owned(),
         });
         manifest
     }
@@ -1566,7 +1566,7 @@ mod tests {
     fn storage(script: &str) -> MemoryStorage {
         MemoryStorage::memory(
             CodeTree::new([Entry::File(
-                FileKey::parse("build.rhai").unwrap(),
+                FileKey::parse("build.java").unwrap(),
                 script.as_bytes().to_vec(),
             )])
             .unwrap(),
@@ -1584,18 +1584,24 @@ mod tests {
             );
             let script = format!(
                 r#"
-                    let metadata = tasks.fetch_json(
-                        tasks.https_url("https://example.invalid/version.json"),
-                        tasks.sha256("{}"),
-                        tasks.bytes(4096)
-                    );
-                    let row = tasks.json_at(metadata, ["download"]);
-                    let jar = tasks.fetch_jar(
-                        tasks.json_url(row, ["url"]),
-                        tasks.json_sha256(row, ["sha256"]),
-                        tasks.json_u64(row, ["size"])
-                    );
-                    tasks.add_classpath(jar);
+                    import jals.build.Tasks;
+
+                    class build {{
+                        public static void main() {{
+                            int metadata = Tasks.fetchJson(
+                                Tasks.httpsUrl("https://example.invalid/version.json"),
+                                Tasks.sha256("{}"),
+                                Tasks.bytes(4096)
+                            );
+                            int row = Tasks.jsonAt(metadata, new String[] {{"download"}});
+                            int jar = Tasks.fetchJar(
+                                Tasks.jsonUrl(row, new String[] {{"url"}}),
+                                Tasks.jsonSha256(row, new String[] {{"sha256"}}),
+                                Tasks.jsonU64(row, new String[] {{"size"}})
+                            );
+                            Tasks.addClasspath(jar);
+                        }}
+                    }}
                 "#,
                 ContentDigest::of(metadata.as_bytes()).to_hex()
             );
@@ -1661,13 +1667,19 @@ mod tests {
         block_on_inline(async {
             let script = format!(
                 r#"
-                    let jar = tasks.fetch_jar(
-                        tasks.https_url("https://example.invalid/source.jar"),
-                        tasks.sha256("{}"),
-                        tasks.bytes(1024)
-                    );
-                    let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("sources", sources, "src/main/java/net/example", "replace-root", "navigation");
+                    import jals.build.Tasks;
+
+                    class build {{
+                        public static void main() {{
+                            int jar = Tasks.fetchJar(
+                                Tasks.httpsUrl("https://example.invalid/source.jar"),
+                                Tasks.sha256("{}"),
+                                Tasks.bytes(1024)
+                            );
+                            int sources = Tasks.extractJava(jar, "net/example");
+                            Tasks.publishTree("sources", sources, "src/main/java/net/example", "navigation");
+                        }}
+                    }}
                 "#,
                 ContentDigest::of(b"jar").to_hex()
             );
@@ -1704,7 +1716,7 @@ mod tests {
         block_on_inline(async {
             let mut storage = MemoryStorage::memory(
                 CodeTree::new([Entry::File(
-                    FileKey::parse("build.rhai").unwrap(),
+                    FileKey::parse("build.java").unwrap(),
                     Vec::new(),
                 )])
                 .unwrap(),
@@ -1735,7 +1747,7 @@ mod tests {
                 }],
             };
             let roots = [DirKey::parse("src/main/java").unwrap()];
-            let script = FileKey::parse("build.rhai").unwrap();
+            let script = FileKey::parse("build.java").unwrap();
             let plan = TaskPlan::new();
 
             let view = storage.view();
