@@ -2719,7 +2719,7 @@ mod tests {
         let script_path = root.join("build.rhai");
         let input_path = root.join("schema/model.json");
         let source_path = root.join("src/Main.java");
-        let output_path = root.join("target/jals/build/rhai/out/Generated.java");
+        let output_path = root.join("target/jals/build/script/out/Generated.java");
         let cache_path = root.join("target/jals/cache/artifact");
         let classpath = root.join("lib/api.jar");
         let source_dependency = root.join("deps/lib/Lib.java");
@@ -2806,7 +2806,7 @@ mod tests {
     #[test]
     fn generated_output_deletion_reassembles_while_write_feedback_is_ignored() {
         let root = Path::new("project");
-        let output = root.join("target/jals/build/rhai/out/Generated.java");
+        let output = root.join("target/jals/build/script/out/Generated.java");
         let cache = root.join("target/jals/cache/artifact");
 
         for change_type in [FileChangeType::CREATED, FileChangeType::CHANGED] {
@@ -3271,7 +3271,7 @@ mod tests {
             let main_uri = Url::from_file_path(&main_path).unwrap();
             let generated_uri = Url::from_file_path(
                 dir.path()
-                    .join("target/jals/build/rhai/out/p/Generated.java"),
+                    .join("target/jals/build/script/out/p/Generated.java"),
             )
             .unwrap();
 
@@ -3809,7 +3809,7 @@ mod tests {
                 .expect("the changed input reran the script");
             assert_eq!(
                 location.uri,
-                Url::from_file_path(dir.path().join("target/jals/build/rhai/out/p/Model.java"))
+                Url::from_file_path(dir.path().join("target/jals/build/script/out/p/Model.java"))
                     .unwrap()
             );
         });

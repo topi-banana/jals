@@ -127,7 +127,7 @@ impl ConfigKind {
                  # reorder-imports = false\n"
             }
             ConfigKind::Script => {
-                "// Runs entirely in the browser and publishes below target/jals/build/rhai/out.\n\
+                "// Runs entirely in the browser and publishes below target/jals/build/script/out.\n\
                  let source = output.write_text(\n\
                      \"com/example/BuildInfo.java\",\n\
                      \"package com.example;\\npublic final class BuildInfo {\\n    public static final String MESSAGE = \\\"Generated in the browser\\\";\\n}\\n\"\n\

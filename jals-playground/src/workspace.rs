@@ -442,7 +442,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use jals_build::build_script::RHAI_OUTPUT_ROOT;
+    use jals_build::build_script::BUILD_SCRIPT_OUTPUT_ROOT;
     use jals_editor::CompletionKind;
     use jals_exec::block_on_inline;
 
@@ -461,7 +461,8 @@ mod tests {
     }
 
     fn output_key(path: &str) -> FileKey {
-        FileKey::parse(&format!("{RHAI_OUTPUT_ROOT}/{path}")).expect("test output path is valid")
+        FileKey::parse(&format!("{BUILD_SCRIPT_OUTPUT_ROOT}/{path}"))
+            .expect("test output path is valid")
     }
 
     #[test]
@@ -585,7 +586,7 @@ mod tests {
                 &manifest,
                 manifest_text,
                 r#"
-                    if build.env("OUT_DIR") != "target/jals/build/rhai/out" {
+                    if build.env("OUT_DIR") != "target/jals/build/script/out" {
                         throw "bad OUT_DIR";
                     }
                     if build.env("JALS_MANIFEST_DIR") != "." {

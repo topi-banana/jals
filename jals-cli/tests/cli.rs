@@ -385,7 +385,7 @@ fn build_dry_run_executes_and_publishes_build_script_outputs() {
     );
     let generated = dir
         .path()
-        .join("target/jals/build/rhai/out/com/example/DryRunGenerated.java");
+        .join("target/jals/build/script/out/com/example/DryRunGenerated.java");
     assert!(generated.is_file());
     let stdout = String::from_utf8(output.stdout).unwrap();
     // Both the authored and the script-generated source reach javac through the frontend's
@@ -395,7 +395,7 @@ fn build_dry_run_executes_and_publishes_build_script_outputs() {
         host_join(&staged, "src/main/java/com/example/Main.java"),
         host_join(
             &staged,
-            "target/jals/build/rhai/out/com/example/DryRunGenerated.java",
+            "target/jals/build/script/out/com/example/DryRunGenerated.java",
         ),
     ] {
         assert_eq!(
@@ -714,14 +714,14 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
     );
     let generated = dir
         .path()
-        .join("target/jals/build/rhai/out/com/example/Generated.java");
+        .join("target/jals/build/script/out/com/example/Generated.java");
     assert!(generated.is_file());
     let args = read_arg_lines(&captured_args);
     // The build script's output is root project source, so it goes through the frontend like
     // any authored file; javac sees the staged copy, not the script's own output path.
     let staged_generated = dir
         .path()
-        .join("target/jals/build/frontend/target/jals/build/rhai/out/com/example/Generated.java");
+        .join("target/jals/build/frontend/target/jals/build/script/out/com/example/Generated.java");
     assert!(
         args.iter().any(|arg| Path::new(arg) == staged_generated),
         "generated source should reach javac via the frontend staging tree; args: {args:?}"

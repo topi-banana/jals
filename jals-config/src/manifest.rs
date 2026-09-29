@@ -3588,7 +3588,7 @@ mod tests {
         for file in [
             "target/jals/build",
             "target/jals/build/build.rhai",
-            "target/jals/build/rhai/out/build.rhai",
+            "target/jals/build/script/out/build.rhai",
         ] {
             let text =
                 alloc::format!("[build]\nscript = {{ type = \"rhai\", file = \"{file}\" }}\n");

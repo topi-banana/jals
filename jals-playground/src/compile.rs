@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn a_generated_static_string_field_does_not_block_either_backend() {
         let generated = (
-            "target/jals/build/rhai/out/com/example/BuildInfo.java".to_owned(),
+            "target/jals/build/script/out/com/example/BuildInfo.java".to_owned(),
             "package com.example;\n\
              public final class BuildInfo {\n\
              public static final String MESSAGE = \"Generated in the browser\";\n\

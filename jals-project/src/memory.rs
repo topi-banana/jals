@@ -572,7 +572,7 @@ mod tests {
                 (
                     "empty/build.rhai",
                     br#"
-                        if build.env("OUT_DIR") != "target/jals/build/rhai/out"
+                        if build.env("OUT_DIR") != "target/jals/build/script/out"
                             || build.env("JALS_MANIFEST_DIR") != "."
                             || build.env("JALS_PACKAGE_NAME") != ()
                             || build.env("JALS_PACKAGE_VERSION") != ()
@@ -589,7 +589,7 @@ mod tests {
                 (
                     "meta/build.rhai",
                     br#"
-                        if build.env("OUT_DIR") != "target/jals/build/rhai/out"
+                        if build.env("OUT_DIR") != "target/jals/build/script/out"
                             || build.env("JALS_MANIFEST_DIR") != "."
                             || build.env("JALS_PACKAGE_NAME") != "dependency"
                             || build.env("JALS_PACKAGE_VERSION") != "1.2.3"

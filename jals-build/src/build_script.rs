@@ -54,8 +54,8 @@ const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 const MANAGED_ROOT: &str = "target/jals";
 const MANIFEST_FILE: &str = "jals.toml";
 
-/// Directory under `target/jals/build/rhai` where script-generated files are published.
-pub const RHAI_OUTPUT_ROOT: &str = "target/jals/build/rhai/out";
+/// Directory under `target/jals/build/script` where script-generated files are published.
+pub const BUILD_SCRIPT_OUTPUT_ROOT: &str = "target/jals/build/script/out";
 
 /// Cache identity for one build-script project.
 ///
@@ -328,7 +328,7 @@ impl BuildScriptEnvironment {
             // compile error, not a silently empty feature set.
             features,
         };
-        environment.insert("OUT_DIR", RHAI_OUTPUT_ROOT);
+        environment.insert("OUT_DIR", BUILD_SCRIPT_OUTPUT_ROOT);
         environment.insert("JALS_MANIFEST_DIR", ".");
         if let Some(name) = &manifest.package.name {
             environment.insert("JALS_PACKAGE_NAME", name);
@@ -475,7 +475,7 @@ impl fmt::Display for BuildScriptDiagnostic {
 pub struct BuildScriptOutput {
     /// Storage revision containing the published files. It is unchanged for an exact no-op.
     revision: Revision,
-    /// Every file written below [`RHAI_OUTPUT_ROOT`], in key order.
+    /// Every file written below [`BUILD_SCRIPT_OUTPUT_ROOT`], in key order.
     pub generated_files: BTreeSet<FileKey>,
     /// Generated or project source files added by the script, in key order.
     pub generated_sources: BTreeSet<FileKey>,
@@ -1097,13 +1097,13 @@ mod api {
     use rhai::{Array, Dynamic, Engine, EvalAltResult, INT, ImmutableString, Position, Scope};
 
     use super::{
-        BUILD_ARTIFACT_ROOT, BUILD_SCRIPT_API_VERSION, BUILD_SCRIPT_STATE_VERSION,
-        BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError,
-        BuildScriptLimits, BuildScriptLimitsWire, BuildScriptOutput, BuildScriptSession,
-        BuildScriptSeverity, BuildScriptStateWire, CacheIdentity, DiagnosticLevelWire,
-        DiagnosticWire, EnvironmentFingerprintWire, FileFingerprintWire, FingerprintFilesModeWire,
-        FingerprintInputsWire, MANAGED_ROOT, MANIFEST_FILE, OutputArtifactWire, PendingOutput,
-        PreparedBuildScript, PreparedCacheState, RHAI_OUTPUT_ROOT,
+        BUILD_ARTIFACT_ROOT, BUILD_SCRIPT_API_VERSION, BUILD_SCRIPT_OUTPUT_ROOT,
+        BUILD_SCRIPT_STATE_VERSION, BuildScriptCacheScope, BuildScriptDiagnostic,
+        BuildScriptEnvironment, BuildScriptError, BuildScriptLimits, BuildScriptLimitsWire,
+        BuildScriptOutput, BuildScriptSession, BuildScriptSeverity, BuildScriptStateWire,
+        CacheIdentity, DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire,
+        FileFingerprintWire, FingerprintFilesModeWire, FingerprintInputsWire, MANAGED_ROOT,
+        MANIFEST_FILE, OutputArtifactWire, PendingOutput, PreparedBuildScript, PreparedCacheState,
     };
     #[cfg(feature = "rhai")]
     use super::{BuildApi, BuildScriptOutputPath, BuildScriptPosition, OutputApi, ProjectApi};
@@ -1364,7 +1364,7 @@ mod api {
         let relative = parse_relative(path, "output.write", &api.limits)?;
         // An empty path is the root relative path, and `file_at` only rejects the root when the
         // directory itself is root — here it would happily name the output root as a *file*,
-        // committing `target/jals/build/rhai/out` as a regular file. Every later `output.write`
+        // committing `target/jals/build/script/out` as a regular file. Every later `output.write`
         // then fails against its own ancestor, with no recovery short of `jals clean`.
         // `decode_state` already refuses that key; refuse it on the write side too.
         if relative.is_root() {
@@ -1372,7 +1372,7 @@ mod api {
                 "output.write rejected an empty path: expected a path below the output root",
             ));
         }
-        let output_root = DirKey::parse(RHAI_OUTPUT_ROOT)
+        let output_root = DirKey::parse(BUILD_SCRIPT_OUTPUT_ROOT)
             .map_err(|error| rhai_error(format!("invalid internal output root: {error:?}")))?;
         let key = output_root.file_at(&relative).map_err(|error| {
             rhai_error(format!(
@@ -2257,7 +2257,7 @@ mod api {
             return None;
         }
 
-        let output_root = DirKey::parse(RHAI_OUTPUT_ROOT).ok()?;
+        let output_root = DirKey::parse(BUILD_SCRIPT_OUTPUT_ROOT).ok()?;
         let mut outputs = Vec::with_capacity(wire.outputs.len());
         let mut previous_output: Option<&str> = None;
         for output in &wire.outputs {
@@ -2348,7 +2348,7 @@ mod api {
         let path_fits = |key: &FileKey| {
             let rendered = key.to_string();
             let measured = rendered
-                .strip_prefix(RHAI_OUTPUT_ROOT)
+                .strip_prefix(BUILD_SCRIPT_OUTPUT_ROOT)
                 .and_then(|suffix| suffix.strip_prefix('/'))
                 .unwrap_or(&rendered);
             measured.len() <= limits.max_path_bytes && path_depth(measured) <= limits.max_path_depth
@@ -3014,8 +3014,8 @@ mod tests {
                 "#,
                 [],
             );
-            let side = FileKey::parse("target/jals/build/rhai/out/side.txt").unwrap();
-            let all = FileKey::parse("target/jals/build/rhai/out/all.txt").unwrap();
+            let side = FileKey::parse("target/jals/build/script/out/side.txt").unwrap();
+            let all = FileKey::parse("target/jals/build/script/out/all.txt").unwrap();
             let environment =
                 BuildScriptEnvironment::new().with_features(BTreeSet::from(["client".to_owned()]));
 
@@ -3067,7 +3067,7 @@ mod tests {
     fn preparation_does_not_mutate_project_or_cache_storage() {
         block_on_inline(async {
             let storage = storage(r#"output.write_text("generated.txt", "prepared");"#, []);
-            let output = FileKey::parse("target/jals/build/rhai/out/generated.txt").unwrap();
+            let output = FileKey::parse("target/jals/build/script/out/generated.txt").unwrap();
             let script = FileKey::parse("build.rhai").unwrap();
             let scope = BuildScriptCacheScope::new(ContentDigest::of(b"dependency"));
 
@@ -3181,7 +3181,7 @@ mod tests {
     fn cache_scopes_isolate_identical_script_and_output_paths() {
         block_on_inline(async {
             let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
-            let output = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             let first_digest = ContentDigest::of(b"dependency-one");
             let second_digest = ContentDigest::of(b"dependency-two");
             let first_scope = BuildScriptCacheScope::new(first_digest);
@@ -3270,10 +3270,10 @@ mod tests {
             .await;
             let output = prepared.output(view.revision());
             let generated_source =
-                FileKey::parse("target/jals/build/rhai/out/Generated.java").unwrap();
+                FileKey::parse("target/jals/build/script/out/Generated.java").unwrap();
             let existing_source = FileKey::parse("src/Existing.java").unwrap();
             let generated_classpath =
-                FileKey::parse("target/jals/build/rhai/out/generated.jar").unwrap();
+                FileKey::parse("target/jals/build/script/out/generated.jar").unwrap();
             let existing_classpath = FileKey::parse("lib/existing.jar").unwrap();
 
             assert_eq!(
@@ -3325,8 +3325,8 @@ mod tests {
             .await
             .unwrap();
 
-            let source = FileKey::parse("target/jals/build/rhai/out/generated/App.java").unwrap();
-            let resource = FileKey::parse("target/jals/build/rhai/out/data.bin").unwrap();
+            let source = FileKey::parse("target/jals/build/script/out/generated/App.java").unwrap();
+            let resource = FileKey::parse("target/jals/build/script/out/data.bin").unwrap();
             assert_eq!(
                 storage.view().file(&source).unwrap().bytes(),
                 b"class App {}\n"
@@ -3536,7 +3536,7 @@ mod tests {
                     storage
                         .view()
                         .tree()
-                        .files_under(&DirKey::parse(RHAI_OUTPUT_ROOT).unwrap())
+                        .files_under(&DirKey::parse(BUILD_SCRIPT_OUTPUT_ROOT).unwrap())
                         .next()
                         .is_none()
                 );
@@ -3568,7 +3568,7 @@ mod tests {
                 assert!(
                     storage
                         .view()
-                        .file(&FileKey::parse(RHAI_OUTPUT_ROOT).unwrap())
+                        .file(&FileKey::parse(BUILD_SCRIPT_OUTPUT_ROOT).unwrap())
                         .is_err()
                 );
                 assert_eq!(storage.revision(), Revision::INITIAL);
@@ -3600,7 +3600,7 @@ mod tests {
             let mut tracked_output = storage(
                 r#"
                     output.write_text("generated.txt", "generated");
-                    build.rerun_if_changed("target/jals/build/rhai/out/generated.txt");
+                    build.rerun_if_changed("target/jals/build/script/out/generated.txt");
                 "#,
                 [],
             );
@@ -3948,7 +3948,7 @@ mod tests {
                 assert!(
                     storage
                         .view()
-                        .file(&FileKey::parse("target/jals/build/rhai/out/A.java").unwrap())
+                        .file(&FileKey::parse("target/jals/build/script/out/A.java").unwrap())
                         .is_err()
                 );
             }
@@ -3958,8 +3958,8 @@ mod tests {
     #[test]
     fn replaces_changed_bytes_no_ops_identical_bytes_and_reconciles_known_stale_files() {
         block_on_inline(async {
-            let output_key = FileKey::parse("target/jals/build/rhai/out/A.java").unwrap();
-            let modified_key = FileKey::parse("target/jals/build/rhai/out/modified.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/A.java").unwrap();
+            let modified_key = FileKey::parse("target/jals/build/script/out/modified.txt").unwrap();
             let mut storage = storage(
                 r#"
                     output.write_text("A.java", "new");
@@ -4018,7 +4018,7 @@ mod tests {
             assert_eq!(
                 storage
                     .view()
-                    .file(&FileKey::parse("target/jals/build/rhai/out/B.java").unwrap())
+                    .file(&FileKey::parse("target/jals/build/script/out/B.java").unwrap())
                     .unwrap()
                     .bytes(),
                 b"next"
@@ -4030,7 +4030,7 @@ mod tests {
     fn cache_hit_skips_evaluation_and_keeps_the_revision() {
         block_on_inline(async {
             let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
-            let output_key = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             let mut first_environment = BuildScriptEnvironment::new();
             first_environment.insert("VALUE", "first");
             run(
@@ -4072,7 +4072,7 @@ mod tests {
                 r#"output.write_text("value.txt", project.read_text("input.txt"));"#,
                 [file("input.txt", "first")],
             );
-            let output_key = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
@@ -4128,7 +4128,7 @@ mod tests {
             assert!(
                 storage
                     .view()
-                    .file(&FileKey::parse("target/jals/build/rhai/out/generated.txt").unwrap())
+                    .file(&FileKey::parse("target/jals/build/script/out/generated.txt").unwrap())
                     .is_ok()
             );
         });
@@ -4144,7 +4144,7 @@ mod tests {
                 "#,
                 [file("watched.txt", "one"), file("ignored.txt", "first")],
             );
-            let output_key = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
@@ -4194,7 +4194,7 @@ mod tests {
                     file("ignored.txt", "first"),
                 ],
             );
-            let output_key = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
@@ -4236,7 +4236,7 @@ mod tests {
                 "#,
                 [],
             );
-            let output_key = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             let mut environment = BuildScriptEnvironment::new();
             environment.insert("VALUE", "present");
             run(
@@ -4270,7 +4270,7 @@ mod tests {
     fn cache_hit_restores_a_missing_output() {
         block_on_inline(async {
             let mut storage = storage(r#"output.write_text("value.txt", "cached");"#, []);
-            let output_key = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             run(
                 &mut storage,
                 &BuildScriptEnvironment::new(),
@@ -4307,8 +4307,8 @@ mod tests {
                 "#,
                 [],
             );
-            let owned = FileKey::parse("target/jals/build/rhai/out/owned.txt").unwrap();
-            let edited = FileKey::parse("target/jals/build/rhai/out/edited.txt").unwrap();
+            let owned = FileKey::parse("target/jals/build/script/out/owned.txt").unwrap();
+            let edited = FileKey::parse("target/jals/build/script/out/edited.txt").unwrap();
             let mut session = BuildScriptSession::new();
             run(
                 &mut storage,
@@ -4349,7 +4349,7 @@ mod tests {
     fn cache_persistence_failure_keeps_successful_session_ownership() {
         block_on_inline(async {
             let mut storage = storage(r#"output.write_text("owned.txt", "owned");"#, []);
-            let owned = FileKey::parse("target/jals/build/rhai/out/owned.txt").unwrap();
+            let owned = FileKey::parse("target/jals/build/script/out/owned.txt").unwrap();
             let limits = BuildScriptLimits {
                 max_cache_state_size: 1,
                 ..BuildScriptLimits::default()
@@ -4383,9 +4383,9 @@ mod tests {
     #[test]
     fn persisted_ownership_cleans_stale_outputs_but_preserves_user_edits() {
         block_on_inline(async {
-            let old_key = FileKey::parse("target/jals/build/rhai/out/old.txt").unwrap();
-            let edited_key = FileKey::parse("target/jals/build/rhai/out/edited.txt").unwrap();
-            let new_key = FileKey::parse("target/jals/build/rhai/out/new.txt").unwrap();
+            let old_key = FileKey::parse("target/jals/build/script/out/old.txt").unwrap();
+            let edited_key = FileKey::parse("target/jals/build/script/out/edited.txt").unwrap();
+            let new_key = FileKey::parse("target/jals/build/script/out/new.txt").unwrap();
             let mut storage = storage(
                 r#"
                     output.write_text("old.txt", "old");
@@ -4435,7 +4435,7 @@ mod tests {
     fn malformed_state_and_missing_output_artifacts_fall_back_to_evaluation() {
         block_on_inline(async {
             let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
-            let output_key = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_key = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             let script_key = FileKey::parse("build.rhai").unwrap();
             let mut environment = BuildScriptEnvironment::new();
             environment.insert("VALUE", "first");
@@ -4517,7 +4517,7 @@ mod tests {
                 ..BuildScriptLimits::default()
             };
             let mut storage = storage(r#"output.write_text("value.txt", build.env("VALUE"));"#, []);
-            let output_path = FileKey::parse("target/jals/build/rhai/out/value.txt").unwrap();
+            let output_path = FileKey::parse("target/jals/build/script/out/value.txt").unwrap();
             let script = FileKey::parse("build.rhai").unwrap();
             let mut environment = BuildScriptEnvironment::new();
             environment.insert("VALUE", "first");

@@ -48,8 +48,8 @@ use jals_storage::{DirKey, EntryRef, FileKey, ProjectView, RelativePath};
 use jals_syntax::{Parse, SyntaxNode};
 
 use super::{
-    BUILD_ARTIFACT_ROOT, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError,
-    BuildScriptLimits, BuildScriptPosition, PendingOutput, RHAI_OUTPUT_ROOT,
+    BUILD_ARTIFACT_ROOT, BUILD_SCRIPT_OUTPUT_ROOT, BuildScriptDiagnostic, BuildScriptEnvironment,
+    BuildScriptError, BuildScriptLimits, BuildScriptPosition, PendingOutput,
 };
 use crate::task::{
     TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskMappingFormat, TaskNodeKind, TaskPublishIntent,
@@ -494,13 +494,13 @@ impl Api {
                 1 => {
                     if from.is_empty() || to.is_empty() {
                         return Err(Api::refused(
-                            "tasks.tiny_v2 needs two namespace names, e.g. \
-                             tasks.tiny_v2(\"official\", \"named\")",
+                            "Tasks.tinyV2 needs two namespace names, e.g. \
+                             Tasks.tinyV2(\"official\", \"named\")",
                         ));
                     }
                     if from == to {
                         return Err(Api::refused(
-                            "tasks.tiny_v2 names the two namespaces a remap translates between, \
+                            "Tasks.tinyV2 names the two namespaces a remap translates between, \
                              so naming one twice renames nothing",
                         ));
                     }
@@ -516,7 +516,7 @@ impl Api {
                 "compile" => Ok(TaskPublishIntent::Compile),
                 "navigation" => Ok(TaskPublishIntent::Navigation),
                 _ => Err(Api::refused(
-                    "tasks.publish_tree needs an intent of `compile` (a consumer compiles this \
+                    "Tasks.publishTree needs an intent of `compile` (a consumer compiles this \
                      tree) or `navigation` (a consumer only reads it; the classpath defines these \
                      types)",
                 )),
@@ -823,7 +823,7 @@ impl Api {
                 "bytes0(J)I",
                 move |_host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
                     let value = u64::try_from(args.i64(0)?)
-                        .map_err(|_| Self::refused("tasks.bytes requires a positive byte count"))?;
+                        .map_err(|_| Self::refused("Tasks.bytes requires a positive byte count"))?;
                     let handle = push(&tasks, TaskNodeKind::ByteCount { value })?;
                     results.set(0, NativeValue::I32(handle));
                     Ok(())
@@ -1111,15 +1111,15 @@ impl Api {
 
     /// Read the file at `path` and hold its bytes for the fill that follows.
     fn read_size(&self, path: &str) -> Result<i32, NativeError> {
-        let key = Self::parse_file(path, "project.read", &self.limits)?;
+        let key = Self::parse_file(path, "Project.read", &self.limits)?;
         let file = self
             .view
             .file(&key)
-            .map_err(|error| Self::refused(format!("project.read `{key}`: {error}")))?;
+            .map_err(|error| Self::refused(format!("Project.read `{key}`: {error}")))?;
         Self::check_array_len(
             file.bytes().len(),
             self.limits.max_array_size,
-            "project.read",
+            "Project.read",
         )?;
         let length = i32::try_from(file.bytes().len()).unwrap_or(i32::MAX);
         self.scratch.borrow_mut().bytes = file.bytes().to_vec();
@@ -1148,12 +1148,12 @@ impl Api {
 
     /// Read the text of the file at `path` and hold it for the fill that follows.
     fn read_text_size(&self, path: &str) -> Result<i32, NativeError> {
-        let key = Self::parse_file(path, "project.read_text", &self.limits)?;
+        let key = Self::parse_file(path, "Project.readText", &self.limits)?;
         let text = self
             .view
             .file_text(&key)
-            .map_err(|error| Self::refused(format!("project.read_text `{key}`: {error}")))?;
-        Self::check_string_len(text, self.limits.max_string_size, "project.read_text")?;
+            .map_err(|error| Self::refused(format!("Project.readText `{key}`: {error}")))?;
+        Self::check_string_len(text, self.limits.max_string_size, "Project.readText")?;
         let length = Self::code_units(text);
         self.scratch.borrow_mut().listing = alloc::vec![text.to_owned()];
         Ok(length)
@@ -1161,12 +1161,12 @@ impl Api {
 
     /// Whether a project-relative file or directory exists at `path`.
     fn exists(&self, path: &str) -> Result<bool, NativeError> {
-        let path = Self::parse_relative(path, "project.exists", &self.limits)?;
+        let path = Self::parse_relative(path, "Project.exists", &self.limits)?;
         if path.is_root() {
             return Ok(true);
         }
         let file = FileKey::new(path.clone()).map_err(|error| {
-            Self::refused(format!("project.exists rejected path `{path}`: {error:?}"))
+            Self::refused(format!("Project.exists rejected path `{path}`: {error:?}"))
         })?;
         Ok(self.view.tree().file(&file).is_some()
             || self.view.tree().directory(&DirKey::new(path)).is_some())
@@ -1174,10 +1174,10 @@ impl Api {
 
     /// List the direct children of `path` and hold them for the entry fills that follow.
     fn read_dir_count(&self, path: &str) -> Result<i32, NativeError> {
-        let key = Self::parse_dir(path, "project.read_dir", &self.limits)?;
+        let key = Self::parse_dir(path, "Project.readDir", &self.limits)?;
         self.view
             .directory(&key)
-            .map_err(|error| Self::refused(format!("project.read_dir `{key}`: {error}")))?;
+            .map_err(|error| Self::refused(format!("Project.readDir `{key}`: {error}")))?;
         let entries: Vec<String> = self
             .view
             .tree()
@@ -1187,7 +1187,7 @@ impl Api {
                 EntryRef::File(file) => file.key().to_string(),
             })
             .collect();
-        Self::check_entries(&entries, "project.read_dir", &self.limits)?;
+        Self::check_entries(&entries, "Project.readDir", &self.limits)?;
         let count = i32::try_from(entries.len()).unwrap_or(i32::MAX);
         self.scratch.borrow_mut().listing = entries;
         Ok(count)
@@ -1195,17 +1195,17 @@ impl Api {
 
     /// List every file below `path` and hold them for the entry fills that follow.
     fn walk_files_count(&self, path: &str) -> Result<i32, NativeError> {
-        let key = Self::parse_dir(path, "project.walk_files", &self.limits)?;
+        let key = Self::parse_dir(path, "Project.walkFiles", &self.limits)?;
         self.view
             .directory(&key)
-            .map_err(|error| Self::refused(format!("project.walk_files `{key}`: {error}")))?;
+            .map_err(|error| Self::refused(format!("Project.walkFiles `{key}`: {error}")))?;
         let files: Vec<String> = self
             .view
             .tree()
             .files_under(&key)
             .map(|file| file.key().to_string())
             .collect();
-        Self::check_entries(&files, "project.walk_files", &self.limits)?;
+        Self::check_entries(&files, "Project.walkFiles", &self.limits)?;
         let count = i32::try_from(files.len()).unwrap_or(i32::MAX);
         self.scratch.borrow_mut().listing = files;
         Ok(count)
@@ -1223,7 +1223,7 @@ impl Api {
         for (index, value) in values.iter().enumerate() {
             let byte = u8::try_from(*value).map_err(|_| {
                 Self::refused(format!(
-                    "output.write byte {index} for `{path}` is outside 0..=255"
+                    "Output.write byte {index} for `{path}` is outside 0..=255"
                 ))
             })?;
             output.push(byte);
@@ -1274,20 +1274,20 @@ impl Api {
     /// The body every output write shares: validate the path, bound the bytes, buffer them, and
     /// answer the canonical key.
     fn write_output(&self, path: &str, bytes: Vec<u8>) -> Result<String, NativeError> {
-        let relative = Self::parse_relative(path, "output.write", &self.limits)?;
+        let relative = Self::parse_relative(path, "Output.write", &self.limits)?;
         // An empty path is the root relative path, and committing the root as a *file* would make
         // every later write fail against its own ancestor. `decode_state` already refuses that
         // key; refuse it on the write side too.
         if relative.is_root() {
             return Err(Self::refused(
-                "output.write rejected an empty path: expected a path below the output root",
+                "Output.write rejected an empty path: expected a path below the output root",
             ));
         }
-        let output_root = DirKey::parse(RHAI_OUTPUT_ROOT)
+        let output_root = DirKey::parse(BUILD_SCRIPT_OUTPUT_ROOT)
             .map_err(|error| Self::refused(format!("invalid internal output root: {error:?}")))?;
         let key = output_root.file_at(&relative).map_err(|error| {
             Self::refused(format!(
-                "output.write rejected output path `{path}`: {error:?}"
+                "Output.write rejected output path `{path}`: {error:?}"
             ))
         })?;
 
@@ -1298,7 +1298,7 @@ impl Api {
             .is_some()
         {
             return Err(Self::refused(format!(
-                "output.write expected a file but `{key}` is a directory"
+                "Output.write expected a file but `{key}` is a directory"
             )));
         }
         for ancestor in key.parent().ancestors() {
@@ -1309,7 +1309,7 @@ impl Api {
                 && self.view.tree().file(&file).is_some()
             {
                 return Err(Self::refused(format!(
-                    "output.write cannot create `{key}` because `{file}` is a file"
+                    "Output.write cannot create `{key}` because `{file}` is a file"
                 )));
             }
         }
@@ -1317,10 +1317,10 @@ impl Api {
         let mut pending = self
             .pending
             .try_borrow_mut()
-            .map_err(|_| Self::refused("reentrant output.write call"))?;
+            .map_err(|_| Self::refused("reentrant Output.write call"))?;
         if bytes.len() > pending.limits.max_output_file_size {
             return Err(Self::refused(format!(
-                "output.write `{path}` has {} bytes, exceeding the per-file limit of {}",
+                "Output.write `{path}` has {} bytes, exceeding the per-file limit of {}",
                 bytes.len(),
                 pending.limits.max_output_file_size
             )));
@@ -1329,7 +1329,7 @@ impl Api {
             && pending.generated.len() == pending.limits.max_output_files
         {
             return Err(Self::refused(format!(
-                "output.write exceeds the generated-file limit of {}",
+                "Output.write exceeds the generated-file limit of {}",
                 pending.limits.max_output_files
             )));
         }
@@ -1339,7 +1339,7 @@ impl Api {
                     || key.path().starts_with(existing.path()))
         }) {
             return Err(Self::refused(format!(
-                "output.write path `{key}` conflicts with generated file `{conflict}`"
+                "Output.write path `{key}` conflicts with generated file `{conflict}`"
             )));
         }
         let previous_len = pending.generated.get(&key).map_or(0, Vec::len);
@@ -1347,10 +1347,10 @@ impl Api {
             .total_output_bytes
             .checked_sub(previous_len)
             .and_then(|size| size.checked_add(bytes.len()))
-            .ok_or_else(|| Self::refused("output.write total byte count overflowed"))?;
+            .ok_or_else(|| Self::refused("Output.write total byte count overflowed"))?;
         if total > pending.limits.max_total_output_size {
             return Err(Self::refused(format!(
-                "output.write would produce {total} total bytes, exceeding the limit of {}",
+                "Output.write would produce {total} total bytes, exceeding the limit of {}",
                 pending.limits.max_total_output_size
             )));
         }
@@ -1387,23 +1387,18 @@ impl Api {
 
     /// Track one project file for cache invalidation.
     fn rerun_if_changed(&self, path: &str) -> Result<(), NativeError> {
-        let key = Self::project_file(&self.view, path, "build.rerun_if_changed", &self.limits)?;
+        let key = Self::project_file(&self.view, path, "Build.rerunIfChanged", &self.limits)?;
         if Self::is_managed_build_path(&key) {
             return Err(Self::refused(format!(
-                "build.rerun_if_changed rejected managed build output `{key}`"
+                "Build.rerunIfChanged rejected managed build output `{key}`"
             )));
         }
         let mut pending = self
             .pending
             .try_borrow_mut()
-            .map_err(|_| Self::refused("reentrant build.rerun_if_changed call"))?;
+            .map_err(|_| Self::refused("reentrant Build.rerunIfChanged call"))?;
         let limit = pending.limits.max_array_size;
-        Self::insert_host_file(
-            &mut pending.rerun_files,
-            key,
-            limit,
-            "build.rerun_if_changed",
-        )
+        Self::insert_host_file(&mut pending.rerun_files, key, limit, "Build.rerunIfChanged")
     }
 
     /// Track one supplied environment value for cache invalidation.
@@ -1566,26 +1561,26 @@ impl Api {
     /// Record deterministic host-readable metadata.
     fn metadata(&self, key: &str, value: &str) -> Result<(), NativeError> {
         if key.is_empty() {
-            return Err(Self::refused("build.metadata rejected an empty key"));
+            return Err(Self::refused("Build.metadata rejected an empty key"));
         }
         let mut pending = self
             .pending
             .try_borrow_mut()
-            .map_err(|_| Self::refused("reentrant build.metadata call"))?;
+            .map_err(|_| Self::refused("reentrant Build.metadata call"))?;
         let previous = pending.metadata.get(key);
         let previous_bytes = previous.map_or(0, |value| key.len() + value.len());
         if previous.is_none() {
             Self::check_host_collection(
                 pending.metadata.len(),
                 pending.limits.max_map_size,
-                "build.metadata",
+                "Build.metadata",
             )?;
         }
         Self::update_host_directive_bytes(
             &mut pending,
             previous_bytes,
             key.len() + value.len(),
-            "build.metadata",
+            "Build.metadata",
         )?;
         pending.metadata.insert(key.to_owned(), value.to_owned());
         Ok(())
@@ -1922,8 +1917,8 @@ mod tests {
     use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
 
     use super::super::{
-        BuildScriptCacheScope, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
-        PreparedBuildScript, RHAI_OUTPUT_ROOT, prepare_build_script,
+        BUILD_SCRIPT_OUTPUT_ROOT, BuildScriptCacheScope, BuildScriptEnvironment, BuildScriptError,
+        BuildScriptLimits, PreparedBuildScript, prepare_build_script,
     };
     use crate::task::{
         TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskMappingFormat, TaskNode, TaskNodeKind,
@@ -1969,9 +1964,9 @@ mod tests {
         .map(Option::unwrap)
     }
 
-    /// A project key below the output root, as `output.write` returns it.
+    /// A project key below the output root, as `Output.write` returns it.
     fn output(path: &str) -> FileKey {
-        FileKey::parse(&format!("{RHAI_OUTPUT_ROOT}/{path}")).unwrap()
+        FileKey::parse(&format!("{BUILD_SCRIPT_OUTPUT_ROOT}/{path}")).unwrap()
     }
 
     /// The 1-based line byte `offset` falls on.
@@ -2147,7 +2142,7 @@ class build {
                 panic!("a refused read is a run failure, got {error:?}");
             };
             assert!(
-                message.contains("project.read_text `missing.txt`"),
+                message.contains("Project.readText `missing.txt`"),
                 "the refusal names the operation and the key: {message}"
             );
             assert!(
@@ -2567,11 +2562,11 @@ class build {
             let cases = [
                 (
                     "class build {\n    public static void main() {\n        long max = jals.build.Tasks.bytes(-1);\n    }\n}\n",
-                    "tasks.bytes requires a positive byte count",
+                    "Tasks.bytes requires a positive byte count",
                 ),
                 (
                     "class build {\n    public static void main() {\n        jals.build.MappingFormat f = jals.build.Tasks.tinyV2(\"\", \"named\");\n    }\n}\n",
-                    "tasks.tiny_v2 needs two namespace names",
+                    "Tasks.tinyV2 needs two namespace names",
                 ),
                 (
                     "class build {\n    public static void main() {\n        jals.build.MappingFormat f = jals.build.Tasks.tinyV2(\"official\", \"official\");\n    }\n}\n",
@@ -2587,7 +2582,7 @@ class build {
                 ),
                 (
                     "class build {\n    public static void main() {\n        int local = jals.build.Tasks.projectJar(\"lib/local.jar\");\n        jals.build.Tasks.publishTree(\"example\", local, \"dest\", \"watch\");\n    }\n}\n",
-                    "tasks.publish_tree needs an intent of `compile`",
+                    "Tasks.publishTree needs an intent of `compile`",
                 ),
             ];
             for (script, needle) in cases {
