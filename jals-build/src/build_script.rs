@@ -27,6 +27,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::task::{TaskPlan, TaskPlanLimits};
 
+// Bumped for the Java task surface: `build.java` scripts gained `jals.build.Tasks` — the whole
+// declarative vocabulary the Rhai surface had, down to the mapping grammars — and the builder now
+// hands the finished plan over rather than unwrapping it. The plan's own format is unchanged, so
+// only the API version moves.
+//
 // Both bumped for declarative remap: `TaskNodeKind` gained `ProjectText`, and `RemapJar` gained
 // required `format` / `direction` / `hierarchy` fields. The plan is `deny_unknown_fields` and is
 // fingerprinted as canonical JSON, so a pre-remap state decodes to a different plan than it was
@@ -41,7 +46,7 @@ use crate::task::{TaskPlan, TaskPlanLimits};
 // `java` script's host surface is the `jals.build` package rather than the Rhai registrations.
 // The two engines buffer into the same pending output, so the *state* format is unchanged; the
 // API version is what reseeds a cache written by a Rhai script that a Java script now replaces.
-const BUILD_SCRIPT_API_VERSION: u32 = 8;
+const BUILD_SCRIPT_API_VERSION: u32 = 9;
 const BUILD_SCRIPT_STATE_VERSION: u32 = 7;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired

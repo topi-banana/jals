@@ -51,7 +51,10 @@ use super::{
     BUILD_ARTIFACT_ROOT, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError,
     BuildScriptLimits, BuildScriptPosition, PendingOutput, RHAI_OUTPUT_ROOT,
 };
-use crate::task::TasksApi;
+use crate::task::{
+    TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskMappingFormat, TaskNodeKind, TaskPublishIntent,
+    TaskPublishMode, TaskRemapDirection, TaskTerminal, TasksApi,
+};
 use crate::wasm_run::{WasmLibrary, WasmRunError, WasmRunRequest, WasmRunner};
 
 /// The name the `jals.build` package is selected and cached under.
@@ -83,6 +86,14 @@ const SOURCES: &[(&str, &str)] = &[
         "jals/build/Build.java",
         include_str!("../../java/jals/build/Build.java"),
     ),
+    (
+        "jals/build/MappingFormat.java",
+        include_str!("../../java/jals/build/MappingFormat.java"),
+    ),
+    (
+        "jals/build/Tasks.java",
+        include_str!("../../java/jals/build/Tasks.java"),
+    ),
 ];
 
 /// The engine one `build.java` script runs on.
@@ -111,6 +122,7 @@ impl Engine {
             limits: limits.clone(),
             pending: Rc::clone(&pending),
             scratch: Rc::new(RefCell::new(Scratch::default())),
+            tasks: tasks.clone(),
         };
 
         let selection = Self::selection(&api, script_key)?;
@@ -370,6 +382,9 @@ struct Api {
     limits: BuildScriptLimits,
     pending: Rc<RefCell<PendingOutput>>,
     scratch: Rc<RefCell<Scratch>>,
+    /// The task graph the `Tasks` half of the package records into. Shared with [`Engine::evaluate`],
+    /// which takes the finished plan after the run.
+    tasks: TasksApi,
 }
 
 impl Api {
@@ -392,6 +407,120 @@ impl Api {
             let slot = args.reference(position)?;
             let length = host.array_len(slot)?;
             host.array_text(slot, 0, length)
+        }
+
+        /// One new value node, as the `int` handle its caller names it by.
+        fn push(tasks: &TasksApi, kind: TaskNodeKind) -> Result<i32, NativeError> {
+            let handle = tasks
+                .push(kind)
+                .map_err(|error| NativeError::Message(error.to_string()))?;
+            i32::try_from(handle.index())
+                .map_err(|_| Api::refused("the build-task count is beyond what an `int` can name"))
+        }
+
+        /// One new terminal, refused with the plan's own reason.
+        fn terminal(tasks: &TasksApi, terminal: TaskTerminal) -> Result<(), NativeError> {
+            tasks
+                .terminal(terminal)
+                .map_err(|error| NativeError::Message(error.to_string()))
+        }
+
+        /// The `char[]` and `int[]` arguments at `position` and `position + 1`, as the strings the
+        /// Java half packed into them.
+        ///
+        /// `Tasks.pack` writes one end offset per value, so a segment is the slice between two end
+        /// offsets; both arrays are read here rather than trusted, because the pair crosses the
+        /// boundary as plain data.
+        fn packed_strings(
+            host: &mut dyn NativeHost,
+            args: &Args<'_>,
+            position: usize,
+        ) -> Result<Vec<String>, NativeError> {
+            let packed = args.reference(position)?;
+            let ends = host.array_i32(args.reference(position + 1)?)?;
+            let mut out = Vec::new();
+            let mut at = 0u32;
+            for end in ends {
+                let end = u32::try_from(end)
+                    .map_err(|_| Api::refused("a packed string list has a negative end offset"))?;
+                if end < at {
+                    return Err(Api::refused("a packed string list is not in order"));
+                }
+                out.push(host.array_text(packed, at, end - at)?);
+                at = end;
+            }
+            Ok(out)
+        }
+
+        /// One `int` argument as a node ID.
+        fn task_id(args: &Args<'_>, position: usize) -> Result<TaskId, NativeError> {
+            let value = args.i32(position)?;
+            u32::try_from(value)
+                .map(TaskId::new)
+                .map_err(|_| Api::refused(format!("{value} is not a task handle")))
+        }
+
+        /// The digest algorithm an `int` argument names.
+        fn digest_algorithm(kind: i32) -> Result<TaskDigestAlgorithm, NativeError> {
+            match kind {
+                0 => Ok(TaskDigestAlgorithm::Sha1),
+                1 => Ok(TaskDigestAlgorithm::Sha256),
+                _ => Err(Api::refused(format!("{kind} is not a digest algorithm"))),
+            }
+        }
+
+        /// The fetch kind an `int` argument names.
+        fn fetch_kind(kind: i32) -> Result<TaskFetchKind, NativeError> {
+            match kind {
+                0 => Ok(TaskFetchKind::Json),
+                1 => Ok(TaskFetchKind::Jar),
+                2 => Ok(TaskFetchKind::Text),
+                _ => Err(Api::refused(format!("{kind} is not a fetch kind"))),
+            }
+        }
+
+        /// The grammar a `MappingFormat` states.
+        ///
+        /// Revalidated here because a Java value crossed as data: the pair was checked where
+        /// `Tasks.tinyV2` built it, and a script may have held it since. The messages keep the task
+        /// API's spelling, as the rest of `jals.build`'s refusals do.
+        fn mapping_format(
+            kind: i32,
+            from: String,
+            to: String,
+        ) -> Result<TaskMappingFormat, NativeError> {
+            match kind {
+                0 => Ok(TaskMappingFormat::Proguard),
+                1 => {
+                    if from.is_empty() || to.is_empty() {
+                        return Err(Api::refused(
+                            "tasks.tiny_v2 needs two namespace names, e.g. \
+                             tasks.tiny_v2(\"official\", \"named\")",
+                        ));
+                    }
+                    if from == to {
+                        return Err(Api::refused(
+                            "tasks.tiny_v2 names the two namespaces a remap translates between, \
+                             so naming one twice renames nothing",
+                        ));
+                    }
+                    Ok(TaskMappingFormat::TinyV2 { from, to })
+                }
+                _ => Err(Api::refused(format!("{kind} is not a mapping format"))),
+            }
+        }
+
+        /// The publication intent a string argument names.
+        fn publish_intent(intent: &str) -> Result<TaskPublishIntent, NativeError> {
+            match intent {
+                "compile" => Ok(TaskPublishIntent::Compile),
+                "navigation" => Ok(TaskPublishIntent::Navigation),
+                _ => Err(Api::refused(
+                    "tasks.publish_tree needs an intent of `compile` (a consumer compiles this \
+                     tree) or `navigation` (a consumer only reads it; the classpath defines these \
+                     types)",
+                )),
+            }
         }
 
         let mut package = NativePackage::new(PACKAGE, VERSION);
@@ -649,6 +778,279 @@ impl Api {
                     let key = text(host, &args, 0)?;
                     let value = text(host, &args, 1)?;
                     api.metadata(&key, &value)
+                },
+            );
+        }
+
+        {
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "httpsUrl0([C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let value = text(host, &args, 0)?;
+                    let handle = push(&tasks, TaskNodeKind::HttpsUrl { value })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "projectJar0([C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let path = text(host, &args, 0)?;
+                    let handle = push(&tasks, TaskNodeKind::ProjectJar { path })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "digest0([CI)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let value = text(host, &args, 0)?;
+                    let algorithm = digest_algorithm(args.i32(1)?)?;
+                    let handle = push(&tasks, TaskNodeKind::Digest { algorithm, value })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "bytes0(J)I",
+                move |_host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let value = u64::try_from(args.i64(0)?)
+                        .map_err(|_| Self::refused("tasks.bytes requires a positive byte count"))?;
+                    let handle = push(&tasks, TaskNodeKind::ByteCount { value })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "fetch0(IIII)I",
+                move |_host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let kind = fetch_kind(args.i32(3)?)?;
+                    let handle = push(
+                        &tasks,
+                        TaskNodeKind::Fetch {
+                            kind,
+                            url: task_id(&args, 0)?,
+                            digest: task_id(&args, 1)?,
+                            max_bytes: task_id(&args, 2)?,
+                        },
+                    )?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "jsonAt0(I[C[I)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let json = task_id(&args, 0)?;
+                    let path = packed_strings(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::JsonAt { json, path })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "jsonFindString0(I[C[I[C[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let json = task_id(&args, 0)?;
+                    let path = packed_strings(host, &args, 1)?;
+                    let field = text(host, &args, 3)?;
+                    let value = text(host, &args, 4)?;
+                    let handle = push(
+                        &tasks,
+                        TaskNodeKind::JsonFindString {
+                            json,
+                            path,
+                            field,
+                            value,
+                        },
+                    )?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "jsonUrl0(I[C[I)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let json = task_id(&args, 0)?;
+                    let path = packed_strings(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::JsonUrl { json, path })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "jsonDigest0(I[C[II)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let json = task_id(&args, 0)?;
+                    let path = packed_strings(host, &args, 1)?;
+                    let algorithm = digest_algorithm(args.i32(3)?)?;
+                    let handle = push(
+                        &tasks,
+                        TaskNodeKind::JsonDigest {
+                            json,
+                            path,
+                            algorithm,
+                        },
+                    )?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "jsonU640(I[C[I)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let json = task_id(&args, 0)?;
+                    let path = packed_strings(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::JsonU64 { json, path })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "extractJava0(I[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let jar = task_id(&args, 0)?;
+                    let prefix = text(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::ExtractJava { jar, prefix })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "nestedJar0(I[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let jar = task_id(&args, 0)?;
+                    let member = text(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::NestedJar { jar, member })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            package.bind(
+                "jals/build/Tasks",
+                "tinyV2Check([C[C)V",
+                move |host: &mut dyn NativeHost, args: Args<'_>, _results: Results<'_>| {
+                    let from = text(host, &args, 0)?;
+                    let to = text(host, &args, 1)?;
+                    mapping_format(1, from, to).map(|_| ())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "remapJar0(III[C[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let jar = task_id(&args, 0)?;
+                    let mappings = task_id(&args, 1)?;
+                    let format =
+                        mapping_format(args.i32(2)?, text(host, &args, 3)?, text(host, &args, 4)?)?;
+                    let handle = push(
+                        &tasks,
+                        TaskNodeKind::RemapJar {
+                            jar,
+                            mappings,
+                            format,
+                            direction: TaskRemapDirection::Deobfuscate,
+                            hierarchy: Vec::new(),
+                        },
+                    )?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "mergeJars0(II)I",
+                move |_host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let base = task_id(&args, 0)?;
+                    let overlay = task_id(&args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::MergeJars { base, overlay })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "decompileJava0(I[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let jar = task_id(&args, 0)?;
+                    let prefix = text(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::DecompileJava { jar, prefix })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "addClasspath0(I)V",
+                move |_host: &mut dyn NativeHost, args: Args<'_>, _results: Results<'_>| {
+                    terminal(
+                        &tasks,
+                        TaskTerminal::AddClasspath {
+                            jar: task_id(&args, 0)?,
+                        },
+                    )
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "addNestedClasspath0(I)V",
+                move |_host: &mut dyn NativeHost, args: Args<'_>, _results: Results<'_>| {
+                    terminal(
+                        &tasks,
+                        TaskTerminal::AddNestedClasspath {
+                            jar: task_id(&args, 0)?,
+                        },
+                    )
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "publishTree0([CI[C[C)V",
+                move |host: &mut dyn NativeHost, args: Args<'_>, _results: Results<'_>| {
+                    let owner = text(host, &args, 0)?;
+                    let tree = task_id(&args, 1)?;
+                    let destination = text(host, &args, 2)?;
+                    let intent = publish_intent(&text(host, &args, 3)?)?;
+                    terminal(
+                        &tasks,
+                        TaskTerminal::PublishTree {
+                            owner,
+                            tree,
+                            destination,
+                            mode: TaskPublishMode::ReplaceRoot,
+                            intent,
+                        },
+                    )
                 },
             );
         }
@@ -1523,6 +1925,10 @@ mod tests {
         BuildScriptCacheScope, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
         PreparedBuildScript, RHAI_OUTPUT_ROOT, prepare_build_script,
     };
+    use crate::task::{
+        TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskMappingFormat, TaskNode, TaskNodeKind,
+        TaskPlan, TaskPublishIntent, TaskPublishMode, TaskRemapDirection, TaskTerminal,
+    };
 
     /// One project file, as an entry for a memory storage.
     fn file(path: &str, text: &str) -> Entry {
@@ -1867,6 +2273,355 @@ class build {
                 line_of(script, range.start),
                 5,
                 "the position is the statement the loop was in"
+            );
+        });
+    }
+
+    /// A script that records every task the Java `Tasks` publishes: one of each node kind, both
+    /// `remapJar` grammars, and every terminal.
+    const TASKS: &str = r#"
+import jals.build.MappingFormat;
+import jals.build.Tasks;
+
+class build {
+    public static void main() {
+        String sha1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        String sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        int url = Tasks.httpsUrl("https://example.invalid/sources.jar");
+        int local = Tasks.projectJar("lib/local.jar");
+        int old = Tasks.sha1(sha1);
+        int digest = Tasks.sha256(sha256);
+        int capped = Tasks.bytes(4096);
+        int index = Tasks.fetchJson(url, digest, capped);
+        int fetched = Tasks.fetchJar(url, digest, capped);
+        int text = Tasks.fetchText(url, digest, capped);
+        String[] empty = new String[0];
+        String[] down = new String[2];
+        down[0] = "downloads";
+        down[1] = "sources";
+        int at = Tasks.jsonAt(index, down);
+        int found = Tasks.jsonFindString(index, empty, "latest", "release");
+        int listed = Tasks.jsonUrl(index, down);
+        int oldSum = Tasks.jsonSha1(index, down);
+        int sum = Tasks.jsonSha256(index, down);
+        int size = Tasks.jsonU64(index, down);
+        int sources = Tasks.extractJava(local, "net/example");
+        int nested = Tasks.nestedJar(local, "META-INF/libraries/a.jar");
+        int remapped = Tasks.remapJar(nested, text);
+        MappingFormat tiny = Tasks.tinyV2("official", "named");
+        int named = Tasks.remapJarAs(fetched, text, tiny);
+        MappingFormat plain = Tasks.proguard();
+        int guarded = Tasks.remapJarAs(local, text, plain);
+        int merged = Tasks.mergeJars(remapped, named);
+        int decompiled = Tasks.decompileJava(merged, "src");
+        Tasks.addClasspath(guarded);
+        Tasks.addNestedClasspath(nested);
+        Tasks.publishTree("example", sources, "src/main/java/net/example", "navigation");
+        Tasks.publishTree("example", decompiled, "src/main/java", "compile");
+    }
+}
+"#;
+
+    /// The whole task vocabulary crosses the boundary as one plan, node for node.
+    ///
+    /// The expected plan is written out rather than spot-checked because what the test is worth is
+    /// the *crossing*: handles named by the number a Java call answered with, a `String[]` path
+    /// unpacked from its two arrays, algorithm and fetch-kind tags, and a `MappingFormat` that
+    /// crossed as data rather than as a call.
+    #[test]
+    fn a_script_records_every_task_the_java_api_publishes() {
+        block_on_inline(async {
+            let storage = storage(TASKS, []);
+            let prepared = prepare(
+                &storage,
+                &BuildScriptEnvironment::new(),
+                &BuildScriptLimits::default(),
+            )
+            .await
+            .expect("every declared task is inside the limits");
+
+            let plan = prepared.output(storage.revision()).task_plan;
+            let node = |index: u32, kind: TaskNodeKind| TaskNode {
+                id: TaskId::new(index),
+                kind,
+            };
+            let down = vec!["downloads".to_owned(), "sources".to_owned()];
+            let expected = TaskPlan {
+                nodes: vec![
+                    node(
+                        0,
+                        TaskNodeKind::HttpsUrl {
+                            value: "https://example.invalid/sources.jar".to_owned(),
+                        },
+                    ),
+                    node(
+                        1,
+                        TaskNodeKind::ProjectJar {
+                            path: "lib/local.jar".to_owned(),
+                        },
+                    ),
+                    node(
+                        2,
+                        TaskNodeKind::Digest {
+                            algorithm: TaskDigestAlgorithm::Sha1,
+                            value: "a".repeat(40),
+                        },
+                    ),
+                    node(
+                        3,
+                        TaskNodeKind::Digest {
+                            algorithm: TaskDigestAlgorithm::Sha256,
+                            value: "a".repeat(64),
+                        },
+                    ),
+                    node(4, TaskNodeKind::ByteCount { value: 4096 }),
+                    node(
+                        5,
+                        TaskNodeKind::Fetch {
+                            kind: TaskFetchKind::Json,
+                            url: TaskId::new(0),
+                            digest: TaskId::new(3),
+                            max_bytes: TaskId::new(4),
+                        },
+                    ),
+                    node(
+                        6,
+                        TaskNodeKind::Fetch {
+                            kind: TaskFetchKind::Jar,
+                            url: TaskId::new(0),
+                            digest: TaskId::new(3),
+                            max_bytes: TaskId::new(4),
+                        },
+                    ),
+                    node(
+                        7,
+                        TaskNodeKind::Fetch {
+                            kind: TaskFetchKind::Text,
+                            url: TaskId::new(0),
+                            digest: TaskId::new(3),
+                            max_bytes: TaskId::new(4),
+                        },
+                    ),
+                    node(
+                        8,
+                        TaskNodeKind::JsonAt {
+                            json: TaskId::new(5),
+                            path: down.clone(),
+                        },
+                    ),
+                    node(
+                        9,
+                        TaskNodeKind::JsonFindString {
+                            json: TaskId::new(5),
+                            path: Vec::new(),
+                            field: "latest".to_owned(),
+                            value: "release".to_owned(),
+                        },
+                    ),
+                    node(
+                        10,
+                        TaskNodeKind::JsonUrl {
+                            json: TaskId::new(5),
+                            path: down.clone(),
+                        },
+                    ),
+                    node(
+                        11,
+                        TaskNodeKind::JsonDigest {
+                            json: TaskId::new(5),
+                            path: down.clone(),
+                            algorithm: TaskDigestAlgorithm::Sha1,
+                        },
+                    ),
+                    node(
+                        12,
+                        TaskNodeKind::JsonDigest {
+                            json: TaskId::new(5),
+                            path: down.clone(),
+                            algorithm: TaskDigestAlgorithm::Sha256,
+                        },
+                    ),
+                    node(
+                        13,
+                        TaskNodeKind::JsonU64 {
+                            json: TaskId::new(5),
+                            path: down,
+                        },
+                    ),
+                    node(
+                        14,
+                        TaskNodeKind::ExtractJava {
+                            jar: TaskId::new(1),
+                            prefix: "net/example".to_owned(),
+                        },
+                    ),
+                    node(
+                        15,
+                        TaskNodeKind::NestedJar {
+                            jar: TaskId::new(1),
+                            member: "META-INF/libraries/a.jar".to_owned(),
+                        },
+                    ),
+                    node(
+                        16,
+                        TaskNodeKind::RemapJar {
+                            jar: TaskId::new(15),
+                            mappings: TaskId::new(7),
+                            format: TaskMappingFormat::Proguard,
+                            direction: TaskRemapDirection::Deobfuscate,
+                            hierarchy: Vec::new(),
+                        },
+                    ),
+                    node(
+                        17,
+                        TaskNodeKind::RemapJar {
+                            jar: TaskId::new(6),
+                            mappings: TaskId::new(7),
+                            format: TaskMappingFormat::TinyV2 {
+                                from: "official".to_owned(),
+                                to: "named".to_owned(),
+                            },
+                            direction: TaskRemapDirection::Deobfuscate,
+                            hierarchy: Vec::new(),
+                        },
+                    ),
+                    node(
+                        18,
+                        TaskNodeKind::RemapJar {
+                            jar: TaskId::new(1),
+                            mappings: TaskId::new(7),
+                            format: TaskMappingFormat::Proguard,
+                            direction: TaskRemapDirection::Deobfuscate,
+                            hierarchy: Vec::new(),
+                        },
+                    ),
+                    node(
+                        19,
+                        TaskNodeKind::MergeJars {
+                            base: TaskId::new(16),
+                            overlay: TaskId::new(17),
+                        },
+                    ),
+                    node(
+                        20,
+                        TaskNodeKind::DecompileJava {
+                            jar: TaskId::new(19),
+                            prefix: "src".to_owned(),
+                        },
+                    ),
+                ],
+                terminals: vec![
+                    TaskTerminal::AddClasspath {
+                        jar: TaskId::new(18),
+                    },
+                    TaskTerminal::AddNestedClasspath {
+                        jar: TaskId::new(15),
+                    },
+                    TaskTerminal::PublishTree {
+                        owner: "example".to_owned(),
+                        tree: TaskId::new(14),
+                        destination: "src/main/java/net/example".to_owned(),
+                        mode: TaskPublishMode::ReplaceRoot,
+                        intent: TaskPublishIntent::Navigation,
+                    },
+                    TaskTerminal::PublishTree {
+                        owner: "example".to_owned(),
+                        tree: TaskId::new(20),
+                        destination: "src/main/java".to_owned(),
+                        mode: TaskPublishMode::ReplaceRoot,
+                        intent: TaskPublishIntent::Compile,
+                    },
+                ],
+            };
+            assert_eq!(plan, expected);
+        });
+    }
+
+    /// Prepare `script`, expecting a run failure, and answer its message and 1-based line.
+    async fn refusal(script: &str) -> (String, u32) {
+        let storage = storage(script, []);
+        let error = prepare(
+            &storage,
+            &BuildScriptEnvironment::new(),
+            &BuildScriptLimits::default(),
+        )
+        .await
+        .unwrap_err();
+        let BuildScriptError::Execute {
+            position, message, ..
+        } = error
+        else {
+            panic!("expected a run failure, got {error:?}");
+        };
+        let position =
+            position.unwrap_or_else(|| panic!("the module carries statement positions: {message}"));
+        let range = position.byte_range(script).unwrap();
+        (message, line_of(script, range.start))
+    }
+
+    /// A task refusal is the vocabulary's, is written at the call, and is not the engine's
+    /// scaffolding — every kind of mistake the Java surface can make, one case each.
+    #[test]
+    fn the_task_vocabulary_refuses_what_cannot_run() {
+        block_on_inline(async {
+            let cases = [
+                (
+                    "class build {\n    public static void main() {\n        long max = jals.build.Tasks.bytes(-1);\n    }\n}\n",
+                    "tasks.bytes requires a positive byte count",
+                ),
+                (
+                    "class build {\n    public static void main() {\n        jals.build.MappingFormat f = jals.build.Tasks.tinyV2(\"\", \"named\");\n    }\n}\n",
+                    "tasks.tiny_v2 needs two namespace names",
+                ),
+                (
+                    "class build {\n    public static void main() {\n        jals.build.MappingFormat f = jals.build.Tasks.tinyV2(\"official\", \"official\");\n    }\n}\n",
+                    "naming one twice renames nothing",
+                ),
+                (
+                    "class build {\n    public static void main() {\n        int url = jals.build.Tasks.httpsUrl(\"https://example.invalid/x\");\n        jals.build.Tasks.addClasspath(url);\n    }\n}\n",
+                    "expected Jar",
+                ),
+                (
+                    "class build {\n    public static void main() {\n        jals.build.Tasks.addClasspath(7);\n    }\n}\n",
+                    "missing node 7",
+                ),
+                (
+                    "class build {\n    public static void main() {\n        int local = jals.build.Tasks.projectJar(\"lib/local.jar\");\n        jals.build.Tasks.publishTree(\"example\", local, \"dest\", \"watch\");\n    }\n}\n",
+                    "tasks.publish_tree needs an intent of `compile`",
+                ),
+            ];
+            for (script, needle) in cases {
+                let (message, _) = refusal(script).await;
+                assert!(message.contains(needle), "`{needle}` not in `{message}`");
+                assert!(
+                    !message.contains("host function trap"),
+                    "the engine's scaffolding is not part of the refusal: {message}"
+                );
+            }
+        });
+    }
+
+    /// A refusal the plan's own validation makes — not the binding's — still points at the
+    /// statement that wrote the offending value.
+    #[test]
+    fn a_task_refusal_points_at_its_statement() {
+        block_on_inline(async {
+            let script = "\
+class build {
+    public static void main() {
+        int local = jals.build.Tasks.projectJar(\"lib/local.jar\");
+        long bytes = jals.build.Tasks.bytes(0);
+    }
+}
+";
+            let (message, line) = refusal(script).await;
+            assert!(
+                message.contains("byte count must be non-zero"),
+                "the plan's validation named the value: {message}"
+            );
+            assert_eq!(
+                line, 4,
+                "the position is the statement the call was written in"
             );
         });
     }

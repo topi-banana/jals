@@ -10,9 +10,7 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-#[cfg(feature = "rhai")]
-use core::cell::Cell;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::fmt;
 
 use jals_storage::RelativePath;
@@ -45,6 +43,14 @@ pub struct TaskPlanLimits {
 pub struct TaskId(u32);
 
 impl TaskId {
+    /// The ID of the node at `index` — how an engine names a node a `Tasks` method already
+    /// recorded, since a plan is append-only and every input is a handle from an earlier call.
+    #[cfg(feature = "build-script")]
+    pub(crate) const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// The index this ID names in its plan.
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -632,6 +638,7 @@ pub enum TaskPlanError {
     InvalidJsonPath,
     InvalidPath,
     InvalidOwner,
+    Reentrant(&'static str),
 }
 
 impl fmt::Display for TaskPlanError {
@@ -664,16 +671,25 @@ impl fmt::Display for TaskPlanError {
             Self::InvalidJsonPath => f.write_str("build-task JSON path contains an empty segment"),
             Self::InvalidPath => f.write_str("build task contains an invalid portable path"),
             Self::InvalidOwner => f.write_str("build-task publication owner must not be empty"),
+            Self::Reentrant(what) => write!(f, "reentrant build-task {what}"),
         }
     }
 }
 
 impl core::error::Error for TaskPlanError {}
 
-#[cfg(feature = "rhai")]
+/// One value node of the plan being recorded, as an engine holds it.
 #[derive(Debug, Clone, Copy)]
-struct TaskHandle {
+pub(crate) struct TaskHandle {
     id: TaskId,
+}
+
+impl TaskHandle {
+    /// The node's index, which is the number a Java `Tasks` method answers with.
+    #[cfg(feature = "build-script")]
+    pub(crate) const fn index(self) -> u32 {
+        self.id.0
+    }
 }
 
 #[cfg(feature = "rhai")]
@@ -753,16 +769,12 @@ impl PlanCost {
     }
 }
 
-/// Rhai-facing task graph builder. It records data only and never performs task effects.
+/// Task graph builder. It records data only and never performs task effects.
 #[derive(Clone)]
 pub(crate) struct TasksApi {
     plan: Rc<RefCell<TaskPlan>>,
     limits: TaskPlanLimits,
     /// Totals for everything already accepted, so each declaration costs O(1).
-    ///
-    /// Gated with the Rhai declarations that maintain it; the Java engine's task bindings (which
-    /// reuse this type) will lift the gate when they land.
-    #[cfg(feature = "rhai")]
     cost: Rc<Cell<PlanCost>>,
 }
 
@@ -771,50 +783,53 @@ impl TasksApi {
         Self {
             plan: Rc::new(RefCell::new(TaskPlan::new())),
             limits,
-            #[cfg(feature = "rhai")]
             cost: Rc::new(Cell::new(PlanCost::default())),
         }
     }
 
-    pub(crate) fn finish(self) -> Result<TaskPlan, TaskPlanError> {
-        let plan = Rc::try_unwrap(self.plan)
-            .map_err(|_| TaskPlanError::NonCanonicalNodeId)?
-            .into_inner();
+    /// Take the finished plan, checking it as a whole.
+    ///
+    /// Taken rather than unwrapped because the Java engine's bindings hold the builder for as long
+    /// as their module's package set lives — the run is over by the time this is called, and
+    /// taking the plan leaves an empty one nothing can extend.
+    pub(crate) fn finish(&self) -> Result<TaskPlan, TaskPlanError> {
+        let mut current = self
+            .plan
+            .try_borrow_mut()
+            .map_err(|_| TaskPlanError::Reentrant("completion"))?;
+        let plan = core::mem::replace(&mut *current, TaskPlan::new());
         plan.validate(self.limits)?;
         Ok(plan)
     }
 
-    #[cfg(feature = "rhai")]
-    fn push(&self, kind: TaskNodeKind) -> RhaiResult<TaskHandle> {
+    /// Record one value node, checked against its inputs and the running totals.
+    ///
+    /// A node may only reference nodes already in the plan, so the check is against the prefix
+    /// that exists and the totals start where the last declaration left them.
+    pub(crate) fn push(&self, kind: TaskNodeKind) -> Result<TaskHandle, TaskPlanError> {
         let mut plan = self
             .plan
             .try_borrow_mut()
-            .map_err(|_| Self::rhai_error("reentrant build-task declaration"))?;
+            .map_err(|_| TaskPlanError::Reentrant("declaration"))?;
         if plan.nodes.len() >= self.limits.max_tasks {
-            return Err(Self::rhai_error(
-                "build-task count exceeds its configured limit",
-            ));
+            return Err(TaskPlanError::Limit("count"));
         }
-        let id = TaskId(
-            u32::try_from(plan.nodes.len())
-                .map_err(|_| Self::rhai_error("build-task count cannot be represented"))?,
-        );
+        let id =
+            TaskId(u32::try_from(plan.nodes.len()).map_err(|_| TaskPlanError::Limit("count"))?);
         let index = plan.nodes.len();
         self.accept(plan.node_cost(index, &kind, self.limits))?;
         plan.nodes.push(TaskNode { id, kind });
         Ok(TaskHandle { id })
     }
 
-    #[cfg(feature = "rhai")]
-    fn terminal(&self, terminal: TaskTerminal) -> RhaiResult<()> {
+    /// Record one terminal — a classpath entry or a publication — the same way.
+    pub(crate) fn terminal(&self, terminal: TaskTerminal) -> Result<(), TaskPlanError> {
         let mut plan = self
             .plan
             .try_borrow_mut()
-            .map_err(|_| Self::rhai_error("reentrant build-task terminal declaration"))?;
+            .map_err(|_| TaskPlanError::Reentrant("terminal declaration"))?;
         if plan.terminals.len() >= self.limits.max_terminals {
-            return Err(Self::rhai_error(
-                "build-task terminal count exceeds its configured limit",
-            ));
+            return Err(TaskPlanError::Limit("terminal count"));
         }
         self.accept(plan.terminal_cost(&terminal, self.limits))?;
         plan.terminals.push(terminal);
@@ -823,12 +838,10 @@ impl TasksApi {
 
     /// Fold one declaration's cost into the running totals, leaving them unchanged if it is
     /// rejected — a script may catch the error and keep building.
-    #[cfg(feature = "rhai")]
-    fn accept(&self, added: Result<PlanCost, TaskPlanError>) -> RhaiResult<()> {
+    fn accept(&self, added: Result<PlanCost, TaskPlanError>) -> Result<(), TaskPlanError> {
         let total = added
             .and_then(|added| self.cost.get().add(added))
-            .and_then(|total| total.check(self.limits).map(|()| total))
-            .map_err(|error| Self::rhai_error(error.to_string()))?;
+            .and_then(|total| total.check(self.limits).map(|()| total))?;
         self.cost.set(total);
         Ok(())
     }
@@ -847,6 +860,12 @@ impl TasksApi {
         ))
     }
 
+    /// One declaration result, as the runtime error a Rhai script sees.
+    #[cfg(feature = "rhai")]
+    fn rhai<T>(result: Result<T, TaskPlanError>) -> RhaiResult<T> {
+        result.map_err(|error| Self::rhai_error(error.to_string()))
+    }
+
     #[cfg(feature = "rhai")]
     fn path_from_array(path: Array, operation: &str) -> RhaiResult<Vec<String>> {
         path.into_iter()
@@ -863,17 +882,17 @@ impl TasksApi {
 
     #[cfg(feature = "rhai")]
     fn https_url(api: &mut Self, value: ImmutableString) -> RhaiResult<UrlTask> {
-        api.push(TaskNodeKind::HttpsUrl {
+        Self::rhai(api.push(TaskNodeKind::HttpsUrl {
             value: value.into_owned(),
-        })
+        }))
         .map(UrlTask)
     }
 
     #[cfg(feature = "rhai")]
     fn project_jar(api: &mut Self, path: ImmutableString) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::ProjectJar {
+        Self::rhai(api.push(TaskNodeKind::ProjectJar {
             path: path.into_owned(),
-        })
+        }))
         .map(JarTask)
     }
 
@@ -883,10 +902,10 @@ impl TasksApi {
         value: ImmutableString,
         algorithm: TaskDigestAlgorithm,
     ) -> RhaiResult<DigestTask> {
-        api.push(TaskNodeKind::Digest {
+        Self::rhai(api.push(TaskNodeKind::Digest {
             algorithm,
             value: value.into_owned(),
-        })
+        }))
         .map(DigestTask)
     }
 
@@ -904,8 +923,7 @@ impl TasksApi {
     fn bytes(api: &mut Self, value: INT) -> RhaiResult<ByteCountTask> {
         let value = u64::try_from(value)
             .map_err(|_| Self::rhai_error("tasks.bytes requires a positive byte count"))?;
-        api.push(TaskNodeKind::ByteCount { value })
-            .map(ByteCountTask)
+        Self::rhai(api.push(TaskNodeKind::ByteCount { value })).map(ByteCountTask)
     }
 
     #[cfg(feature = "rhai")]
@@ -916,12 +934,12 @@ impl TasksApi {
         max_bytes: ByteCountTask,
         kind: TaskFetchKind,
     ) -> RhaiResult<TaskHandle> {
-        api.push(TaskNodeKind::Fetch {
+        Self::rhai(api.push(TaskNodeKind::Fetch {
             kind,
             url: url.0.id,
             digest: digest.0.id,
             max_bytes: max_bytes.0.id,
-        })
+        }))
     }
 
     #[cfg(feature = "rhai")]
@@ -956,10 +974,10 @@ impl TasksApi {
 
     #[cfg(feature = "rhai")]
     fn json_at(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<JsonTask> {
-        api.push(TaskNodeKind::JsonAt {
+        Self::rhai(api.push(TaskNodeKind::JsonAt {
             json: json.0.id,
             path: Self::path_from_array(path, "tasks.json_at")?,
-        })
+        }))
         .map(JsonTask)
     }
 
@@ -971,21 +989,21 @@ impl TasksApi {
         field: ImmutableString,
         value: ImmutableString,
     ) -> RhaiResult<JsonTask> {
-        api.push(TaskNodeKind::JsonFindString {
+        Self::rhai(api.push(TaskNodeKind::JsonFindString {
             json: json.0.id,
             path: Self::path_from_array(path, "tasks.json_find_string")?,
             field: field.into_owned(),
             value: value.into_owned(),
-        })
+        }))
         .map(JsonTask)
     }
 
     #[cfg(feature = "rhai")]
     fn json_url(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<UrlTask> {
-        api.push(TaskNodeKind::JsonUrl {
+        Self::rhai(api.push(TaskNodeKind::JsonUrl {
             json: json.0.id,
             path: Self::path_from_array(path, "tasks.json_url")?,
-        })
+        }))
         .map(UrlTask)
     }
 
@@ -997,11 +1015,11 @@ impl TasksApi {
         algorithm: TaskDigestAlgorithm,
         operation: &str,
     ) -> RhaiResult<DigestTask> {
-        api.push(TaskNodeKind::JsonDigest {
+        Self::rhai(api.push(TaskNodeKind::JsonDigest {
             json: json.0.id,
             path: Self::path_from_array(path, operation)?,
             algorithm,
-        })
+        }))
         .map(DigestTask)
     }
 
@@ -1029,10 +1047,10 @@ impl TasksApi {
 
     #[cfg(feature = "rhai")]
     fn json_u64(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<ByteCountTask> {
-        api.push(TaskNodeKind::JsonU64 {
+        Self::rhai(api.push(TaskNodeKind::JsonU64 {
             json: json.0.id,
             path: Self::path_from_array(path, "tasks.json_u64")?,
-        })
+        }))
         .map(ByteCountTask)
     }
 
@@ -1042,19 +1060,19 @@ impl TasksApi {
         jar: JarTask,
         prefix: ImmutableString,
     ) -> RhaiResult<SourceTreeTask> {
-        api.push(TaskNodeKind::ExtractJava {
+        Self::rhai(api.push(TaskNodeKind::ExtractJava {
             jar: jar.0.id,
             prefix: prefix.into_owned(),
-        })
+        }))
         .map(SourceTreeTask)
     }
 
     #[cfg(feature = "rhai")]
     fn nested_jar(api: &mut Self, jar: JarTask, member: ImmutableString) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::NestedJar {
+        Self::rhai(api.push(TaskNodeKind::NestedJar {
             jar: jar.0.id,
             member: member.into_owned(),
-        })
+        }))
         .map(JarTask)
     }
 
@@ -1119,22 +1137,22 @@ impl TasksApi {
         mappings: TextTask,
         format: MappingFormatValue,
     ) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::RemapJar {
+        Self::rhai(api.push(TaskNodeKind::RemapJar {
             jar: jar.0.id,
             mappings: mappings.0.id,
             format: format.0,
             direction: TaskRemapDirection::Deobfuscate,
             hierarchy: Vec::new(),
-        })
+        }))
         .map(JarTask)
     }
 
     #[cfg(feature = "rhai")]
     fn merge_jars(api: &mut Self, base: JarTask, overlay: JarTask) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::MergeJars {
+        Self::rhai(api.push(TaskNodeKind::MergeJars {
             base: base.0.id,
             overlay: overlay.0.id,
-        })
+        }))
         .map(JarTask)
     }
 
@@ -1144,21 +1162,21 @@ impl TasksApi {
         jar: JarTask,
         prefix: ImmutableString,
     ) -> RhaiResult<SourceTreeTask> {
-        api.push(TaskNodeKind::DecompileJava {
+        Self::rhai(api.push(TaskNodeKind::DecompileJava {
             jar: jar.0.id,
             prefix: prefix.into_owned(),
-        })
+        }))
         .map(SourceTreeTask)
     }
 
     #[cfg(feature = "rhai")]
     fn add_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
-        api.terminal(TaskTerminal::AddClasspath { jar: jar.0.id })
+        Self::rhai(api.terminal(TaskTerminal::AddClasspath { jar: jar.0.id }))
     }
 
     #[cfg(feature = "rhai")]
     fn add_nested_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
-        api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id })
+        Self::rhai(api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id }))
     }
 
     /// The four-argument form every `build.rhai` written before the intent existed spells.
@@ -1207,13 +1225,13 @@ impl TasksApi {
                  or `navigation` (a consumer only reads it; the classpath defines these types)",
             ));
         };
-        api.terminal(TaskTerminal::PublishTree {
+        Self::rhai(api.terminal(TaskTerminal::PublishTree {
             owner: owner.into_owned(),
             tree: tree.0.id,
             destination: destination.into_owned(),
             mode: TaskPublishMode::ReplaceRoot,
             intent,
-        })
+        }))
     }
 
     #[cfg(feature = "rhai")]
