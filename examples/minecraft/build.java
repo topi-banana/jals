@@ -1,0 +1,318 @@
+import jals.build.Build;
+import jals.build.Tasks;
+
+// Every Minecraft release this example can build, newest first, as
+// `{version, metadata SHA-1, bundled, obfuscated}`. A metadata URL is content-addressed
+// (`…/v1/packages/<sha1>/<version>.json`), so the one digest pins both the URL and the fetch and no
+// mutable version manifest is ever consulted.
+//
+// The two flags are independent axes:
+//
+// - `bundled` marks 1.18 and later, whose server download wraps the game jar at
+//   `META-INF/versions/<version>/server-<version>.jar` with its libraries under
+//   `META-INF/libraries/`; earlier releases ship one flat jar with the libraries alongside the game
+//   classes.
+// - `obfuscated` marks the releases that need deobfuscating: the script fetches the official
+//   mappings and runs `Tasks.remapJar` only for those. From 26.1 Mojang ships the game with its real
+//   names already in the jar, and the version metadata carries no
+//   `client_mappings`/`server_mappings` download at all — so the whole remap step (mappings fetch
+//   included) is skipped there.
+//
+// The catalog is bounded at both ends by mappings: 1.14.4 is the oldest entry because nothing
+// before it has official mappings, and 26.1 onward needs none.
+//
+// The rows are also read by `examples/scripts/gen-client-runtime.py`, which derives the client
+// runtime table of `examples/minecraft_client_test` from the same releases — keep them in the exact
+// `{ "<version>", "<40 hex>", "<bundled>", "<obfuscated>" }` shape, one per line.
+@SuppressWarnings("naming-convention")
+class build {
+
+    private static final String[][] CATALOG = {
+        {"26.2", "d98675ecc24364e90b18dbea80390b1345c3f71f", "true", "false"},
+        {"26.1.2", "8228875b88ad88b4bc0dc7a2afbc6903bccf93b1", "true", "false"},
+        {"26.1.1", "06e0e05c144ccf6ae8c5f766093463b20d221631", "true", "false"},
+        {"26.1", "330f499d3aa1d31fcc15e7ae97af5f93d8493ba6", "true", "false"},
+        {"1.21.11", "fb498c3c1beff5c406e71b776d8457499670cb3f", "true", "true"},
+        {"1.21.10", "53880e8f005452d97752315c801e854ca2e0672b", "true", "true"},
+        {"1.21.9", "26b3c0e988cf18a235de8a686d137f2d590cc7c8", "true", "true"},
+        {"1.21.8", "596fd9e5a2a01b2b02018e5d4292c9c5aaa23a78", "true", "true"},
+        {"1.21.7", "54e6650cb79f5fd4f786ce15d7549c40ba9c5d59", "true", "true"},
+        {"1.21.6", "a149ac8d831f00db3e847e411b66845714986d66", "true", "true"},
+        {"1.21.5", "e0ab7e984fc1d951e2264da9234f6554662154bb", "true", "true"},
+        {"1.21.4", "99af4119ace27af25fd44879e53fe25ea9eb8c9c", "true", "true"},
+        {"1.21.3", "fcd093df1bcc9a6f47e358ef84e9f6a7839c8805", "true", "true"},
+        {"1.21.2", "67e006ccdace75f49e4b45c953cd5beabc18e800", "true", "true"},
+        {"1.21.1", "67e466e82c012158c8cda81df39aa40a7ade7276", "true", "true"},
+        {"1.21", "46d5cd39c21f24186df2756fee3e4306582110d8", "true", "true"},
+        {"1.20.6", "959d1829dfc630d08a245294bcd78f7906e5d3d1", "true", "true"},
+        {"1.20.5", "9eafba9f2e7053964b35ad4ba82558c865b296f4", "true", "true"},
+        {"1.20.4", "99f86745e175a356b09e045479999631a345d16f", "true", "true"},
+        {"1.20.3", "f6b794c78b067649dde6899df14dce4cd15925b4", "true", "true"},
+        {"1.20.2", "75d1c6627fde6b7815fa11bfab54ea8accfe07f3", "true", "true"},
+        {"1.20.1", "8a4e093bfaa91de10c17af807570cdd64468bf67", "true", "true"},
+        {"1.20", "5f84c06e6ca08afba5991868efad15bb04b95160", "true", "true"},
+        {"1.19.4", "b2a4a55527f44f5b9f807675e795591ddfa5063a", "true", "true"},
+        {"1.19.3", "a0f299abf6a033258095c25f1d6555847b8fdb43", "true", "true"},
+        {"1.19.2", "ed548106acf3ac7e8205a6ee8fd2710facfa164f", "true", "true"},
+        {"1.19.1", "39d5e8925d37490c6f2abb2e02b8c6f1b35719df", "true", "true"},
+        {"1.19", "14bbfb25fb1c1c798e3c9b9482b081a78d1f3a9d", "true", "true"},
+        {"1.18.2", "334b33fcba3c9be4b7514624c965256535bd7eba", "true", "true"},
+        {"1.18.1", "7ff864e988a2c29907154d5f9701e87e5d5e554a", "true", "true"},
+        {"1.18", "7367ea8b7cad7c7830192441bb2846be0d2ceeac", "true", "true"},
+        {"1.17.1", "e0e7ab5ed6f55bbd874ef95be3c9356d67e64b57", "false", "true"},
+        {"1.17", "0d9ace8a2ecfd1f4c782786f4b985a499240ff12", "false", "true"},
+        {"1.16.5", "fba9f7833e858a1257d810d21a3a9e3c967f9077", "false", "true"},
+        {"1.16.4", "596ad61fda7612d9edf8881cf81869276bdb7f82", "false", "true"},
+        {"1.16.3", "6485dd131ef68c968041a9f6fd73094b027e42e1", "false", "true"},
+        {"1.16.2", "998d9ef5770d05c20d760dc16cf85151f35009f2", "false", "true"},
+        {"1.16.1", "54fa3af57d041d2771e66d390197b2c0288e697c", "false", "true"},
+        {"1.16", "e9d21d375f9c961f0e9731d4e463306d76e77c48", "false", "true"},
+        {"1.15.2", "e9d0adb8f642abe422909ede50f651b2b58a3573", "false", "true"},
+        {"1.15.1", "18c3063de87ae126b4e017121219ba802be0755b", "false", "true"},
+        {"1.15", "833322370ab320e77717097082effe1d124d48bd", "false", "true"},
+        {"1.14.4", "be146d5f66a3627ed0a87c234c4d8dde8ab35098", "false", "true"},
+    };
+
+    // The release built when `[features]` selects none. `[features] default` deliberately carries
+    // only the side, so `--features 1.20.1` picks a version without `--no-default-features` first
+    // having to drop a conflicting default version.
+    private static final String DEFAULT_VERSION = "26.2";
+
+    public static void main() {
+        // Resolve the release. The version features are mutually exclusive, but `[features]`
+        // resolution is additive (Cargo's model), so this script is the only place the exclusivity
+        // can be enforced. A reported error publishes nothing and stops the build before any task
+        // fetch runs.
+        String version = "";
+        String metaSha1 = "";
+        boolean bundled = false;
+        boolean obfuscated = false;
+        for (String[] entry : CATALOG) {
+            if (DEFAULT_VERSION.equals(entry[0])) {
+                version = entry[0];
+                metaSha1 = entry[1];
+                bundled = "true".equals(entry[2]);
+                obfuscated = "true".equals(entry[3]);
+            }
+        }
+        String selected = "";
+        for (String[] entry : CATALOG) {
+            if (Build.feature(entry[0])) {
+                if (!selected.equals("")) {
+                    Build.error(
+                        "select at most one Minecraft version feature, got `"
+                            + selected
+                            + "` and `"
+                            + entry[0]
+                            + "`");
+                    return;
+                }
+                selected = entry[0];
+                version = entry[0];
+                metaSha1 = entry[1];
+                bundled = "true".equals(entry[2]);
+                obfuscated = "true".equals(entry[3]);
+            }
+        }
+        Build.metadata("minecraft-version", version);
+
+        // Select the Minecraft distribution from `[features]`: `server` (the default), `client`, or
+        // — with both enabled — the merged jar. The resolved feature set is always part of the
+        // build-script fingerprint, so changing `--features` re-runs this script without any
+        // `rerunIfEnvChanged`.
+        boolean server = Build.feature("server");
+        boolean client = Build.feature("client");
+        if (!server && !client) {
+            // `--no-default-features` with no side selected: fall back to the server distribution.
+            server = true;
+        }
+
+        // The selected release's version metadata (immutable, content-addressed by Mojang). The
+        // largest metadata in the catalog is ~51 KiB.
+        int meta =
+            Tasks.fetchJson(
+                Tasks.httpsUrl(
+                    "https://piston-meta.mojang.com/v1/packages/"
+                        + metaSha1
+                        + "/"
+                        + version
+                        + ".json"),
+                Tasks.sha1(metaSha1),
+                Tasks.bytes(65536));
+
+        int game = -1;
+        // The server bundler, when the selected release ships one. Held out here because its nested
+        // jars go on the classpath *after* the remapped game jar, never before — see below.
+        int bundler = -1;
+        if (server) {
+            int download =
+                Tasks.fetchJar(
+                    Tasks.jsonUrl(meta, new String[]{"downloads", "server", "url"}),
+                    Tasks.jsonSha1(meta, new String[]{"downloads", "server", "sha1"}),
+                    Tasks.jsonU64(meta, new String[]{"downloads", "server", "size"}));
+            int serverJar = download;
+            if (bundled) {
+                // 1.18+: the official server.jar is a bundler, so the game jar has to be pulled out
+                // of it. Flatten its nested library jars (brigadier, guava, netty, …) onto the
+                // compile classpath too; a client-only build has no bundler, so those libraries are
+                // absent from its classpath. Older releases need neither call — the game classes and
+                // the libraries share one flat jar, which `Tasks.addClasspath` below already puts on
+                // the classpath.
+                serverJar =
+                    Tasks.nestedJar(
+                        download, "META-INF/versions/" + version + "/server-" + version + ".jar");
+                bundler = download;
+            }
+            if (obfuscated) {
+                // Up to 1.21.11 the shipped names are obfuscated, so the official mappings turn
+                // them back into the real ones. 26.1+ ships them already deobfuscated and declares
+                // no mappings download, so projecting `downloads.server_mappings` there would not
+                // even resolve.
+                int serverMap =
+                    Tasks.fetchText(
+                        Tasks.jsonUrl(meta, new String[]{"downloads", "server_mappings", "url"}),
+                        Tasks.jsonSha1(meta, new String[]{"downloads", "server_mappings", "sha1"}),
+                        Tasks.jsonU64(meta, new String[]{"downloads", "server_mappings", "size"}));
+                serverJar = Tasks.remapJar(serverJar, serverMap);
+            }
+            game = serverJar;
+        }
+        if (client) {
+            int clientJar =
+                Tasks.fetchJar(
+                    Tasks.jsonUrl(meta, new String[]{"downloads", "client", "url"}),
+                    Tasks.jsonSha1(meta, new String[]{"downloads", "client", "sha1"}),
+                    Tasks.jsonU64(meta, new String[]{"downloads", "client", "size"}));
+            if (obfuscated) {
+                int clientMap =
+                    Tasks.fetchText(
+                        Tasks.jsonUrl(meta, new String[]{"downloads", "client_mappings", "url"}),
+                        Tasks.jsonSha1(meta, new String[]{"downloads", "client_mappings", "sha1"}),
+                        Tasks.jsonU64(meta, new String[]{"downloads", "client_mappings", "size"}));
+                clientJar = Tasks.remapJar(clientJar, clientMap);
+            }
+            if (server) {
+                // Both sides selected: overlay the client onto the server (client wins path
+                // conflicts).
+                game = Tasks.mergeJars(game, clientJar);
+            } else {
+                game = clientJar;
+            }
+        }
+
+        // Deobfuscated game bytecode on the classpath (1.18+ libraries come from the server bundler
+        // below, older ones ride along inside this same jar).
+        Tasks.addClasspath(game);
+        if (bundler != -1) {
+            // The bundler's nested jars, flattened: brigadier, guava, netty and the rest of what a
+            // 1.18+ server links against. They go on *after* the remapped jar and not before,
+            // because `Tasks.addNestedClasspath` expands every nested member and one of them is
+            // `META-INF/versions/<v>/server-<v>.jar` — the game itself, still obfuscated. It
+            // declares `net.minecraft.server.MinecraftServer` and `net.minecraft.server.Main` under
+            // exactly the names the remapping gives them (Mojang leaves those two alone), so
+            // whichever jar comes first is the one `javac` resolves them from. Ahead of the remapped
+            // jar it wins, and every method on `MinecraftServer` reads as missing while the classes
+            // around it resolve perfectly.
+            Tasks.addNestedClasspath(bundler);
+        }
+        int sources = Tasks.decompileJava(game, "net/minecraft");
+        Tasks.publishTree(
+            "minecraft-" + version, sources, "src/main/java/net/minecraft", "navigation");
+
+        // The `mixin` feature adds a second, completely independent publication root:
+        // SpongePowered Mixin, the bytecode-weaving framework every modern Minecraft mod loader
+        // builds on. Nothing here touches the game artifacts above, so it composes freely with any
+        // side and any release.
+        //
+        // Unlike the game, Mixin publishes a *sources* jar, so this is `Tasks.extractJava` on real
+        // `.java` rather than `Tasks.decompileJava` on bytecode — the same publication contract,
+        // minus the skeleton rendering. The release is immutable on the SpongePowered Maven
+        // repository, so each SHA-1 below pins both its URL and its fetch, exactly like the
+        // content-addressed version metadata above.
+        //
+        // Both jars are fetched, and they carry the two halves of what this feature owes: the
+        // compiled library goes on the classpath so `org.spongepowered.asm.*` *resolves*, and the
+        // sources jar is published so a reader can open the real code behind those types. A
+        // publication alone would not do — a dependency's published trees are navigation sources
+        // and never compile inputs, so the consumer's `javac` sees only what the classpath carries.
+        //
+        // The published sources themselves still do not compile: Mixin 0.8.7 is unshaded, so its
+        // `asm/**` runtime needs asm, guava, gson, commons-io, log4j2 and modlauncher, and all of
+        // `org/spongepowered/tools` is an annotation processor. None of that is fetched here and
+        // none of it is on the classpath. That is a property of the *tree*, not of the classpath
+        // entry — a consumer compiling against `mixin-0.8.7.jar` never sees any of it, and javac
+        // resolves a type it is handed as source and as a classpath class to the source, so nothing
+        // is defined twice either.
+        if (Build.feature("mixin")) {
+            String mixinVersion = "0.8.7";
+            String mixinBase =
+                "https://repo.spongepowered.org/repository/maven-public/org/spongepowered/"
+                    + "mixin/"
+                    + mixinVersion
+                    + "/mixin-"
+                    + mixinVersion;
+            Tasks.addClasspath(
+                Tasks.fetchJar(
+                    Tasks.httpsUrl(mixinBase + ".jar"),
+                    Tasks.sha1("8ab114ac385e6dbdad5efafe28aba4df8120915f"),
+                    Tasks.bytes(2097152)));
+            int mixinSources =
+                Tasks.fetchJar(
+                    Tasks.httpsUrl(mixinBase + "-sources.jar"),
+                    Tasks.sha1("b5fd91c657404b1712a612ece6c8ddf66069be0f"),
+                    Tasks.bytes(2097152));
+            // `org/spongepowered` covers both halves of the jar — the runtime (`asm/**`) and the
+            // annotation processor (`tools/**`) — under one owner and one publication root.
+            Tasks.publishTree(
+                "mixin-" + mixinVersion,
+                Tasks.extractJava(mixinSources, "org/spongepowered"),
+                "src/main/java/org/spongepowered",
+                "navigation");
+        }
+
+        // The `mixinextras` feature is the same shape once more: a third publication root, holding
+        // MixinExtras — the companion library whose `@WrapOperation` / `@ModifyExpressionValue` /
+        // `@Local` injectors and sugar every recent mod applies on top of Mixin. It is as
+        // independent of the game as `mixin` is, and independent of `mixin` too: the two own
+        // disjoint destinations and neither feature implies the other, so selecting one publishes
+        // its root without the other's.
+        //
+        // `mixinextras-common` is the platform-neutral core; the `-fabric` / `-forge` / `-neoforge`
+        // artifacts are only thin per-loader bootstraps around it. It is published on Maven Central,
+        // where a released version is immutable, so the one SHA-1 pins both the URL and the fetch
+        // exactly like every other fetch here.
+        //
+        // Both jars again, for the reason given above: the compiled library on the classpath is what
+        // makes `com.llamalad7.mixinextras.*` resolve for a consumer, and the sources are what a
+        // reader opens. The published tree does not compile here either — it is written against
+        // Mixin, asm and the loader APIs this example never fetches, and `mixinextras/ap` is an
+        // annotation processor — which again says nothing about the classpath entry a consumer
+        // actually compiles against.
+        if (Build.feature("mixinextras")) {
+            String mixinextrasVersion = "0.5.4";
+            String mixinextrasBase =
+                "https://repo1.maven.org/maven2/io/github/llamalad7/mixinextras-common/"
+                    + mixinextrasVersion
+                    + "/mixinextras-common-"
+                    + mixinextrasVersion;
+            Tasks.addClasspath(
+                Tasks.fetchJar(
+                    Tasks.httpsUrl(mixinextrasBase + ".jar"),
+                    Tasks.sha1("0626e00b72e3879a07e6653d8015cd3466ff5b75"),
+                    Tasks.bytes(1048576)));
+            int mixinextrasSources =
+                Tasks.fetchJar(
+                    Tasks.httpsUrl(mixinextrasBase + "-sources.jar"),
+                    Tasks.sha1("fd5d27cff1c8118f5a4a037e7f549b606d117caf"),
+                    Tasks.bytes(524288));
+            // Apart from its manifest the jar holds nothing outside `com/llamalad7/mixinextras`, so
+            // this prefix takes the whole library — runtime, sugar and annotation processor — under
+            // one owner.
+            Tasks.publishTree(
+                "mixinextras-" + mixinextrasVersion,
+                Tasks.extractJava(mixinextrasSources, "com/llamalad7"),
+                "src/main/java/com/llamalad7",
+                "navigation");
+        }
+    }
+}

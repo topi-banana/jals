@@ -1,6 +1,6 @@
 # This source root is generated
 
-Nothing here is authored. `build.rhai` publishes three exclusively-owned roots into this directory —
+Nothing here is authored. `build.java` publishes three exclusively-owned roots into this directory —
 `net/minecraft` from the decompiled game, and (with the `mixin` / `mixinextras` features)
 `org/spongepowered` and `com/llamalad7` from the two libraries' sources jars — and `.gitignore`
 keeps all three out of the repository.

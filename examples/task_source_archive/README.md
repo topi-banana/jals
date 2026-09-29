@@ -9,15 +9,14 @@ binary, so it is generated rather than committed — then run:
 jals build
 ```
 
-`tasks.project_jar` keeps this checked-in example network-independent. A pinned remote archive uses
+`Tasks.projectJar` keeps this checked-in example network-independent. A pinned remote archive uses
 the same downstream handles:
 
-```rhai
-let jar = tasks.fetch_jar(
-    tasks.https_url("https://downloads.example.invalid/example-sources.jar"),
-    tasks.sha256("<64 lowercase hexadecimal characters>"),
-    tasks.bytes(16777216)
-);
+```java
+int jar = Tasks.fetchJar(
+    Tasks.httpsUrl("https://downloads.example.invalid/example-sources.jar"),
+    Tasks.sha256("<64 lowercase hexadecimal characters>"),
+    Tasks.bytes(16777216));
 ```
 
 Static downloads require HTTPS, an expected SHA-1 or SHA-256 digest, and a non-zero byte limit.

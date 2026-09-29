@@ -427,7 +427,7 @@ exclusive source-tree publication; Rhai never reads task results or invokes a pr
 `replace-root` replaces every file below its declared destination and is atomic with
 ordinary script output. The native CLI and LSP execute tasks; the LSP defers a root containing an
 open document, while the browser rejects physical publication before fetching. See the runnable
-[`examples/rhai_build_script`](examples/rhai_build_script) project and the
+[`examples/build_script`](examples/build_script) project and the
 [`jals-build` Rhai reference](jals-build/README.md#rhai-build-scripts) for the complete API,
 fingerprinting/cache behavior, sandbox limits, and Rust `BuildScript` model.
 The source-archive task shape is shown in

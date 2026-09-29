@@ -17,7 +17,7 @@ features = ["attributes"]
 #
 # A **threshold feature** (`since-1.18`) is what everything else reads: the `#[cfg]` predicates in
 # the source, the compatibility level `mixins.hellomod.json` renders, and the `--release` derived in
-# `build.rhai`. Each one enables its predecessor, so naming the highest enables the whole chain
+# `build.java`. Each one enables its predecessor, so naming the highest enables the whole chain
 # below it — `#[cfg(feature = "since-1.18")]` is true for every release from 1.18 up, and no
 # release has to list more than one name.
 #
@@ -30,7 +30,7 @@ features = ["attributes"]
 #
 # The fifth, `since-1.14.4`, is the bottom of the chain and the one every release reaches: it is
 # how a selection that named *no* release stays distinguishable from one that named the oldest.
-# `build.rhai` is what branches on it, and it rejects the build rather than compiling something.
+# `build.java` is what branches on it, and it rejects the build rather than compiling something.
 # That is a change this example did not need before it had `#[cfg]`: `[dependencies] minecraft`
 # leaves `default-features` at its `true`, so with no version feature the SDK still resolves its own
 # `default` and falls back to its newest release — but the thresholds here would all be off, and the
@@ -68,7 +68,7 @@ mixinextras = ["minecraft/mixinextras"]
 # by whichever version feature the command line named — see the table below, where every row carries
 # a `mc-client-test/<version>` beside its `minecraft/<version>`. There is nothing else to route:
 # the harness carries no presence switch, so what this feature selects is this project's own test
-# sources and the JVM argument `build.rhai` writes for them.
+# sources and the JVM argument `build.java` writes for them.
 client-test = ["client"]
 "since-1.14.4" = []
 "since-1.17" = ["since-1.14.4"]
@@ -148,8 +148,8 @@ mc-client-test = { path = "../minecraft_client_test" }
 
 [build]
 # Everything `javac` needs that varies with the release, derived from the threshold chain rather
-# than from a second table of versions — see `build.rhai`.
-script = { type = "rhai", file = "build.rhai" }
+# than from a second table of versions — see `build.java`.
+script = { type = "java", file = "build.java" }
 # The default value, written out because it is one of the two things this example demonstrates:
 # `mixins.hellomod.json` has to be *in* the jar or Mixin has nothing to read.
 resource-dirs = ["src/main/resources"]
@@ -162,7 +162,7 @@ remap = { with = "mojmap" }
 
 # The one resource is rendered rather than copied, because one field of it is per-release: Mixin
 # refuses a mixin class whose class-file version exceeds the declared `compatibilityLevel`, and
-# `build.rhai` compiles at the release the game's own JVM asks for. Both read the same threshold
+# `build.java` compiles at the release the game's own JVM asks for. Both read the same threshold
 # chain, each in its own vocabulary — `--release 17` there, `JAVA_17` here.
 #
 # Naming the file is what turns rendering on. Everything else under a resource directory is still
@@ -178,7 +178,7 @@ template = ["mixins.hellomod.json"]
 # the exact byte count would only break if Mojang ever re-served identical text with different
 # framing.
 #
-# To refresh: for each catalog entry in `../minecraft/build.rhai` whose `obfuscated?` flag is true,
+# To refresh: for each catalog entry in `../minecraft/build.java` whose `obfuscated` flag is true,
 # fetch `https://piston-meta.mojang.com/v1/packages/<metadata sha1>/<version>.json` and project
 # `downloads.server_mappings.{url, sha1, size}`.
 

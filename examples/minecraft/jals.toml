@@ -85,4 +85,4 @@ mixinextras = []
 # would therefore collide with the consumer's — everything worth having here is published by the
 # build script into the three roots below `src/main/java`.
 [build]
-script = { type = "rhai", file = "build.rhai" }
+script = { type = "java", file = "build.java" }

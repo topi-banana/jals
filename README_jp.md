@@ -408,7 +408,7 @@ Rhai は task 結果を読めず process も起動しません。`replace-root` 
 内に open document があれば延期します。browser は物理 publish を fetch 前に拒否します。完全な API、fingerprint/cache、
 sandbox limit、Rust の `BuildScript` model は
 [`jals-build` の Rhai reference](jals-build/README.md#rhai-build-scripts)を、実行可能な例は
-[`examples/rhai_build_script`](examples/rhai_build_script)を参照してください。
+[`examples/build_script`](examples/build_script)を参照してください。
 source archive task の形は [`examples/task_source_archive`](examples/task_source_archive)、
 remap 済み Minecraft の例は [`examples/minecraft`](examples/minecraft)
 にあります。その上に Mixin mod を組み立てる例が
