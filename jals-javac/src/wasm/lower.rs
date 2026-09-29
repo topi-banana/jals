@@ -48,9 +48,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::ops::Range;
 
 use jals_hir::{
-    ClassTy, DefId, DefKind, ItemId, MemberId, Namespace, Primitive, ProjectIndex, Ty, TypedFile,
+    ClassTy, DefId, DefKind, FileId, ItemId, MemberId, Namespace, Primitive, ProjectIndex, Ty,
+    TypedFile,
 };
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_DECL,
@@ -93,6 +95,65 @@ pub enum WasmError {
     /// a project that fits in memory, and reported rather than truncated because a wrong length is
     /// bytes an engine reads as something else.
     TooLarge,
+    /// A failure with the source it happened at: the file the host handed the compile, and the byte
+    /// range within it.
+    ///
+    /// Attached by the statement and expression boundaries — see [`Lowering::stmt`] — rather than at
+    /// each error site, so it is the innermost construct whose lowering failed that is named, and a
+    /// failure outside any body (a class's field types, the module's own lengths) carries none. The
+    /// innermost attachment is the one kept: an expression's boundary runs before its parent's on
+    /// the way out, and the parent is not where a report should point.
+    Located {
+        /// What went wrong.
+        error: Box<Self>,
+        /// The file's identity as the host numbered the inputs, which is how the host can turn it
+        /// back into a path.
+        file: FileId,
+        /// The byte range within that file.
+        range: Range<usize>,
+    },
+}
+
+impl WasmError {
+    /// This error, with the source it happened at when it does not already carry one.
+    ///
+    /// Called from a boundary lowering is about to leave. The first call on the way out of a body
+    /// is the innermost construct that failed, and every enclosing boundary after it keeps that
+    /// one rather than replacing it with its own coarser span.
+    fn at(self, file: FileId, range: Range<usize>) -> Self {
+        match self {
+            error @ Self::Located { .. } => error,
+            error => Self::Located {
+                error: Box::new(error),
+                file,
+                range,
+            },
+        }
+    }
+
+    /// The failure itself, without the source a boundary attached.
+    ///
+    /// What a caller that *classifies* errors matches on — the wasm corpus decides whether a
+    /// construct is outside the subset it tests — while a caller that reports one formats the
+    /// error it was given, whose [`Display`](core::fmt::Display) is the same either way.
+    pub fn kind(&self) -> &Self {
+        match self {
+            Self::Located { error, .. } => error.kind(),
+            error => error,
+        }
+    }
+
+    /// Where in the source this failure happened, when a boundary knew: the file the host handed
+    /// the compile, and the byte range within it.
+    ///
+    /// The file id is the host's — the same one [`TypedFile::file`] answers — and only the host can
+    /// turn it back into a path.
+    pub fn location(&self) -> Option<(FileId, Range<usize>)> {
+        match self {
+            Self::Located { file, range, .. } => Some((*file, range.clone())),
+            _ => None,
+        }
+    }
 }
 
 impl core::fmt::Display for WasmError {
@@ -112,6 +173,7 @@ impl core::fmt::Display for WasmError {
                  module, so a call to it has nothing to reach"
             ),
             Self::TooLarge => f.write_str("the module exceeded a WebAssembly format limit"),
+            Self::Located { error, .. } => error.fmt(f),
         }
     }
 }
@@ -4118,6 +4180,21 @@ impl Lowering<'_> {
 
     // --- statements ---------------------------------------------------------
 
+    /// The byte range a node was written at, without the trivia the parser attached in front of it.
+    ///
+    /// [`Facts::span`] is the range the inference memo is keyed by — leading trivia included, which
+    /// is what the analysis recorded against — while a report should start at the construct rather
+    /// than on the blank line above it. The end is the node's own, so a statement keeps its `;`.
+    fn written_range(node: &SyntaxNode) -> Range<usize> {
+        let span = Facts::span(node);
+        let start = node
+            .descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| !token.kind().is_trivia())
+            .map_or(span.start, |token| usize::from(token.text_range().start()));
+        start..span.end
+    }
+
     fn block(&mut self, block: &ast::Block, insn: &mut Insn) -> Result<()> {
         for statement in block.stmts() {
             self.stmt(&statement, insn)?;
@@ -4125,7 +4202,21 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// One statement, with the source it is written at attached to any failure inside it.
+    ///
+    /// The position is attached at this boundary rather than at each error site: a failure inside
+    /// an expression already carries the span the innermost expression boundary gave it, and this
+    /// keeps that finer one, while a statement that fails on its own — a `switch` with no selector
+    /// — is named by its own. See [`WasmError::at`].
     fn stmt(&mut self, statement: &ast::Stmt, insn: &mut Insn) -> Result<()> {
+        let file = self.input.file();
+        let range = Self::written_range(statement.syntax());
+        self.statement(statement, insn)
+            .map_err(|error| error.at(file, range))
+    }
+
+    /// The statement forms, dispatched one per node kind.
+    fn statement(&mut self, statement: &ast::Stmt, insn: &mut Insn) -> Result<()> {
         match statement {
             ast::Stmt::Block(block) => self.block(block, insn),
             // `;` has nothing to emit.
@@ -5453,7 +5544,21 @@ impl Lowering<'_> {
     // --- expressions --------------------------------------------------------
 
     /// Emit `expr`. Returns its type, or `None` when it left nothing on the stack.
+    /// One expression, with the source it is written at attached to any failure inside it.
+    ///
+    /// Every recursive descent in the body below goes through this wrapper, so a failure is named
+    /// by the innermost expression whose lowering raised it: a call that fails leaves the call's
+    /// own span, and the assignment it is written in keeps it rather than naming the whole
+    /// statement. See [`WasmError::at`].
     fn expr(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
+        let file = self.input.file();
+        let range = Self::written_range(expr.syntax());
+        self.expression(expr, insn)
+            .map_err(|error| error.at(file, range))
+    }
+
+    /// The expression forms, dispatched one per node kind.
+    fn expression(&mut self, expr: &ast::Expr, insn: &mut Insn) -> Result<Option<ValType>> {
         match expr {
             ast::Expr::Literal(literal) => self.literal(literal, insn).map(Some),
             ast::Expr::Paren(paren) => {

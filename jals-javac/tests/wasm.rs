@@ -326,7 +326,7 @@ public class Greeter {
     let error = compile(&[source]).expect_err("library types are out of scope");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::NoRepresentation(_) | WasmError::Unsupported(_)
         ),
         "expected a scope error, got {error}"
@@ -1588,7 +1588,7 @@ fn the_enum_shapes_that_need_more_are_reported() {
     let error = compile(&[source]).expect_err("this enum has no constructor to build with");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an `enum` constant with no matching constructor")
         ),
         "got {error}"
@@ -1615,7 +1615,7 @@ fn a_type_in_an_enum_constant_body_has_no_owning_type() {
     let error = compile(&[source]).expect_err("an `enum` constant is not an owning type");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an enclosing type with no name")
         ),
         "got {error}"
@@ -1881,7 +1881,7 @@ public class Outer {
     let error = compile(&[outside]).expect_err("a `static` method has no enclosing instance");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("a `new` of an inner class outside an instance method")
         ),
         "got {error}"
@@ -2782,7 +2782,7 @@ public class Fall {
     let error =
         compile(&[source]).expect_err("this switch expression has a path that yields nothing");
     assert!(
-        matches!(error, WasmError::Unsupported(_)),
+        matches!(error.kind(), WasmError::Unsupported(_)),
         "expected a report, got {error}"
     );
 }
@@ -3081,7 +3081,7 @@ fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
     let error = compile(&[source]).expect_err("an array's length is not assignable");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an assignment to an array's length")
         ),
         "got {error}"
@@ -3269,6 +3269,34 @@ public class Host {
     assert_invoke(&[source], "run", &["3"], "110");
 }
 
+/// A compile error names the source it happened at: the boundary every expression passes through
+/// attaches the file and the byte range, and the innermost failure is the one kept.
+///
+/// The file id is the one the host numbered the inputs with — only the host can turn it into a
+/// path — and the range is a byte range into that file's text, which is what lets a caller draw a
+/// diagnostic instead of printing a bare reason. The range starts at the construct, not at the
+/// blank space in front of it, which is the range the inference memo is keyed by.
+#[test]
+fn a_compile_error_names_the_source_it_happened_at() {
+    let first = "public class First { public static int value() { return 3; } }";
+    let second = r#"
+public class Second {
+    public static void greet() {
+        System.out.println("hi");
+    }
+}
+"#;
+    let error = compile(&[first, second]).expect_err("a library type has no representation here");
+    let (file, range) = error
+        .location()
+        .unwrap_or_else(|| panic!("lowering knows where this failed: {error}"));
+    assert_eq!(file, FileId(1), "the error is in the second file: {error}");
+    assert_eq!(
+        &second[range], "System.out.println(\"hi\")",
+        "the span is the failing expression, not the statement or the method it is written in"
+    );
+}
+
 /// Java's arrays are covariant and wasm's are invariant, so one is not the other.
 ///
 /// A wasm array is mutable, and declared subtyping over it would let a write of the wrong element
@@ -3286,7 +3314,7 @@ public class Covariant {
     let error = compile(&[source]).expect_err("wasm arrays are invariant");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an array where an array of another type is wanted")
         ),
         "got {error}"
@@ -3382,7 +3410,10 @@ public class Boxing {
 ";
     let error = compile(&[source]).expect_err("a wasm host has no `java.lang.Integer`");
     assert!(
-        matches!(error, WasmError::NoRepresentation(ref what) if what == "java.lang.Integer"),
+        matches!(
+            error.kind(),
+            WasmError::NoRepresentation(what) if what == "java.lang.Integer"
+        ),
         "got {error}"
     );
 }

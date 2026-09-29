@@ -1010,7 +1010,7 @@ fn a_concatenation_names_the_builder_it_needs() {
     )
     .expect_err("the fragment declares no `StringBuilder`");
     assert!(
-        matches!(&error, WasmError::NoRepresentation(ty) if ty == "java.lang.StringBuilder"),
+        matches!(error.kind(), WasmError::NoRepresentation(ty) if ty == "java.lang.StringBuilder"),
         "the report names the class it could not lay out: {error}"
     );
 }
