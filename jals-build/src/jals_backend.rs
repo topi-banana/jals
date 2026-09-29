@@ -313,7 +313,10 @@ impl JalsBackend {
                 // The whole project is one module, so this arm *is* the wasm compile — and it
                 // returns past the `finish` below. Ending the unit here is what keeps a green
                 // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
-                let options = jals_javac::wasm::WasmOptions { assertions };
+                let options = jals_javac::wasm::WasmOptions {
+                    assertions,
+                    ..jals_javac::wasm::WasmOptions::default()
+                };
                 let linked: Vec<jals_javac::wasm::LinkedLibrary<'_>> = linked
                     .iter()
                     .map(|(name, abi)| jals_javac::wasm::LinkedLibrary { name, abi })

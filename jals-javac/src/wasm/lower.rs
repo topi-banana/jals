@@ -71,6 +71,7 @@ use crate::wasm::encode::{
     ValType,
 };
 use crate::wasm::insn::{Insn, Instr, NumOp, NumericVal as _};
+use crate::wasm::positions::{self, Position, Positions};
 
 /// Why a project could not be compiled to wasm.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +277,19 @@ pub struct WasmOptions {
     /// suite written with `assert` and compiled without this passes without checking anything,
     /// which is the failure that looks exactly like success.
     pub assertions: bool,
+
+    /// Whether every statement records where it was written, so a *run* can report a line.
+    ///
+    /// On, each statement stores its index into the module's exported `$jals$position` global
+    /// before its own code runs, and the module carries a `jals.positions` table saying what each
+    /// index means. The compile's own errors know where they happened without this — an error is
+    /// attached at the lowering that raised it — while a trap has only what the code left behind,
+    /// and the global is it.
+    ///
+    /// Off by default: two instructions per statement and one exported global are a real cost, and
+    /// the host that reads them back is the build-script engine, where a failure with no line in
+    /// it is a failure nobody can act on.
+    pub positions: bool,
 }
 
 /// What the module being built *is*.
@@ -618,6 +632,29 @@ impl CompileWasm {
             });
         }
 
+        // A compile that asked for positions records where each statement was written: one index
+        // per statement, stored before that statement's own code runs, and a `jals.positions`
+        // section saying what each index means. The global has to exist before any body stores to
+        // it, and it is exported because an engine reads it back *after* a trap, when nothing else
+        // can still name the stack. Initialised to `-1`: "no statement has run", which is what a
+        // failure during instantiation reads as.
+        if options.positions {
+            let global = module.global_index(module.globals.len());
+            module.globals.push(Global {
+                ty: ValType::I32,
+                init: alloc::vec![Instr::I32Const(-1)],
+            });
+            module.exports.push((
+                positions::POSITION_GLOBAL.to_owned(),
+                ExportKind::Global,
+                global,
+            ));
+            layout.positions = Some(PositionsBuild {
+                global,
+                statements: RefCell::new(Vec::new()),
+            });
+        }
+
         // Pass 2: every method gets a signature and a function index, so a call emitted in pass 3
         // can name a function declared later in the source.
         // Everything the module imports is declared by now — a `native`'s host import and every
@@ -757,6 +794,18 @@ impl CompileWasm {
                 &mut module,
             )?,
         };
+        // The table the instrumented statements wrote their indices into. Emitted once every body
+        // has had its say, and not at all when there is nothing to say: a module whose inputs
+        // declare no statements carries no section, and a reader finds none.
+        if let Some(build) = &layout.positions {
+            let statements = build.statements.borrow();
+            if !statements.is_empty() {
+                module.add_custom_section(
+                    positions::CUSTOM_SECTION.to_owned(),
+                    Positions::encode(&statements),
+                );
+            }
+        }
         Ok((module, published))
     }
 
@@ -2699,6 +2748,12 @@ struct Layout {
     /// [`WasmOptions::assertions`], carried here because the statement lowering is the only thing
     /// that reads it and every body already holds the layout.
     assertions: bool,
+    /// The position table under construction, when [`WasmOptions::positions`] asked for one.
+    ///
+    /// Carried here for the same reason `assertions` is: the statement lowering is what writes it,
+    /// and every body already holds the layout. `None` — the default — is a compile that emits no
+    /// position instructions at all.
+    positions: Option<PositionsBuild>,
     /// Every interface this module declares. An interface gets no struct type — wasm's declared
     /// subtyping is single-inheritance, so it could not be a supertype of two unrelated classes — so a
     /// value of interface type is held at the top of the reference hierarchy and narrowed at each use.
@@ -2795,6 +2850,19 @@ struct RealmBuild {
     global: u32,
     /// `(member, function type)` per slot, in first-call order.
     slots: RefCell<Vec<(MemberId, u32)>>,
+}
+
+/// A module's statement positions under construction.
+///
+/// The table is collected while bodies are lowered — every statement enters through
+/// [`Lowering::stmt`], which is what makes one index per statement enough — so the vector is
+/// behind a [`RefCell`] for the same reason the realm's slot list is: a body holds the layout by
+/// shared reference, and the table is the one thing a body adds to.
+struct PositionsBuild {
+    /// The exported global every statement stores its index into.
+    global: u32,
+    /// Where each statement was written, index 0 first. The index is what the global holds.
+    statements: RefCell<Vec<Position>>,
 }
 
 /// A linked library's realm as its consumer holds it.
@@ -4208,9 +4276,24 @@ impl Lowering<'_> {
     /// an expression already carries the span the innermost expression boundary gave it, and this
     /// keeps that finer one, while a statement that fails on its own — a `switch` with no selector
     /// — is named by its own. See [`WasmError::at`].
+    ///
+    /// When the compile asked for [`WasmOptions::positions`], the same boundary is where a
+    /// *runtime* position is written: the statement's index goes into the module's position global
+    /// before its own code runs, so a trap anywhere inside reports the last statement entered. A
+    /// loop re-enters its body, which is what makes the reported statement the iteration's.
     fn stmt(&mut self, statement: &ast::Stmt, insn: &mut Insn) -> Result<()> {
         let file = self.input.file();
         let range = Self::written_range(statement.syntax());
+        if let Some(build) = &self.layout.positions {
+            let mut statements = build.statements.borrow_mut();
+            let index = i32::try_from(statements.len()).map_err(|_| WasmError::TooLarge)?;
+            statements.push(Position {
+                file: file.0,
+                start: u32::try_from(range.start).map_err(|_| WasmError::TooLarge)?,
+                end: u32::try_from(range.end).map_err(|_| WasmError::TooLarge)?,
+            });
+            insn.i32_const(index).global_set(build.global);
+        }
         self.statement(statement, insn)
             .map_err(|error| error.at(file, range))
     }

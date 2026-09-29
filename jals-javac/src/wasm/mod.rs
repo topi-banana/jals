@@ -90,6 +90,7 @@ mod abi;
 mod encode;
 mod insn;
 mod lower;
+mod positions;
 
 /// Numeric promotion is a source fact, so the type lives in `crate::facts`; it is named here
 /// because it is what [`Insn::convert`] takes. [`jvm`](crate::jvm) re-exports it for the same
@@ -102,3 +103,4 @@ pub use encode::{
 };
 pub use insn::{Insn, Instr, NumOp};
 pub use lower::{CompileWasm, LinkedLibrary, WasmError, WasmOptions};
+pub use positions::{POSITION_GLOBAL, Positions};

@@ -168,6 +168,7 @@ impl Execute {
             // project that links one is a host-only arrangement for now.
             libraries: &[],
             foreign: &[],
+            fuel: None,
             progress: &jals_progress::Progress::SILENT,
         };
         let outcome = WasmRunner::run(&request).map_err(|error| error.to_string())?;

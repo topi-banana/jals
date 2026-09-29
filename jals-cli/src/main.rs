@@ -1295,6 +1295,7 @@ impl RunArgs {
             // them. A project that declared none links an empty list, which is the ordinary run.
             libraries,
             foreign,
+            fuel: None,
             progress,
         };
         match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {

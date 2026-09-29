@@ -756,7 +756,10 @@ fn an_assert_compiles_to_nothing_by_default() {
 fn an_armed_assert_emits_a_conditional_trap() {
     let module = module_with(
         &["public class S { public static int run(int n) { assert n > 0; return n; } }"],
-        WasmOptions { assertions: true },
+        WasmOptions {
+            assertions: true,
+            ..WasmOptions::default()
+        },
     );
     let body = body_of(&module, "run");
     assert!(
@@ -792,8 +795,16 @@ public class S {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    let error = CompileWasm::module(&[typed], &[], &index, WasmOptions { assertions: true })
-        .expect_err("the condition is compiled now, and it names a library type");
+    let error = CompileWasm::module(
+        &[typed],
+        &[],
+        &index,
+        WasmOptions {
+            assertions: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect_err("the condition is compiled now, and it names a library type");
     assert!(
         error
             .to_string()

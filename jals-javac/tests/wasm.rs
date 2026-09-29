@@ -8,7 +8,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
-use jals_javac::wasm::{CompileWasm, WasmError, WasmOptions};
+use jals_javac::wasm::{CompileWasm, Positions, WasmError, WasmOptions};
 use jals_syntax::SyntaxNode;
 
 /// Whether `name` is on this host. A missing engine is a missing *oracle*, not a broken compiler,
@@ -3294,6 +3294,63 @@ public class Second {
     assert_eq!(
         &second[range], "System.out.println(\"hi\")",
         "the span is the failing expression, not the statement or the method it is written in"
+    );
+}
+
+/// A compile that asked for positions carries the table, one entry per statement, and one that did
+/// not carries none.
+///
+/// The table is what a run reads back after a trap — the module itself holds nothing but indices —
+/// so what is pinned here is the shape a host depends on: an entry per statement, in the order the
+/// statements were lowered, and each one the *written* range of that statement rather than the
+/// trivia the parser attached in front of it.
+#[test]
+fn a_positions_compile_carries_the_statement_table() {
+    let source = r"
+public class Positions {
+    public static int run() {
+        int n = 1;
+        n = n + 1;
+        return n;
+    }
+}
+";
+    let module = compile_with(
+        &[source],
+        WasmOptions {
+            positions: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect("compiles with positions");
+    validate(&module);
+    let positions = Positions::of_module(&module).expect("the compile asked for the table");
+
+    let texts: Vec<&str> = (0..3)
+        .map(|index| {
+            let (file, range) = positions
+                .get(index)
+                .unwrap_or_else(|| panic!("entry {index} is in the table"));
+            assert_eq!(file, FileId(0), "every entry names the one source");
+            &source[range]
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["int n = 1;", "n = n + 1;", "return n;"],
+        "one entry per statement, in the order they were lowered"
+    );
+    assert_eq!(
+        positions.get(3),
+        None,
+        "and no entry past the last statement"
+    );
+
+    let plain = compile(&[source]).expect("compiles without positions");
+    assert_eq!(
+        Positions::of_module(&plain),
+        None,
+        "an ordinary compile pays nothing for a table nobody asked for"
     );
 }
 
