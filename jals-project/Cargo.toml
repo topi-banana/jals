@@ -13,7 +13,7 @@ native = [
 ]
 
 [dependencies]
-jals-build = { workspace = true, features = ["rhai"] }
+jals-build = { workspace = true, features = ["rhai", "build-script"] }
 jals-classpath = { path = "../jals-classpath", default-features = false, features = [
   "archive",
 ] }

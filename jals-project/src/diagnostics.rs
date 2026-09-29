@@ -533,12 +533,16 @@ impl ProjectDiagnostics {
                 }
             }
             // A complaint about `[build] script`, not about the script — which the host could not
-            // anchor to anyway, since the path it names is not a usable key.
-            BuildScriptError::InvalidScriptPath { .. } => out.push(Self::error(
-                ProjectAnchor::Manifest,
-                ProjectDiagnosticCode::ProjectManifest,
-                error,
-            )),
+            // anchor to anyway, since the path it names is not a usable key. `Unsupported` is the
+            // same kind of complaint one level up: the manifest selected an engine this binary
+            // does not carry, and no coordinate in the script would explain the refusal.
+            BuildScriptError::InvalidScriptPath { .. } | BuildScriptError::Unsupported { .. } => {
+                out.push(Self::error(
+                    ProjectAnchor::Manifest,
+                    ProjectDiagnosticCode::ProjectManifest,
+                    error,
+                ));
+            }
             BuildScriptError::ScriptTooLarge { script, .. } => out.push(Self::error(
                 ProjectAnchor::Script(script.clone()),
                 ProjectDiagnosticCode::BuildScript,

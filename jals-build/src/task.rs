@@ -1,15 +1,22 @@
 //! Typed, declarative tasks recorded by a build script for later host execution.
 
+#[cfg(feature = "rhai")]
 use alloc::boxed::Box;
+#[cfg(feature = "rhai")]
 use alloc::format;
 use alloc::rc::Rc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+#[cfg(feature = "rhai")]
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+#[cfg(feature = "rhai")]
+use core::cell::Cell;
+use core::cell::RefCell;
 use core::fmt;
 
 use jals_storage::RelativePath;
+#[cfg(feature = "rhai")]
 use rhai::{Array, Dynamic, Engine, EvalAltResult, INT, ImmutableString, Position};
 use serde::{Deserialize, Serialize};
 
@@ -357,6 +364,7 @@ impl TaskPublishIntent {
     ///
     /// Private because the script keyword has exactly one reader — the Rhai binding below. A
     /// consumer of a `TaskPlan` receives the parsed intent and never the word.
+    #[cfg(feature = "rhai")]
     fn parse(value: &str) -> Option<Self> {
         match value {
             "compile" => Some(Self::Compile),
@@ -662,11 +670,13 @@ impl fmt::Display for TaskPlanError {
 
 impl core::error::Error for TaskPlanError {}
 
+#[cfg(feature = "rhai")]
 #[derive(Debug, Clone, Copy)]
 struct TaskHandle {
     id: TaskId,
 }
 
+#[cfg(feature = "rhai")]
 macro_rules! handle {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy)]
@@ -674,12 +684,19 @@ macro_rules! handle {
     };
 }
 
+#[cfg(feature = "rhai")]
 handle!(UrlTask);
+#[cfg(feature = "rhai")]
 handle!(DigestTask);
+#[cfg(feature = "rhai")]
 handle!(ByteCountTask);
+#[cfg(feature = "rhai")]
 handle!(JsonTask);
+#[cfg(feature = "rhai")]
 handle!(TextTask);
+#[cfg(feature = "rhai")]
 handle!(JarTask);
+#[cfg(feature = "rhai")]
 handle!(SourceTreeTask);
 
 /// A mapping grammar as a script value — the optional third argument of `tasks.remap_jar`.
@@ -688,6 +705,7 @@ handle!(SourceTreeTask);
 /// a step. It is a value rather than a pair of loose strings because a namespace pair means nothing
 /// without the format that names it — `tasks.tiny_v2("official", "named")` is the only way to write
 /// one, so a script cannot pair namespaces with a grammar that has none.
+#[cfg(feature = "rhai")]
 #[derive(Debug, Clone)]
 struct MappingFormatValue(TaskMappingFormat);
 
@@ -741,6 +759,10 @@ pub(crate) struct TasksApi {
     plan: Rc<RefCell<TaskPlan>>,
     limits: TaskPlanLimits,
     /// Totals for everything already accepted, so each declaration costs O(1).
+    ///
+    /// Gated with the Rhai declarations that maintain it; the Java engine's task bindings (which
+    /// reuse this type) will lift the gate when they land.
+    #[cfg(feature = "rhai")]
     cost: Rc<Cell<PlanCost>>,
 }
 
@@ -749,6 +771,7 @@ impl TasksApi {
         Self {
             plan: Rc::new(RefCell::new(TaskPlan::new())),
             limits,
+            #[cfg(feature = "rhai")]
             cost: Rc::new(Cell::new(PlanCost::default())),
         }
     }
@@ -761,6 +784,7 @@ impl TasksApi {
         Ok(plan)
     }
 
+    #[cfg(feature = "rhai")]
     fn push(&self, kind: TaskNodeKind) -> RhaiResult<TaskHandle> {
         let mut plan = self
             .plan
@@ -781,6 +805,7 @@ impl TasksApi {
         Ok(TaskHandle { id })
     }
 
+    #[cfg(feature = "rhai")]
     fn terminal(&self, terminal: TaskTerminal) -> RhaiResult<()> {
         let mut plan = self
             .plan
@@ -798,6 +823,7 @@ impl TasksApi {
 
     /// Fold one declaration's cost into the running totals, leaving them unchanged if it is
     /// rejected — a script may catch the error and keep building.
+    #[cfg(feature = "rhai")]
     fn accept(&self, added: Result<PlanCost, TaskPlanError>) -> RhaiResult<()> {
         let total = added
             .and_then(|added| self.cost.get().add(added))
@@ -808,9 +834,11 @@ impl TasksApi {
     }
 }
 
+#[cfg(feature = "rhai")]
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 
 impl TasksApi {
+    #[cfg(feature = "rhai")]
     #[allow(clippy::unnecessary_box_returns)]
     fn rhai_error(message: impl Into<String>) -> Box<EvalAltResult> {
         Box::new(EvalAltResult::ErrorRuntime(
@@ -819,6 +847,7 @@ impl TasksApi {
         ))
     }
 
+    #[cfg(feature = "rhai")]
     fn path_from_array(path: Array, operation: &str) -> RhaiResult<Vec<String>> {
         path.into_iter()
             .map(|value| {
@@ -832,6 +861,7 @@ impl TasksApi {
             .collect()
     }
 
+    #[cfg(feature = "rhai")]
     fn https_url(api: &mut Self, value: ImmutableString) -> RhaiResult<UrlTask> {
         api.push(TaskNodeKind::HttpsUrl {
             value: value.into_owned(),
@@ -839,6 +869,7 @@ impl TasksApi {
         .map(UrlTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn project_jar(api: &mut Self, path: ImmutableString) -> RhaiResult<JarTask> {
         api.push(TaskNodeKind::ProjectJar {
             path: path.into_owned(),
@@ -846,6 +877,7 @@ impl TasksApi {
         .map(JarTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn digest(
         api: &Self,
         value: ImmutableString,
@@ -858,14 +890,17 @@ impl TasksApi {
         .map(DigestTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn sha1(api: &mut Self, value: ImmutableString) -> RhaiResult<DigestTask> {
         Self::digest(api, value, TaskDigestAlgorithm::Sha1)
     }
 
+    #[cfg(feature = "rhai")]
     fn sha256(api: &mut Self, value: ImmutableString) -> RhaiResult<DigestTask> {
         Self::digest(api, value, TaskDigestAlgorithm::Sha256)
     }
 
+    #[cfg(feature = "rhai")]
     fn bytes(api: &mut Self, value: INT) -> RhaiResult<ByteCountTask> {
         let value = u64::try_from(value)
             .map_err(|_| Self::rhai_error("tasks.bytes requires a positive byte count"))?;
@@ -873,6 +908,7 @@ impl TasksApi {
             .map(ByteCountTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn fetch(
         api: &Self,
         url: UrlTask,
@@ -888,6 +924,7 @@ impl TasksApi {
         })
     }
 
+    #[cfg(feature = "rhai")]
     fn fetch_json(
         api: &mut Self,
         url: UrlTask,
@@ -897,6 +934,7 @@ impl TasksApi {
         Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Json).map(JsonTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn fetch_jar(
         api: &mut Self,
         url: UrlTask,
@@ -906,6 +944,7 @@ impl TasksApi {
         Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Jar).map(JarTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn fetch_text(
         api: &mut Self,
         url: UrlTask,
@@ -915,6 +954,7 @@ impl TasksApi {
         Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Text).map(TextTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn json_at(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<JsonTask> {
         api.push(TaskNodeKind::JsonAt {
             json: json.0.id,
@@ -923,6 +963,7 @@ impl TasksApi {
         .map(JsonTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn json_find_string(
         api: &mut Self,
         json: JsonTask,
@@ -939,6 +980,7 @@ impl TasksApi {
         .map(JsonTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn json_url(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<UrlTask> {
         api.push(TaskNodeKind::JsonUrl {
             json: json.0.id,
@@ -947,6 +989,7 @@ impl TasksApi {
         .map(UrlTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn json_digest(
         api: &Self,
         json: JsonTask,
@@ -962,6 +1005,7 @@ impl TasksApi {
         .map(DigestTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn json_sha1(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<DigestTask> {
         Self::json_digest(
             api,
@@ -972,6 +1016,7 @@ impl TasksApi {
         )
     }
 
+    #[cfg(feature = "rhai")]
     fn json_sha256(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<DigestTask> {
         Self::json_digest(
             api,
@@ -982,6 +1027,7 @@ impl TasksApi {
         )
     }
 
+    #[cfg(feature = "rhai")]
     fn json_u64(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<ByteCountTask> {
         api.push(TaskNodeKind::JsonU64 {
             json: json.0.id,
@@ -990,6 +1036,7 @@ impl TasksApi {
         .map(ByteCountTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn extract_java(
         api: &mut Self,
         jar: JarTask,
@@ -1002,6 +1049,7 @@ impl TasksApi {
         .map(SourceTreeTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn nested_jar(api: &mut Self, jar: JarTask, member: ImmutableString) -> RhaiResult<JarTask> {
         api.push(TaskNodeKind::NestedJar {
             jar: jar.0.id,
@@ -1015,6 +1063,7 @@ impl TasksApi {
     /// Registered even though it is what `tasks.remap_jar(jar, mappings)` already means, so that a
     /// script naming its format never has to drop back to the two-argument spelling to say the
     /// default one.
+    #[cfg(feature = "rhai")]
     const fn proguard(_api: &mut Self) -> MappingFormatValue {
         MappingFormatValue(TaskMappingFormat::Proguard)
     }
@@ -1023,6 +1072,7 @@ impl TasksApi {
     ///
     /// The pair is checked here as well as in the manifest because this is a second way into the
     /// same node: a script reaches `TaskNodeKind::RemapJar` without passing `[mappings]` at all.
+    #[cfg(feature = "rhai")]
     fn tiny_v2(
         _api: &mut Self,
         from: ImmutableString,
@@ -1051,6 +1101,7 @@ impl TasksApi {
     ///
     /// The two-argument spelling keeps meaning exactly what it always has. A grammar that names its
     /// own namespaces cannot be written this way, which is what the third argument below is for.
+    #[cfg(feature = "rhai")]
     fn remap_jar(api: &mut Self, jar: JarTask, mappings: TextTask) -> RhaiResult<JarTask> {
         let format = MappingFormatValue(TaskMappingFormat::Proguard);
         Self::remap_jar_as(api, jar, mappings, format)
@@ -1061,6 +1112,7 @@ impl TasksApi {
     /// The direction stays deobfuscating and the hierarchy stays empty, as in the two-argument
     /// form: a script fetching a game jar and its mappings is asking for exactly that, and the
     /// manifest's `remap` keys are where the other direction and an extra hierarchy are said.
+    #[cfg(feature = "rhai")]
     fn remap_jar_as(
         api: &mut Self,
         jar: JarTask,
@@ -1077,6 +1129,7 @@ impl TasksApi {
         .map(JarTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn merge_jars(api: &mut Self, base: JarTask, overlay: JarTask) -> RhaiResult<JarTask> {
         api.push(TaskNodeKind::MergeJars {
             base: base.0.id,
@@ -1085,6 +1138,7 @@ impl TasksApi {
         .map(JarTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn decompile_java(
         api: &mut Self,
         jar: JarTask,
@@ -1097,10 +1151,12 @@ impl TasksApi {
         .map(SourceTreeTask)
     }
 
+    #[cfg(feature = "rhai")]
     fn add_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
         api.terminal(TaskTerminal::AddClasspath { jar: jar.0.id })
     }
 
+    #[cfg(feature = "rhai")]
     fn add_nested_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
         api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id })
     }
@@ -1112,6 +1168,7 @@ impl TasksApi {
     /// dump, when the thing they have to do is add one word. Every argument is discarded; the
     /// error is the entire body. This is deliberately *not* a default intent, which is the
     /// ambiguity the fifth argument exists to remove.
+    #[cfg(feature = "rhai")]
     fn publish_tree_without_intent(
         _api: &mut Self,
         _owner: ImmutableString,
@@ -1130,6 +1187,7 @@ impl TasksApi {
     /// thing the task graph cannot infer — a tree with a JAR behind it and a tree that is the only
     /// carrier of its package are written identically — and a script that does not say is a script
     /// whose author has not decided.
+    #[cfg(feature = "rhai")]
     fn publish_tree(
         api: &mut Self,
         owner: ImmutableString,
@@ -1158,6 +1216,7 @@ impl TasksApi {
         })
     }
 
+    #[cfg(feature = "rhai")]
     pub(crate) fn register_rhai(engine: &mut Engine) {
         engine
             .register_type_with_name::<Self>("Tasks")
@@ -1198,11 +1257,11 @@ impl TasksApi {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rhai"))]
 mod tests {
     use super::*;
 
-    fn limits() -> TaskPlanLimits {
+    const fn limits() -> TaskPlanLimits {
         TaskPlanLimits {
             max_tasks: 32,
             max_edges: 64,

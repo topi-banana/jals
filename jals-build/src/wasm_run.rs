@@ -1135,12 +1135,24 @@ impl WasmRunner {
     /// A `throw` and a trap leave the engine as different variants and are different things to
     /// tell a reader about, so they stay apart here. Everything else the engine can return at a
     /// call is a trap as far as a caller is concerned.
+    ///
+    /// A package's refusal arrives as a host trap — see [`EngineHost::trap`] — and the engine's
+    /// rendering of one carries its own scaffolding (`host function trap: unknown error: …`),
+    /// which is not part of what the package said. The payload is this crate's own
+    /// [`tinywasm::Error::Other`], so unwrapping it back to the refusal is exact rather than a
+    /// guess at the engine's formatting.
     fn execution_failure(
         error: tinywasm::Error,
         position: Option<(FileId, Range<usize>)>,
     ) -> WasmRunError {
         let error = match error {
             tinywasm::Error::Exception(_) => WasmRunError::Exception,
+            tinywasm::Error::Trap(tinywasm::Trap::HostFunction(payload)) => {
+                match payload.downcast_ref::<tinywasm::Error>() {
+                    Some(tinywasm::Error::Other(message)) => WasmRunError::Trap(message.clone()),
+                    _ => WasmRunError::Trap(payload.to_string()),
+                }
+            }
             error => WasmRunError::Trap(error.to_string()),
         };
         error.located(position)

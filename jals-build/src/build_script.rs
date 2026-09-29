@@ -8,9 +8,11 @@
 use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
+#[cfg(feature = "rhai")]
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+#[cfg(feature = "rhai")]
 use core::cell::RefCell;
 use core::error::Error as CoreError;
 use core::fmt;
@@ -35,7 +37,11 @@ use crate::task::{TaskPlan, TaskPlanLimits};
 //
 // And before that for build features: the Rhai surface gained `build.feature`/`build.features`,
 // and `FingerprintInputsWire` gained a required `features` field.
-const BUILD_SCRIPT_API_VERSION: u32 = 7;
+// And before that for the Java engine: the script's engine is selected by the manifest tag, and a
+// `java` script's host surface is the `jals.build` package rather than the Rhai registrations.
+// The two engines buffer into the same pending output, so the *state* format is unchanged; the
+// API version is what reseeds a cache written by a Rhai script that a Java script now replaces.
+const BUILD_SCRIPT_API_VERSION: u32 = 8;
 const BUILD_SCRIPT_STATE_VERSION: u32 = 7;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
@@ -526,7 +532,7 @@ impl BuildScriptSession {
     }
 
     /// Keys known to have been published through this session, in key order.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rhai"))]
     fn known_outputs(&self) -> impl ExactSizeIterator<Item = &FileKey> {
         self.outputs.keys()
     }
@@ -777,6 +783,17 @@ pub enum BuildScriptError {
     },
     /// An environment input exceeds the configured Rhai data bounds.
     EnvironmentLimit(String),
+    /// The configured script's engine is not compiled into this binary.
+    ///
+    /// A feature decision rather than a project defect: `rhai` and `build-script` are per-consumer
+    /// features, and a host that left one out has to say so instead of running the script on an
+    /// engine that does not speak its language.
+    Unsupported {
+        /// The script that could not run.
+        script: FileKey,
+        /// The engine it needs, as the manifest tag spells it (`rhai`, `java`).
+        engine: &'static str,
+    },
     /// Reading the script or publishing its outputs failed in project storage.
     Storage {
         operation: &'static str,
@@ -830,6 +847,11 @@ impl fmt::Display for BuildScriptError {
                 "build script `{script}` has {size} bytes, exceeding the source limit of {limit}"
             ),
             Self::EnvironmentLimit(message) => f.write_str(message),
+            Self::Unsupported { script, engine } => write!(
+                f,
+                "build script `{script}` needs the `{engine}` script engine, which is not compiled \
+                 into this build"
+            ),
             Self::Storage { operation, error } => {
                 write!(f, "build script could not {operation}: {error}")
             }
@@ -861,12 +883,14 @@ impl fmt::Display for BuildScriptError {
 
 impl CoreError for BuildScriptError {}
 
+#[cfg(feature = "rhai")]
 #[derive(Clone)]
 struct ProjectApi {
     view: ProjectView,
     limits: BuildScriptLimits,
 }
 
+#[cfg(feature = "rhai")]
 #[derive(Clone)]
 struct OutputApi {
     view: ProjectView,
@@ -874,6 +898,7 @@ struct OutputApi {
     pending: Rc<RefCell<PendingOutput>>,
 }
 
+#[cfg(feature = "rhai")]
 #[derive(Clone)]
 struct BuildApi {
     view: ProjectView,
@@ -1040,37 +1065,51 @@ impl PreparedBuildScript {
     }
 }
 
+#[cfg(feature = "build-script")]
+mod java;
+
 mod api {
     use alloc::borrow::ToOwned;
+    #[cfg(feature = "rhai")]
     use alloc::boxed::Box;
     use alloc::collections::{BTreeMap, BTreeSet};
     use alloc::format;
+    #[cfg(feature = "rhai")]
     use alloc::rc::Rc;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
+    #[cfg(feature = "rhai")]
     use core::cell::RefCell;
 
     use jals_config::{BuildScript, Manifest};
     use jals_storage::{
         ArtifactCache, CacheBackend, CacheKey, CacheNamespace, Change, ContentDigest, DirKey,
-        EntryRef, FileKey, ProjectStorage, ProjectView, RelativePath, Revision, SourceBackend,
+        FileKey, ProjectStorage, ProjectView, Revision, SourceBackend,
     };
+    #[cfg(feature = "rhai")]
+    use jals_storage::{EntryRef, RelativePath};
+    #[cfg(feature = "rhai")]
     use rhai::{Array, Dynamic, Engine, EvalAltResult, INT, ImmutableString, Position, Scope};
 
     use super::{
-        BUILD_ARTIFACT_ROOT, BUILD_SCRIPT_API_VERSION, BUILD_SCRIPT_STATE_VERSION, BuildApi,
+        BUILD_ARTIFACT_ROOT, BUILD_SCRIPT_API_VERSION, BUILD_SCRIPT_STATE_VERSION,
         BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError,
-        BuildScriptLimits, BuildScriptLimitsWire, BuildScriptOutput, BuildScriptOutputPath,
-        BuildScriptPosition, BuildScriptSession, BuildScriptSeverity, BuildScriptStateWire,
-        CacheIdentity, DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire,
-        FileFingerprintWire, FingerprintFilesModeWire, FingerprintInputsWire, MANAGED_ROOT,
-        MANIFEST_FILE, OutputApi, OutputArtifactWire, PendingOutput, PreparedBuildScript,
-        PreparedCacheState, ProjectApi, RHAI_OUTPUT_ROOT,
+        BuildScriptLimits, BuildScriptLimitsWire, BuildScriptOutput, BuildScriptSession,
+        BuildScriptSeverity, BuildScriptStateWire, CacheIdentity, DiagnosticLevelWire,
+        DiagnosticWire, EnvironmentFingerprintWire, FileFingerprintWire, FingerprintFilesModeWire,
+        FingerprintInputsWire, MANAGED_ROOT, MANIFEST_FILE, OutputArtifactWire, PendingOutput,
+        PreparedBuildScript, PreparedCacheState, RHAI_OUTPUT_ROOT,
     };
-    use crate::task::{TaskPlan, TasksApi};
+    #[cfg(feature = "rhai")]
+    use super::{BuildApi, BuildScriptOutputPath, BuildScriptPosition, OutputApi, ProjectApi};
+    use crate::task::TaskPlan;
+    #[cfg(feature = "rhai")]
+    use crate::task::TasksApi;
 
+    #[cfg(feature = "rhai")]
     type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 
+    #[cfg(feature = "rhai")]
     fn source_position(position: Position) -> Option<BuildScriptPosition> {
         Some(BuildScriptPosition {
             line: u32::try_from(position.line()?).ok()?,
@@ -1078,6 +1117,7 @@ mod api {
         })
     }
 
+    #[cfg(feature = "rhai")]
     #[allow(clippy::unnecessary_box_returns)]
     fn rhai_error(message: impl Into<String>) -> Box<EvalAltResult> {
         Box::new(EvalAltResult::ErrorRuntime(
@@ -1097,6 +1137,7 @@ mod api {
         }
     }
 
+    #[cfg(feature = "rhai")]
     fn check_path_limits(
         path: &str,
         operation: &str,
@@ -1119,6 +1160,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn parse_relative(
         path: &str,
         operation: &str,
@@ -1129,6 +1171,7 @@ mod api {
             .map_err(|error| rhai_error(format!("{operation} rejected path `{path}`: {error:?}")))
     }
 
+    #[cfg(feature = "rhai")]
     fn parse_file(path: &str, operation: &str, limits: &BuildScriptLimits) -> RhaiResult<FileKey> {
         FileKey::new(parse_relative(path, operation, limits)?).map_err(|error| {
             rhai_error(format!(
@@ -1137,10 +1180,12 @@ mod api {
         })
     }
 
+    #[cfg(feature = "rhai")]
     fn parse_dir(path: &str, operation: &str, limits: &BuildScriptLimits) -> RhaiResult<DirKey> {
         Ok(DirKey::new(parse_relative(path, operation, limits)?))
     }
 
+    #[cfg(feature = "rhai")]
     fn project_file(
         view: &ProjectView,
         path: &str,
@@ -1164,6 +1209,7 @@ mod api {
         DirKey::parse(BUILD_ARTIFACT_ROOT).is_ok_and(|root| key.path().starts_with(root.path()))
     }
 
+    #[cfg(feature = "rhai")]
     fn check_array_len(len: usize, limit: usize, operation: &str) -> RhaiResult<()> {
         if len > limit {
             Err(rhai_error(format!(
@@ -1174,6 +1220,7 @@ mod api {
         }
     }
 
+    #[cfg(feature = "rhai")]
     fn check_string_len(value: &str, limit: usize, operation: &str) -> RhaiResult<()> {
         if value.len() > limit {
             Err(rhai_error(format!(
@@ -1185,6 +1232,7 @@ mod api {
         }
     }
 
+    #[cfg(feature = "rhai")]
     fn project_read(api: &mut ProjectApi, path: &str) -> RhaiResult<Array> {
         let key = parse_file(path, "project.read", &api.limits)?;
         let file = api
@@ -1203,6 +1251,7 @@ mod api {
             .collect())
     }
 
+    #[cfg(feature = "rhai")]
     fn project_read_text(api: &mut ProjectApi, path: &str) -> RhaiResult<String> {
         let key = parse_file(path, "project.read_text", &api.limits)?;
         let text = api
@@ -1213,6 +1262,7 @@ mod api {
         Ok(text.to_owned())
     }
 
+    #[cfg(feature = "rhai")]
     fn project_exists(api: &mut ProjectApi, path: &str) -> RhaiResult<bool> {
         let path = parse_relative(path, "project.exists", &api.limits)?;
         if path.is_root() {
@@ -1225,6 +1275,7 @@ mod api {
             || api.view.tree().directory(&DirKey::new(path)).is_some())
     }
 
+    #[cfg(feature = "rhai")]
     fn project_read_dir(api: &mut ProjectApi, path: &str) -> RhaiResult<Array> {
         let key = parse_dir(path, "project.read_dir", &api.limits)?;
         api.view
@@ -1246,6 +1297,7 @@ mod api {
         Ok(entries.into_iter().map(Dynamic::from).collect())
     }
 
+    #[cfg(feature = "rhai")]
     fn project_walk_files(api: &mut ProjectApi, path: &str) -> RhaiResult<Array> {
         let key = parse_dir(path, "project.walk_files", &api.limits)?;
         api.view
@@ -1264,6 +1316,7 @@ mod api {
         Ok(files.into_iter().map(Dynamic::from).collect())
     }
 
+    #[cfg(feature = "rhai")]
     fn output_write_text(
         api: &mut OutputApi,
         path: &str,
@@ -1273,6 +1326,7 @@ mod api {
         output_write_bytes(api, path, text.as_bytes().to_vec())
     }
 
+    #[cfg(feature = "rhai")]
     fn output_write(
         api: &mut OutputApi,
         path: &str,
@@ -1296,6 +1350,7 @@ mod api {
         output_write_bytes(api, path, output)
     }
 
+    #[cfg(feature = "rhai")]
     fn output_write_bytes(
         api: &OutputApi,
         path: &str,
@@ -1388,6 +1443,7 @@ mod api {
         Ok(BuildScriptOutputPath { key })
     }
 
+    #[cfg(feature = "rhai")]
     fn check_host_collection(len: usize, limit: usize, operation: &str) -> RhaiResult<()> {
         if len == limit {
             Err(rhai_error(format!(
@@ -1398,6 +1454,7 @@ mod api {
         }
     }
 
+    #[cfg(feature = "rhai")]
     #[allow(clippy::set_contains_or_insert)]
     fn insert_host_file(
         set: &mut BTreeSet<FileKey>,
@@ -1413,6 +1470,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn update_host_directive_bytes(
         pending: &mut PendingOutput,
         previous: usize,
@@ -1434,6 +1492,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn validate_env_name(name: &str, operation: &str) -> RhaiResult<()> {
         if name.is_empty() || name.bytes().any(|byte| byte == b'=' || byte == b'\0') {
             Err(rhai_error(format!(
@@ -1444,22 +1503,26 @@ mod api {
         }
     }
 
+    #[cfg(feature = "rhai")]
     fn build_env(api: &mut BuildApi, name: &str) -> Dynamic {
         api.environment
             .get(name)
             .map_or(Dynamic::UNIT, |value| Dynamic::from(value.to_owned()))
     }
 
+    #[cfg(feature = "rhai")]
     fn build_feature(api: &mut BuildApi, name: &str) -> bool {
         api.environment.has_feature(name)
     }
 
+    #[cfg(feature = "rhai")]
     fn build_features(api: &mut BuildApi) -> RhaiResult<Array> {
         let features: Vec<String> = api.environment.features().map(str::to_owned).collect();
         check_array_len(features.len(), api.limits.max_array_size, "build.features")?;
         Ok(features.into_iter().map(Dynamic::from).collect())
     }
 
+    #[cfg(feature = "rhai")]
     fn build_rerun_file(api: &mut BuildApi, path: &str) -> RhaiResult<()> {
         let key = project_file(&api.view, path, "build.rerun_if_changed", &api.limits)?;
         if is_managed_build_path(&key) {
@@ -1480,6 +1543,7 @@ mod api {
         )
     }
 
+    #[cfg(feature = "rhai")]
     fn build_rerun_env(api: &mut BuildApi, name: ImmutableString) -> RhaiResult<()> {
         validate_env_name(name.as_str(), "build.rerun_if_env_changed")?;
         let mut pending = api
@@ -1497,6 +1561,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn add_source_path(api: &BuildApi, key: FileKey) -> RhaiResult<()> {
         let mut pending = api
             .pending
@@ -1511,15 +1576,18 @@ mod api {
         )
     }
 
+    #[cfg(feature = "rhai")]
     fn build_add_source(api: &mut BuildApi, path: &str) -> RhaiResult<()> {
         let key = project_file(&api.view, path, "build.add_source", &api.limits)?;
         add_source_path(api, key)
     }
 
+    #[cfg(feature = "rhai")]
     fn build_add_output_source(api: &mut BuildApi, path: BuildScriptOutputPath) -> RhaiResult<()> {
         add_source_path(api, path.key)
     }
 
+    #[cfg(feature = "rhai")]
     fn add_classpath(api: &BuildApi, key: FileKey) -> RhaiResult<()> {
         let mut pending = api
             .pending
@@ -1534,11 +1602,13 @@ mod api {
         )
     }
 
+    #[cfg(feature = "rhai")]
     fn build_add_classpath(api: &mut BuildApi, path: &str) -> RhaiResult<()> {
         let key = project_file(&api.view, path, "build.add_classpath", &api.limits)?;
         add_classpath(api, key)
     }
 
+    #[cfg(feature = "rhai")]
     fn build_add_output_classpath(
         api: &mut BuildApi,
         path: BuildScriptOutputPath,
@@ -1546,6 +1616,7 @@ mod api {
         add_classpath(api, path.key)
     }
 
+    #[cfg(feature = "rhai")]
     fn push_argument(pending: &mut PendingOutput, argument: String, javac: bool) -> RhaiResult<()> {
         let (len, operation) = if javac {
             (pending.javac_args.len(), "build.add_javac_arg")
@@ -1562,6 +1633,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn build_add_javac_arg(api: &mut BuildApi, argument: ImmutableString) -> RhaiResult<()> {
         let mut pending = api
             .pending
@@ -1570,6 +1642,7 @@ mod api {
         push_argument(&mut pending, argument.into_owned(), true)
     }
 
+    #[cfg(feature = "rhai")]
     fn build_add_jvm_arg(api: &mut BuildApi, argument: ImmutableString) -> RhaiResult<()> {
         let mut pending = api
             .pending
@@ -1578,6 +1651,7 @@ mod api {
         push_argument(&mut pending, argument.into_owned(), false)
     }
 
+    #[cfg(feature = "rhai")]
     fn set_environment(
         api: &BuildApi,
         name: ImmutableString,
@@ -1627,6 +1701,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn build_set_compile_env(
         api: &mut BuildApi,
         name: ImmutableString,
@@ -1635,6 +1710,7 @@ mod api {
         set_environment(api, name, value, true)
     }
 
+    #[cfg(feature = "rhai")]
     fn build_set_run_env(
         api: &mut BuildApi,
         name: ImmutableString,
@@ -1643,6 +1719,7 @@ mod api {
         set_environment(api, name, value, false)
     }
 
+    #[cfg(feature = "rhai")]
     fn push_diagnostic(
         api: &BuildApi,
         diagnostic: BuildScriptDiagnostic,
@@ -1662,6 +1739,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn build_warning(api: &mut BuildApi, message: ImmutableString) -> RhaiResult<()> {
         push_diagnostic(
             api,
@@ -1670,6 +1748,7 @@ mod api {
         )
     }
 
+    #[cfg(feature = "rhai")]
     fn build_error(api: &mut BuildApi, message: ImmutableString) -> RhaiResult<()> {
         push_diagnostic(
             api,
@@ -1678,6 +1757,7 @@ mod api {
         )
     }
 
+    #[cfg(feature = "rhai")]
     fn build_metadata(
         api: &mut BuildApi,
         key: ImmutableString,
@@ -1711,6 +1791,7 @@ mod api {
         Ok(())
     }
 
+    #[cfg(feature = "rhai")]
     fn engine(limits: &BuildScriptLimits) -> Engine {
         let mut engine = Engine::new();
         engine
@@ -1759,6 +1840,90 @@ mod api {
             .register_fn("metadata", build_metadata);
         TasksApi::register_rhai(&mut engine);
         engine
+    }
+
+    /// Execute a Rhai script against one view, buffering everything it produces.
+    ///
+    /// The scope is built and dropped here: every scope object holds an `Rc` to the pending
+    /// output, so an escaped scope would make the unwrap below fail — which is the failure the
+    /// unwrap's message names, and the reason the drop is explicit rather than left to the end of
+    /// the function.
+    ///
+    /// Rhai parses and evaluates on the calling thread — there is nothing here to await — and the
+    /// host already has the script's text, so no cache read stands between the two.
+    #[cfg(feature = "rhai")]
+    fn evaluate_rhai(
+        view: &ProjectView,
+        script_key: &FileKey,
+        script: &str,
+        environment: &BuildScriptEnvironment,
+        limits: &BuildScriptLimits,
+    ) -> Result<PendingOutput, BuildScriptError> {
+        let pending = Rc::new(RefCell::new(PendingOutput::new(limits.clone())));
+        let tasks = TasksApi::new(limits.task_plan_limits());
+        let mut scope = Scope::new();
+        scope.push(
+            "project",
+            ProjectApi {
+                view: view.clone(),
+                limits: limits.clone(),
+            },
+        );
+        scope.push("tasks", tasks.clone());
+        scope.push(
+            "output",
+            OutputApi {
+                view: view.clone(),
+                limits: limits.clone(),
+                pending: Rc::clone(&pending),
+            },
+        );
+        scope.push(
+            "build",
+            BuildApi {
+                view: view.clone(),
+                environment: environment.clone(),
+                limits: limits.clone(),
+                pending: Rc::clone(&pending),
+            },
+        );
+
+        let engine = engine(limits);
+        let mut ast = engine.compile(script).map_err(|error| {
+            let position = source_position(error.position());
+            BuildScriptError::Compile {
+                script: script_key.clone(),
+                position,
+                message: error.to_string(),
+            }
+        })?;
+        ast.set_source(script_key.to_string());
+        engine
+            .run_ast_with_scope(&mut scope, &ast)
+            .map_err(|error| {
+                let position = source_position(error.position());
+                BuildScriptError::Execute {
+                    script: script_key.clone(),
+                    position,
+                    message: error.to_string(),
+                }
+            })?;
+
+        drop(scope);
+        let task_plan = tasks.finish().map_err(|error| BuildScriptError::Execute {
+            script: script_key.clone(),
+            position: None,
+            message: error.to_string(),
+        })?;
+        let mut pending = Rc::try_unwrap(pending)
+            .map_err(|_| BuildScriptError::Execute {
+                script: script_key.clone(),
+                position: None,
+                message: "build-script scope retained internal output state".to_owned(),
+            })?
+            .into_inner();
+        pending.task_plan = task_plan;
+        Ok(pending)
     }
 
     fn validate_environment(
@@ -2506,14 +2671,18 @@ mod api {
         environment: &BuildScriptEnvironment,
         limits: &BuildScriptLimits,
     ) -> Result<Option<PreparedBuildScript>, BuildScriptError> {
-        let Some(BuildScript::Rhai { file }) = manifest.build.script.as_ref() else {
+        let Some(BuildScript::Rhai { file: script_file } | BuildScript::Java { file: script_file }) =
+            manifest.build.script.as_ref()
+        else {
             return Ok(None);
         };
         limits.validate()?;
         validate_environment(environment, limits)?;
-        if file.len() > limits.max_path_bytes || path_depth(file) > limits.max_path_depth {
+        if script_file.len() > limits.max_path_bytes
+            || path_depth(script_file) > limits.max_path_depth
+        {
             return Err(BuildScriptError::InvalidScriptPath {
-                path: file.clone(),
+                path: script_file.clone(),
                 reason: format!(
                     "path exceeds the {}-byte or {}-segment build-script limit",
                     limits.max_path_bytes, limits.max_path_depth
@@ -2521,13 +2690,13 @@ mod api {
             });
         }
         let script_key =
-            FileKey::parse(file).map_err(|error| BuildScriptError::InvalidScriptPath {
-                path: file.clone(),
+            FileKey::parse(script_file).map_err(|error| BuildScriptError::InvalidScriptPath {
+                path: script_file.clone(),
                 reason: format!("{error:?}"),
             })?;
         if is_managed_build_path(&script_key) {
             return Err(BuildScriptError::InvalidScriptPath {
-                path: file.clone(),
+                path: script_file.clone(),
                 reason: format!(
                     "scripts must be outside `{BUILD_ARTIFACT_ROOT}`, which `jals clean` removes"
                 ),
@@ -2578,70 +2747,32 @@ mod api {
             }
             recovered_outputs = cached.generated;
         }
-        let pending = Rc::new(RefCell::new(PendingOutput::new(limits.clone())));
-        let tasks = TasksApi::new(limits.task_plan_limits());
-        let mut scope = Scope::new();
-        scope.push(
-            "project",
-            ProjectApi {
-                view: view.clone(),
-                limits: limits.clone(),
-            },
-        );
-        scope.push("tasks", tasks.clone());
-        scope.push(
-            "output",
-            OutputApi {
-                view: view.clone(),
-                limits: limits.clone(),
-                pending: Rc::clone(&pending),
-            },
-        );
-        scope.push(
-            "build",
-            BuildApi {
-                view: view.clone(),
-                environment: environment.clone(),
-                limits: limits.clone(),
-                pending: Rc::clone(&pending),
-            },
-        );
-
-        let engine = engine(limits);
-        let mut ast = engine.compile(script).map_err(|error| {
-            let position = source_position(error.position());
-            BuildScriptError::Compile {
-                script: script_key.clone(),
-                position,
-                message: error.to_string(),
+        let pending = match manifest.build.script.as_ref() {
+            #[cfg(feature = "rhai")]
+            Some(BuildScript::Rhai { .. }) => {
+                evaluate_rhai(view, &script_key, script, environment, limits)?
             }
-        })?;
-        ast.set_source(script_key.to_string());
-        engine
-            .run_ast_with_scope(&mut scope, &ast)
-            .map_err(|error| {
-                let position = source_position(error.position());
-                BuildScriptError::Execute {
+            #[cfg(feature = "build-script")]
+            Some(BuildScript::Java { .. }) => {
+                super::java::Engine::evaluate(view, &script_key, script, environment, limits)
+                    .await?
+            }
+            // One of the two arms above is compiled out: this build has the `build-script`
+            // module but not the engine the manifest selected. There is no fallback — running a
+            // Java script on Rhai would be a different language, not a degraded one.
+            #[cfg(not(all(feature = "rhai", feature = "build-script")))]
+            Some(other) => {
+                let engine = match other {
+                    BuildScript::Rhai { .. } => "rhai",
+                    BuildScript::Java { .. } => "java",
+                };
+                return Err(BuildScriptError::Unsupported {
                     script: script_key.clone(),
-                    position,
-                    message: error.to_string(),
-                }
-            })?;
-
-        drop(scope);
-        let task_plan = tasks.finish().map_err(|error| BuildScriptError::Execute {
-            script: script_key.clone(),
-            position: None,
-            message: error.to_string(),
-        })?;
-        let mut pending = Rc::try_unwrap(pending)
-            .map_err(|_| BuildScriptError::Execute {
-                script: script_key.clone(),
-                position: None,
-                message: "build-script scope retained internal output state".to_owned(),
-            })?
-            .into_inner();
-        pending.task_plan = task_plan;
+                    engine,
+                });
+            }
+            None => unreachable!("the script kind was matched above"),
+        };
         if pending
             .diagnostics
             .iter()
@@ -2677,7 +2808,7 @@ mod api {
     ///
     /// A test convenience over the two-phase `prepare_build_script` /
     /// `publish_prepared_build_script` API that the host drives directly.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rhai"))]
     pub(crate) async fn execute_build_script<S: SourceBackend, C: CacheBackend>(
         storage: &mut ProjectStorage<S, C>,
         manifest: &Manifest,
@@ -2756,11 +2887,14 @@ mod api {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rhai"))]
 pub(crate) use api::execute_build_script;
 pub use api::{clear_build_script_outputs, prepare_build_script, publish_prepared_build_script};
 
-#[cfg(test)]
+// The Rhai engine's end-to-end suite. A `build-script`-only test build runs the Java engine,
+// whose own tests live beside it in `build_script/java.rs`; the engine-neutral preparation tests
+// are still written against `build.rhai` until the Java port replaces this module.
+#[cfg(all(test, feature = "rhai"))]
 mod tests {
     use jals_config::{BuildScript, Manifest};
     use jals_exec::{Exec, block_on_inline};

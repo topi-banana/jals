@@ -190,14 +190,12 @@ impl Workspace {
     ) -> Result<ProjectScript, RootBuildScriptError> {
         let manifest_key = FileKey::parse(MANIFEST_PATH).expect("manifest pseudo-path is valid");
         let configured_script = match manifest.build.script.as_ref() {
-            Some(BuildScript::Rhai { file }) => {
-                Some(
-                    FileKey::parse(file).map_err(|error| BuildScriptError::InvalidScriptPath {
-                        path: file.clone(),
-                        reason: format!("{error:?}"),
-                    })?,
-                )
-            }
+            Some(BuildScript::Rhai { file } | BuildScript::Java { file }) => Some(
+                FileKey::parse(file).map_err(|error| BuildScriptError::InvalidScriptPath {
+                    path: file.clone(),
+                    reason: format!("{error:?}"),
+                })?,
+            ),
             None => None,
         };
         // The script is staged as a storage overlay, and an overlay unconditionally shadows the

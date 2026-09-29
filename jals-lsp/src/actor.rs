@@ -1678,7 +1678,9 @@ impl AssembledWorkspace {
             .script
             .as_ref()
             .and_then(|script| match script {
-                BuildScript::Rhai { file } => FileKey::parse(file).ok(),
+                BuildScript::Rhai { file } | BuildScript::Java { file } => {
+                    FileKey::parse(file).ok()
+                }
             });
         let has_build_script = configured_script.is_some();
         let scopes = if has_build_script {

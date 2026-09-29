@@ -278,13 +278,19 @@ pub struct WasmOptions {
     /// which is the failure that looks exactly like success.
     pub assertions: bool,
 
-    /// Whether every statement records where it was written, so a *run* can report a line.
+    /// Whether every statement of the *project's own* inputs records where it was written, so a
+    /// *run* can report a line.
     ///
-    /// On, each statement stores its index into the module's exported `$jals$position` global
+    /// On, each such statement stores its index into the module's exported `$jals$position` global
     /// before its own code runs, and the module carries a `jals.positions` table saying what each
     /// index means. The compile's own errors know where they happened without this — an error is
     /// attached at the lowering that raised it — while a trap has only what the code left behind,
     /// and the global is it.
+    ///
+    /// The sources a native package publishes are excluded, because the global is the *last*
+    /// statement entered: with a package's own statements writing it too, a trap raised there — a
+    /// host refusal on the caller's behalf — would report a line of a file the caller cannot edit.
+    /// Excluded, the last write is the project statement that called in.
     ///
     /// Off by default: two instructions per statement and one exported global are a real cost, and
     /// the host that reads them back is the build-script engine, where a failure with no line in
@@ -721,12 +727,15 @@ impl CompileWasm {
             &state,
             methods.len() + synthesised.len(),
         );
-        let inits = Self::class_initializers(inputs, index, &layout, &state, &mut module)?;
+        let inits =
+            Self::class_initializers(inputs, index, &layout, &state, &mut module, project_inputs)?;
 
         // Pass 3: bodies.
         for method in &methods {
             let input = &inputs[method.input];
-            let body = Body::lower(method, input, index, &layout)?;
+            // Only the project's own inputs record statement positions; a native package's Java is
+            // host code the script's author cannot edit. See [`WasmOptions::positions`].
+            let body = Body::lower(method, input, index, &layout, method.input < project_inputs)?;
             // Every engine caps a function's locals, and a body that walks past the cap is a module
             // no engine loads. Said here rather than left to the validator: a generated source with
             // thousands of locals is a *refusal* like any other format limit, and emitting the bytes
@@ -1851,6 +1860,7 @@ impl CompileWasm {
         layout: &Layout,
         state: &StaticState<'_>,
         module: &mut Module,
+        project_inputs: usize,
     ) -> Result<Vec<Func>> {
         let StaticState {
             deferred,
@@ -1873,7 +1883,8 @@ impl CompileWasm {
             insn.global_set(flag);
             let mut locals = Vec::new();
             for (position, input) in inputs.iter().enumerate() {
-                let mut lowering = Lowering::for_static(input, index, layout, locals);
+                let mut lowering =
+                    Lowering::for_static(input, index, layout, locals, position < project_inputs);
                 // Every constant first: a `static { … }` block or a field initialiser may name one, and
                 // §8.9.3 builds them before either runs.
                 for (member, item, node) in constants {
@@ -3515,11 +3526,13 @@ impl Body {
         input: &TypedFile<'_>,
         index: &ProjectIndex,
         layout: &Layout,
+        positions: bool,
     ) -> Result<Self> {
         let mut lowering = Lowering {
             input,
             index,
             layout,
+            positions,
             slots: Vec::new(),
             locals: Vec::new(),
             next: 0,
@@ -3960,6 +3973,13 @@ struct Lowering<'a> {
     input: &'a TypedFile<'a>,
     index: &'a ProjectIndex,
     layout: &'a Layout,
+    /// Whether this input's statements write their index into the position global.
+    ///
+    /// True for the project's own inputs, false for the sources a native package publishes — see
+    /// [`WasmOptions::positions`], which is the option this field is the per-input half of. The
+    /// global has to hold the last statement the *project* entered, or a trap inside a package
+    /// would report a line of a file its caller cannot edit.
+    positions: bool,
     /// `(definition, local index)` pairs, parameters first.
     slots: Vec<(DefId, u32)>,
     /// Locals beyond the parameters, in declaration order.
@@ -4028,12 +4048,14 @@ impl Lowering<'_> {
         index: &'a ProjectIndex,
         layout: &'a Layout,
         locals: Vec<ValType>,
+        positions: bool,
     ) -> Lowering<'a> {
         let next = u32::try_from(locals.len()).unwrap_or(u32::MAX);
         Lowering {
             input,
             index,
             layout,
+            positions,
             slots: Vec::new(),
             locals,
             next,
@@ -4281,10 +4303,15 @@ impl Lowering<'_> {
     /// *runtime* position is written: the statement's index goes into the module's position global
     /// before its own code runs, so a trap anywhere inside reports the last statement entered. A
     /// loop re-enters its body, which is what makes the reported statement the iteration's.
+    ///
+    /// Only the project's own inputs write it — see [`Lowering::positions`] — so a statement of a
+    /// native package's Java is lowered without a checkpoint even when the module carries them.
     fn stmt(&mut self, statement: &ast::Stmt, insn: &mut Insn) -> Result<()> {
         let file = self.input.file();
         let range = Self::written_range(statement.syntax());
-        if let Some(build) = &self.layout.positions {
+        if self.positions
+            && let Some(build) = &self.layout.positions
+        {
             let mut statements = build.statements.borrow_mut();
             let index = i32::try_from(statements.len()).map_err(|_| WasmError::TooLarge)?;
             statements.push(Position {

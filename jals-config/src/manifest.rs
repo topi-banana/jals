@@ -2017,6 +2017,14 @@ pub enum BuildScript {
         /// The script file, relative to the project root.
         file: String,
     },
+    /// A Java build script stored at a project-relative portable file path.
+    ///
+    /// The script is compiled and run by the in-process wasm engine: its declarations reach the
+    /// host through the `jals.build` package, and its failures name the line they happened on.
+    Java {
+        /// The script file, relative to the project root.
+        file: String,
+    },
 }
 
 impl BuildScript {
@@ -2025,6 +2033,7 @@ impl BuildScript {
     const fn tag_name(&self) -> &'static str {
         match self {
             Self::Rhai { .. } => "rhai",
+            Self::Java { .. } => "java",
         }
     }
 }
@@ -2500,7 +2509,7 @@ impl Manifest {
             })?;
         }
 
-        if let Some(BuildScript::Rhai { file }) = &self.build.script {
+        if let Some(BuildScript::Rhai { file } | BuildScript::Java { file }) = &self.build.script {
             let script = FileKey::parse(file)
                 .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
             // A script is always a portable project path, so it cannot be inside a `classes-dir`
