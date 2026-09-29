@@ -18,9 +18,13 @@
 //!
 //! A value comes back down with the `ref.cast` the JVM backend spells `checkcast` wherever the
 //! *declaration* says what type is wanted: a receiver at its owner, an argument at its parameter, a
-//! `return` at its result, and any store at what it was declared to hold. What erasure cannot reach
-//! is the other conversion Java does at those places — a **boxing** one, whose result is a wrapper
-//! only a linked package can supply, and which is reported as the library type it needs.
+//! `return` at its result, and any store at what it was declared to hold. The same places cross the
+//! other way — the **boxing** and **unboxing** conversions of JLS §5.1.7 and §5.1.8 — and those go
+//! through the wrapper classes, which are `java.lang` types a linked package supplies: an `int`
+//! erased to `anyref` reaches its parameter as an `Integer`, and a `List<Integer>` element read back
+//! out is cast to `Integer` and asked for its `intValue`. A wrapper no linked package provides is
+//! refused by the name of the type it needed, which is the answer every other unrepresentable type
+//! gets rather than a report of a gap this backend does not have.
 //!
 //! Unlike the JVM backend, this one lowers from the syntax tree directly. wasm's control flow is
 //! structured (`block` / `loop` / `if`), so the nesting the source already has is the nesting the

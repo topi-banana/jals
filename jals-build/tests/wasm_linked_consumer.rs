@@ -1092,6 +1092,246 @@ public class Main {
     );
 }
 
+/// The boxing and unboxing *conversions* — the ones the source does not write — reach the
+/// platform's wrappers.
+///
+/// Every position a conversion can sit in is here: a declaration (`Integer five = 5;`), a return
+/// (`boxed`, `unboxed`, `widened`), an erased argument (`List<Integer>.add(13)` — the type variable
+/// is `anyref`, so the `i32` has to arrive as an `Integer`), an erased result read back out
+/// (`int first = numbers.get(0);`, where the wrapper also has to be cast down to before its
+/// accessor can be called), a cast (`(Integer) held`), and an array subscript. Each check is worth
+/// one more bit than the last, so the sixteen of them answer `65535`.
+#[test]
+fn the_platform_boxes_and_unboxes_implicitly() {
+    let project = r"
+package app;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Main {
+    static Integer boxed(int n) {
+        return n;
+    }
+
+    static int unboxed(Integer n) {
+        return n;
+    }
+
+    static long widened(Integer n) {
+        return n;
+    }
+
+    public static int run() {
+        int score = 0;
+
+        Integer five = 5;
+        if (five.intValue() == 5) {
+            score = score + 1;
+        }
+        int back = five;
+        if (back == 5) {
+            score = score + 2;
+        }
+
+        if (boxed(7).intValue() == 7) {
+            score = score + 4;
+        }
+        if (unboxed(Integer.valueOf(9)) == 9) {
+            score = score + 8;
+        }
+        if (widened(Integer.valueOf(11)) == 11L) {
+            score = score + 16;
+        }
+
+        List<Integer> numbers = new ArrayList<Integer>();
+        numbers.add(13);
+        numbers.add(17);
+        int first = numbers.get(0);
+        if (first == 13) {
+            score = score + 32;
+        }
+        int second = numbers.get(1);
+        if (second == 17) {
+            score = score + 64;
+        }
+
+        Object held = 19;
+        int fromObject = (Integer) held;
+        if (fromObject == 19) {
+            score = score + 128;
+        }
+
+        Boolean flag = true;
+        boolean yes = flag;
+        if (yes) {
+            score = score + 256;
+        }
+        List<Boolean> votes = new ArrayList<Boolean>();
+        votes.add(true);
+        boolean firstVote = votes.get(0);
+        if (firstVote) {
+            score = score + 512;
+        }
+
+        Character letter = 'x';
+        char c = letter;
+        if (c == 'x') {
+            score = score + 1024;
+        }
+
+        Number number = 21;
+        if (number.intValue() == 21) {
+            score = score + 2048;
+        }
+        Long big = 9000000000L;
+        long wide = big;
+        if (wide == 9000000000L) {
+            score = score + 4096;
+        }
+        Double half = 2.5;
+        double d = half;
+        if (d == 2.5) {
+            score = score + 8192;
+        }
+        Float tiny = 0.5f;
+        float f = tiny;
+        if (f == 0.5f) {
+            score = score + 16384;
+        }
+
+        int[] cells = new int[2];
+        Integer index = 1;
+        cells[index] = 23;
+        if (cells[1] == 23) {
+            score = score + 32768;
+        }
+
+        return score;
+    }
+}
+";
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(65_535)])
+    );
+}
+
+/// A `Boolean` is a condition as well as a value.
+///
+/// JLS §14.9.1 and its siblings take a `boolean` **or** a `Boolean`, so a wrapper unboxes at every
+/// test the source writes: an `if`, all three loop forms, the operands of `&&`, a `!`, and the
+/// condition of a `?:`. Storing back into the box boxes again, so the loop bodies can clear it.
+/// The score is the eight checks' bits.
+#[test]
+fn a_boolean_condition_unboxes() {
+    let project = r"
+package app;
+
+public class Main {
+    public static int run() {
+        int score = 0;
+        Boolean yes = true;
+        if (yes) {
+            score = score + 1;
+        }
+        Boolean no = false;
+        if (!no) {
+            score = score + 2;
+        }
+        if (yes && !no) {
+            score = score + 4;
+        }
+        if (no || yes) {
+            score = score + 8;
+        }
+        int rounds = 0;
+        while (yes) {
+            rounds = rounds + 1;
+            if (rounds == 2) {
+                yes = false;
+            }
+        }
+        if (rounds == 2) {
+            score = score + 16;
+        }
+        yes = true;
+        do {
+            rounds = rounds + 1;
+            yes = false;
+        } while (yes);
+        if (rounds == 3) {
+            score = score + 32;
+        }
+        yes = true;
+        for (; yes; ) {
+            rounds = rounds + 1;
+            yes = false;
+        }
+        if (rounds == 4) {
+            score = score + 64;
+        }
+        Boolean pick = true;
+        int picked = pick ? 7 : 9;
+        if (picked == 7) {
+            score = score + 128;
+        }
+        return score;
+    }
+}
+";
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(255)])
+    );
+}
+
+/// The wrappers `java.lang` leaves to the stubs are refused by name.
+///
+/// `Byte` and `Short` have no implementation in the platform — nothing has wanted one — so their
+/// `valueOf` is the stub's declaration with no body behind it. A `byte` boxed into an erased
+/// parameter is therefore refused as the library type it needs: the same answer a missing
+/// `Integer` gets, and not a module whose `valueOf` call goes nowhere.
+#[test]
+fn a_wrapper_the_platform_leaves_out_is_refused_by_name() {
+    let project = r"
+package app;
+
+class Holder<T> {
+    T held;
+    void put(T value) { held = value; }
+}
+
+public class Main {
+    public static int run() {
+        Holder<Byte> holder = new Holder<Byte>();
+        byte raw = 1;
+        holder.put(raw);
+        return 0;
+    }
+}
+";
+
+    let selection = quiet_platform_selection();
+    let outcome = compile_against_packages(project, &selection, &[]);
+    assert!(
+        !outcome.success(),
+        "the platform has no `java.lang.Byte` to box with"
+    );
+    assert!(
+        outcome
+            .messages
+            .iter()
+            .any(|message| message.contains("java.lang.Byte")),
+        "the report names the wrapper it asked for: {:?}",
+        outcome.messages
+    );
+}
+
 /// The exception classes are linkable platform classes, and one tag carries them all.
 ///
 /// The project's `throw` and the platform's parser throw the *same* tag — the consumer imports the

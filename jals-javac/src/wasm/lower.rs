@@ -4221,7 +4221,7 @@ impl Lowering<'_> {
         let then_branch = branches.next();
         let else_branch = branches.next();
 
-        self.expr(&condition, insn)?;
+        self.condition(&condition, insn)?;
         insn.if_();
         if let Some(then) = then_branch {
             self.stmt(&then, insn)?;
@@ -4263,7 +4263,7 @@ impl Lowering<'_> {
             .children()
             .find_map(ast::Expr::cast)
             .ok_or(WasmError::Unsupported("an `assert` with no condition"))?;
-        self.expr(&condition, insn)?;
+        self.condition(&condition, insn)?;
         insn.if_();
         insn.else_();
         insn.unreachable();
@@ -4286,7 +4286,7 @@ impl Lowering<'_> {
         let leave = insn.depth();
         insn.loop_();
         let repeat = insn.depth();
-        self.expr(&condition, insn)?;
+        self.condition(&condition, insn)?;
         insn.i32_eqz();
         insn.br_if(insn.depth() - leave);
         let cleanups = self.cleanups.len();
@@ -4331,7 +4331,7 @@ impl Lowering<'_> {
         }
         self.loops.pop();
         insn.end();
-        self.expr(&condition, insn)?;
+        self.condition(&condition, insn)?;
         insn.br_if(insn.depth() - repeat).end().end();
         Ok(())
     }
@@ -4352,7 +4352,7 @@ impl Lowering<'_> {
         let repeat = insn.depth();
         // No condition means `for (;;)`, which never leaves by itself.
         if let Some(condition) = statement.condition() {
-            self.expr(&condition, insn)?;
+            self.condition(&condition, insn)?;
             insn.i32_eqz();
             insn.br_if(insn.depth() - leave);
         }
@@ -5743,8 +5743,9 @@ impl Lowering<'_> {
             .expr(value, insn)?
             .ok_or(WasmError::Unsupported("a value that produced nothing"))?;
         // The declaration is what says which type is wanted, so erasure's top-of-hierarchy value
-        // comes back down here — the same `ref.cast` an argument and a `return` get.
-        self.narrow(produced, declared_ty, insn)
+        // comes back down here — the same `ref.cast` an argument and a `return` get — and a
+        // primitive declared *into* a wrapper goes up through its `valueOf` by the same rule.
+        self.coerce(value, produced, declared_ty, insn)
     }
 
     /// `array[index]`.
@@ -5762,7 +5763,9 @@ impl Lowering<'_> {
             .array_type(element)
             .ok_or_else(|| WasmError::NoRepresentation("an array".to_owned()))?;
         self.expr(&array, insn)?;
-        self.expr(&subscript, insn)?;
+        // An index is an `int` after the unary numeric promotion of JLS §15.10.3, so a boxed
+        // subscript unboxes here and a narrower one widens; the array is a reference already.
+        self.operand(&subscript, Numeric::Int, insn)?;
         insn.array_get(array_type);
         Ok(element)
     }
@@ -5835,8 +5838,10 @@ impl Lowering<'_> {
         let ty = match operator {
             // `!b` flips a `boolean`, which is an `i32` that is 0 or 1 — so `i32.eqz` *is* the flip.
             Unary::Not => {
-                self.expr(&operand, insn)?
+                let produced = self
+                    .expr(&operand, insn)?
                     .ok_or(WasmError::Unsupported("a `!` on nothing"))?;
+                self.coerce(&operand, produced, ValType::I32, insn)?;
                 insn.i32_eqz();
                 ValType::I32
             }
@@ -5921,9 +5926,17 @@ impl Lowering<'_> {
             return Ok(ValType::Ref(RefType::nullable(HeapType::Any)));
         }
         let heap = self.named_type(&ty)?;
-        self.expr(&operand, insn)?
+        let produced = self
+            .expr(&operand, insn)?
             .ok_or(WasmError::Unsupported("a cast of nothing"))?;
-        insn.ref_cast(heap, true);
+        // A cast of a *primitive* to a reference type is a boxing conversion with the cast written
+        // on it (JLS §5.5.1): there is nothing to cast, only a `valueOf` to call. Everything else
+        // has a value that already is a reference, which is what `ref.cast` takes.
+        if Self::numeric(produced).is_some() {
+            self.box_value(&operand, insn)?;
+        } else {
+            insn.ref_cast(heap, true);
+        }
         Ok(ValType::Ref(RefType::nullable(heap)))
     }
 
@@ -5991,10 +6004,20 @@ impl Lowering<'_> {
     }
 
     /// Emit `expr` and convert its value to `target`.
+    ///
+    /// The value's own type is read off the stack rather than from the recorded type, which is what
+    /// lets a *wrapper* arrive here: `(int) boxed` unboxes by the accessor the wrapper's class
+    /// names, and the conversion that follows is the one the source wrote — widening or narrowing,
+    /// as a cast may ask for either. The recorded type still decides every arithmetic promotion; a
+    /// cast and a `switch` selector are the callers whose target comes from elsewhere.
     fn operand(&mut self, expr: &ast::Expr, target: Numeric, insn: &mut Insn) -> Result<()> {
-        let source = self.num_of(expr.syntax())?;
-        self.expr(expr, insn)?
+        let produced = self
+            .expr(expr, insn)?
             .ok_or(WasmError::Unsupported("an operand that produced no value"))?;
+        let source = match Self::numeric(produced) {
+            Some(source) => source,
+            None => self.unbox_value(expr, produced, insn)?,
+        };
         if source != target {
             insn.convert(source, target)
                 .ok_or(WasmError::Unsupported("this conversion"))?;
@@ -6536,7 +6559,7 @@ impl Lowering<'_> {
                         .ok_or(WasmError::Unsupported("this assignment conversion"))?;
                 }
             } else {
-                self.narrow(produced, place.ty(), insn)?;
+                self.coerce(&value, produced, place.ty(), insn)?;
             }
             place.store(insn, keep);
         } else {
@@ -6878,7 +6901,7 @@ impl Lowering<'_> {
             .ok_or(WasmError::Unsupported("a `?:` with no else arm"))?;
         let ty = self.ty_of(expr.syntax())?;
 
-        self.expr(&condition, insn)?;
+        self.condition(&condition, insn)?;
         insn.if_typed(ty);
         self.ternary_arm(&then_arm, ty, insn)?;
         insn.else_();
@@ -6890,16 +6913,13 @@ impl Lowering<'_> {
     /// One arm of a `?:`, converted to the type the whole conditional has.
     ///
     /// The conversion is what makes `flag ? 1 : 2L` one `i64` block rather than a module the validator
-    /// rejects for arms of different types.
+    /// rejects for arms of different types — and what boxes an `int` arm into the `Integer` the
+    /// other arm made the conditional's type.
     fn ternary_arm(&mut self, arm: &ast::Expr, ty: ValType, insn: &mut Insn) -> Result<()> {
-        if self.num_of(arm.syntax()).is_ok()
-            && let Ok(target) = Self::num_for(ty)
-        {
-            return self.operand(arm, target, insn);
-        }
-        self.expr(arm, insn)?
+        let produced = self
+            .expr(arm, insn)?
             .ok_or(WasmError::Unsupported("a `?:` arm with no value"))?;
-        Ok(())
+        self.coerce(arm, produced, ty, insn)
     }
 
     /// The numeric type a `ValType` is, for converting into a type an expression already has.
@@ -6924,14 +6944,14 @@ impl Lowering<'_> {
         and: bool,
         insn: &mut Insn,
     ) -> Result<ValType> {
-        self.expr(left, insn)?;
+        self.condition(left, insn)?;
         insn.if_typed(ValType::I32);
         if and {
-            self.expr(right, insn)?;
+            self.condition(right, insn)?;
             insn.else_().i32_const(0);
         } else {
             insn.i32_const(1).else_();
-            self.expr(right, insn)?;
+            self.condition(right, insn)?;
         }
         insn.end();
         Ok(ValType::I32)
@@ -7555,8 +7575,9 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// Push `expr` and narrow the value to `target` when erasure left it at the top of the
-    /// reference hierarchy.
+    /// Push `expr` and make the value the `target` an argument, a field store, or a return wants —
+    /// a narrowing when erasure left it at the top of the reference hierarchy, a boxing conversion
+    /// when a primitive met a reference.
     ///
     /// An `Object`, an interface, and a type variable are all `anyref` here, and every use at a
     /// *concrete* type — a parameter, a field, a return — wants that struct in particular. The JVM
@@ -7569,7 +7590,185 @@ impl Lowering<'_> {
         let produced = self
             .expr(expr, insn)?
             .ok_or(WasmError::Unsupported("an argument with no value"))?;
-        self.narrow(produced, target, insn)
+        self.coerce(expr, produced, target, insn)
+    }
+
+    /// Emit `value` — already on the stack, of wasm type `produced` — as the type `target` wants.
+    ///
+    /// This is the one place Java's conversions between a primitive and its wrapper live. Two
+    /// references are a [`narrow`](Self::narrow) — the `ref.cast` erasure makes necessary — and two
+    /// primitives are one too, a widening. The two *crossing* pairs are the **boxing** conversion
+    /// (JLS §5.1.7) and the **unboxing** one (§5.1.8), and both leave the primitive world through a
+    /// wrapper, which is a `java.lang` class a linked package supplies: [`box_value`](Self::box_value)
+    /// calls its `valueOf`, [`unbox_value`](Self::unbox_value) its accessor.
+    fn coerce(
+        &self,
+        value: &ast::Expr,
+        produced: ValType,
+        target: ValType,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        match (Self::numeric(produced), Self::numeric(target)) {
+            (Some(_), None) => self.box_value(value, insn),
+            (None, Some(target)) => {
+                let unboxed = self.unbox_value(value, produced, insn)?;
+                if unboxed == target {
+                    return Ok(());
+                }
+                Self::widen(unboxed, target, insn)
+            }
+            _ => self.narrow(produced, target, insn),
+        }
+    }
+
+    /// Emit `condition` and leave its `i32` truth on the stack.
+    ///
+    /// A Java condition is a `boolean` **or** a `Boolean` wherever one is due — an `if`, a loop, a
+    /// `?:`, a `!`, a `&&` (JLS §14.9.1, §14.12–§14.14, §15.15.6, §15.23–§15.24, §15.25) — so the
+    /// wrapper unboxes here by the same conversion a `boolean` declared from one gets. Every test
+    /// the source writes reaches `i32` through this.
+    fn condition(&mut self, condition: &ast::Expr, insn: &mut Insn) -> Result<()> {
+        let produced = self
+            .expr(condition, insn)?
+            .ok_or(WasmError::Unsupported("a condition with no value"))?;
+        self.coerce(condition, produced, ValType::I32, insn)
+    }
+
+    /// Box the primitive on the stack into the wrapper its *own* type names (JLS §5.1.7).
+    ///
+    /// *Its own* — boxing never converts on the way: `Long l = 1;` is not a Java program precisely
+    /// because that would take two conversions, so the wrapper is read off the value's static type
+    /// and a widening *reference* conversion to `Object`, to `Number`, costs nothing from there.
+    /// Erasure is what makes this common rather than exotic: a type variable is `anyref` here, so
+    /// `List<Integer>.add(1)` puts an `i32` where a reference belongs. The `valueOf` that boxes it
+    /// is a *library* function, so a wrapper no linked package supplies — `Byte`, `Short`, which
+    /// the platform deliberately leaves to the stubs — is refused by the name of the type it needs.
+    fn box_value(&self, value: &ast::Expr, insn: &mut Insn) -> Result<()> {
+        let primitive = self
+            .input
+            .type_of_expr(Facts::span(value.syntax()))
+            .and_then(|ty| match ty {
+                Ty::Primitive(primitive) => Some(*primitive),
+                _ => None,
+            })
+            .ok_or(WasmError::Unsupported(
+                "a boxing conversion of a value that is no primitive",
+            ))?;
+        let wrapper = Self::wrapper_of(primitive);
+        let owner = self
+            .index
+            .item_by_fqn(wrapper)
+            .ok_or_else(|| WasmError::Unresolved(wrapper.to_owned()))?;
+        let member = self
+            .wrapper_member(owner, "valueOf", &[Ty::Primitive(primitive)], true)
+            .ok_or_else(|| WasmError::Unresolved(alloc::format!("{wrapper}.valueOf")))?;
+        let function = self
+            .layout
+            .functions
+            .get(&member)
+            .copied()
+            .ok_or_else(|| WasmError::NoRepresentation(wrapper.to_owned()))?;
+        insn.call(function);
+        Ok(())
+    }
+
+    /// Unbox the reference on the stack down to the primitive its wrapper names (JLS §5.1.8), and
+    /// answer which primitive came back.
+    ///
+    /// The wrapper's own accessor is a library function and is called directly: the class comes
+    /// from the value's static type. A value that arrived *erased* — a type variable's `anyref`, an
+    /// element read out of a `List<Integer>` — is cast down to the wrapper first, the `ref.cast` a
+    /// written cast would emit. A reference that is no wrapper at all is not an unboxing conversion
+    /// the source could have written, and is refused as the gap in this backend that it is.
+    fn unbox_value(
+        &self,
+        value: &ast::Expr,
+        produced: ValType,
+        insn: &mut Insn,
+    ) -> Result<Numeric> {
+        let (wrapper, accessor, unboxed) = self
+            .input
+            .type_of_expr(Facts::span(value.syntax()))
+            .and_then(|ty| self.class_name(ty))
+            .and_then(Self::wrapper_accessor)
+            .ok_or(WasmError::Unsupported(
+                "an unboxing conversion of a value that is no wrapper",
+            ))?;
+        let owner = self
+            .index
+            .item_by_fqn(wrapper)
+            .ok_or_else(|| WasmError::Unresolved(wrapper.to_owned()))?;
+        let member = self
+            .wrapper_member(owner, accessor, &[], false)
+            .ok_or_else(|| WasmError::Unresolved(alloc::format!("{wrapper}.{accessor}")))?;
+        let function = self
+            .layout
+            .functions
+            .get(&member)
+            .copied()
+            .ok_or_else(|| WasmError::NoRepresentation(wrapper.to_owned()))?;
+        self.narrow(produced, self.layout.class_ref(owner)?, insn)?;
+        insn.call(function);
+        Ok(unboxed)
+    }
+
+    /// The member the wrapper class `owner` declares under `name` with exactly `params`.
+    ///
+    /// The wrappers are the only callers: their `valueOf` and their accessors are known by name, and
+    /// the parameter list is what tells a `valueOf(int)` from the `valueOf(String)` a later platform
+    /// might add. Each is asked of the *linked* class where one supplies it and of the stub
+    /// otherwise, so an unboxing of a wrapper no package provides lands on the library lookup and
+    /// not here.
+    fn wrapper_member(
+        &self,
+        owner: ItemId,
+        name: &str,
+        params: &[Ty],
+        is_static: bool,
+    ) -> Option<MemberId> {
+        self.index.own_members(owner).iter().copied().find(|&id| {
+            let info = self.index.member(id);
+            info.kind == DefKind::Method
+                && info.modifiers.is_static == is_static
+                && info.name == name
+                && self.index.resolved_param_tys(id).as_slice() == params
+        })
+    }
+
+    /// The `java.lang` wrapper class a primitive boxes into (JLS §5.1.7).
+    const fn wrapper_of(primitive: Primitive) -> &'static str {
+        match primitive {
+            Primitive::Boolean => "java.lang.Boolean",
+            Primitive::Byte => "java.lang.Byte",
+            Primitive::Short => "java.lang.Short",
+            Primitive::Char => "java.lang.Character",
+            Primitive::Int => "java.lang.Integer",
+            Primitive::Long => "java.lang.Long",
+            Primitive::Float => "java.lang.Float",
+            Primitive::Double => "java.lang.Double",
+        }
+    }
+
+    /// The wrapper a class name is — under either spelling — the accessor its unboxing conversion
+    /// calls (JLS §5.1.8), and the primitive that comes back.
+    ///
+    /// A name written in source resolves to its fully-qualified form and a type that came out of
+    /// inference can carry the simple one, so both answer. Nothing else does: a class called
+    /// `Integer` in another package is not the wrapper and has no unboxing conversion.
+    fn wrapper_accessor(name: &str) -> Option<(&'static str, &'static str, Numeric)> {
+        let simple = name.strip_prefix("java.lang.").unwrap_or(name);
+        let (wrapper, accessor, unboxed) = match simple {
+            "Boolean" => ("java.lang.Boolean", "booleanValue", Numeric::Int),
+            "Byte" => ("java.lang.Byte", "byteValue", Numeric::Int),
+            "Short" => ("java.lang.Short", "shortValue", Numeric::Int),
+            "Character" => ("java.lang.Character", "charValue", Numeric::Int),
+            "Integer" => ("java.lang.Integer", "intValue", Numeric::Int),
+            "Long" => ("java.lang.Long", "longValue", Numeric::Long),
+            "Float" => ("java.lang.Float", "floatValue", Numeric::Float),
+            "Double" => ("java.lang.Double", "doubleValue", Numeric::Double),
+            _ => return None,
+        };
+        Some((wrapper, accessor, unboxed))
     }
 
     /// Emit the `ref.cast` that takes a top-of-hierarchy value down to `target`, if one is needed —
@@ -7588,7 +7787,13 @@ impl Lowering<'_> {
             if let (Some(from), Some(to)) = (Self::numeric(produced), Self::numeric(target)) {
                 return Self::widen(from, to, insn);
             }
-            return Self::boxed(produced, target);
+            // One primitive and one reference is a *boxing* or *unboxing* conversion, and neither
+            // goes through here: both leave through `coerce`, which has the value whose type names
+            // the wrapper. Arriving at this one means a value was built at one representation and
+            // used at the other with no conversion asked for — a bug in this backend, said out loud.
+            return Err(WasmError::Unsupported(
+                "a conversion between a primitive and a reference",
+            ));
         };
         if from.heap == to.heap {
             return Ok(());
@@ -7650,30 +7855,6 @@ impl Lowering<'_> {
             "a numeric conversion with no encoding",
         ))?;
         Ok(())
-    }
-
-    /// Whether a value of type `produced` fits a position wanting `target`, reporting the *library*
-    /// type a conversion between them would need.
-    ///
-    /// A primitive where a reference is wanted is a boxing conversion (JLS §5.1.7) and a reference
-    /// where a primitive is wanted an unboxing one, and both go through a **wrapper** — a
-    /// `java.lang` type only a linked package can supply. Erasure is what makes the pair
-    /// common rather than exotic: a type variable is `anyref` here, so `List<Integer>.add(1)` puts
-    /// an `i32` where a reference belongs. Reported as the library type it needs, which is the same
-    /// answer every other unrepresentable type gets, rather than as a compiler gap it is not.
-    fn boxed(produced: ValType, target: ValType) -> Result<()> {
-        let wrapper = |ty: ValType| match ty {
-            ValType::I32 => Some("java.lang.Integer"),
-            ValType::I64 => Some("java.lang.Long"),
-            ValType::F32 => Some("java.lang.Float"),
-            ValType::F64 => Some("java.lang.Double"),
-            ValType::Ref(_) => None,
-        };
-        match (wrapper(produced), wrapper(target)) {
-            (Some(from), None) => Err(WasmError::NoRepresentation(from.to_owned())),
-            (None, Some(needed)) => Err(WasmError::NoRepresentation(needed.to_owned())),
-            _ => Ok(()),
-        }
     }
 
     /// A fresh unnamed local of type `ty`, for values that must outlive the stack.
