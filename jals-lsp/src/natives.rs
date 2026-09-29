@@ -13,7 +13,7 @@ use jals_config::Manifest;
 use jals_native::packages::jals_io::{ConsoleSink, JalsIo};
 use jals_native::{NativeRegistry, UnknownNativePackage};
 
-/// `jals.io`'s output, in a host that runs nothing.
+/// Every printing package's output, in a host that runs nothing.
 struct SilentConsole;
 
 impl ConsoleSink for SilentConsole {
@@ -41,8 +41,12 @@ impl Natives {
         if manifest.build.native_packages.is_empty() {
             return Ok(Vec::new());
         }
+        // One discarding console serves both printing packages: the sink is what makes each a
+        // whole `NativePackage`, and neither is ever run here.
+        let console: std::rc::Rc<dyn ConsoleSink> = std::rc::Rc::new(SilentConsole);
         let mut registry = NativeRegistry::new();
-        registry.add(JalsIo::package(std::rc::Rc::new(SilentConsole)));
+        registry.add(JalsIo::package(std::rc::Rc::clone(&console)));
+        registry.add(jals_platform::Platform::package(console));
         let selection = registry.select(&manifest.build.native_packages)?;
         Ok(jals_build::JalsBackend::native_package_sources(&selection)
             .into_iter()

@@ -840,18 +840,50 @@ fn a_package_ships_a_modules_own_native_methods_too() {
     );
 }
 
-/// The real platform, selected by name the way `[build] native-packages` would.
-fn platform_selection() -> jals_native::NativePackageSet {
+/// The real platform, selected by name the way `[build] native-packages` would, with everything
+/// its `System.out` writes going to `console`.
+fn platform_selection(
+    console: std::rc::Rc<dyn jals_native::console::ConsoleSink>,
+) -> jals_native::NativePackageSet {
     let mut registry = jals_native::NativeRegistry::new();
-    registry.add(jals_platform::Platform::package());
+    registry.add(jals_platform::Platform::package(console));
     registry
         .select(&[jals_platform::Platform::NAME.to_owned()])
         .expect("the platform is registered")
 }
 
+/// A platform selection for a compile that never runs: if anything were printed, nothing would
+/// read it.
+fn quiet_platform_selection() -> jals_native::NativePackageSet {
+    platform_selection(std::rc::Rc::new(
+        jals_native::console::CapturedConsole::new(),
+    ))
+}
+
 /// Run `project` against the real platform and return what `run()` answered.
 fn run_against_platform(project: &str) -> jals_build::WasmRunOutcome {
-    let selection = platform_selection();
+    run_against_platform_console(
+        project,
+        &std::rc::Rc::new(jals_native::console::CapturedConsole::new()),
+    )
+}
+
+/// The same run, but the caller keeps the console so it can assert on what was printed.
+fn run_against_platform_capturing(project: &str) -> (jals_build::WasmRunOutcome, String) {
+    let console = std::rc::Rc::new(jals_native::console::CapturedConsole::new());
+    let outcome = run_against_platform_console(project, &console);
+    let written = console.take();
+    (outcome, written)
+}
+
+/// Run `project` against the real platform, with every printed code unit going to `console`.
+fn run_against_platform_console(
+    project: &str,
+    console: &std::rc::Rc<jals_native::console::CapturedConsole>,
+) -> jals_build::WasmRunOutcome {
+    let selection = platform_selection(
+        std::rc::Rc::clone(console) as std::rc::Rc<dyn jals_native::console::ConsoleSink>
+    );
     let outcome = compile_against_packages(project, &selection, &[]);
     assert!(outcome.success(), "messages: {:?}", outcome.messages);
     let project_bytes = outcome
@@ -1323,6 +1355,41 @@ public class Main {
     );
 }
 
+/// `System.out` is the platform's own field and its printing is the host's: the Java side builds
+/// the `char[]` a wasm embedder can read, the one binding decodes it with the same surrogate-pair
+/// joining every printing package shares, and the sink is the one the host passed in.
+///
+/// The corner here is the one that makes the route non-obvious: the native is *private* and lives
+/// in the precompiled module, so the project neither imports it nor can name it — the library's
+/// own import is the one the runner sweeps up, exactly as with any other package's `native`.
+#[test]
+fn the_platform_prints_through_the_hosts_console() {
+    let project = r#"
+package app;
+
+public class Main {
+    public static int run() {
+        System.out.println("moss");
+        System.out.println(41);
+        System.out.print("no newline");
+        System.out.flush();
+        System.out.println();
+        System.out.println(true);
+        System.out.println('x');
+        System.out.println(7L);
+        return 0;
+    }
+}
+"#;
+
+    let (outcome, written) = run_against_platform_capturing(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(0)])
+    );
+    assert_eq!(written, "moss\n41\nno newline\ntrue\nx\n7\n");
+}
+
 /// An element-comparing method the platform leaves out is a compile error, not a wrong answer.
 ///
 /// `contains` would have to run `equals` on an element that may be a consumer's object, and a
@@ -1350,7 +1417,7 @@ public class Main {
 }
 "#;
 
-    let selection = platform_selection();
+    let selection = quiet_platform_selection();
     let outcome = compile_against_packages(project, &selection, &[]);
     assert!(
         !outcome.success(),
@@ -1389,7 +1456,7 @@ public class Main {
 }
 "#;
 
-    let selection = platform_selection();
+    let selection = quiet_platform_selection();
     let outcome = compile_against_packages(project, &selection, &[]);
     assert!(
         !outcome.success(),

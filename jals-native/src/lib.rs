@@ -75,6 +75,7 @@ mod package;
 mod registry;
 mod value;
 
+pub mod console;
 pub mod packages;
 
 pub use host::NativeHost;
