@@ -1978,3 +1978,217 @@ fn a_library_builds_its_own_literals_and_hands_the_string_across_the_link() {
         131
     );
 }
+
+/// A `for`-each over the platform's collections runs on the same `iterator` / `hasNext` / `next`
+/// protocol the source can write out by hand — the one `the_platform_holds_a_list` walks with a
+/// `while`.
+///
+/// The loop variable is where the element type shows: a `List<String>` binding is a reference, a
+/// `List<Integer>` binding to an `int` unboxes, a `long` unboxes then widens, an `Object` is what
+/// erasure already holds, and a nested `List<List<String>>` goes through the loop twice. The two
+/// jumps are in the middle of one of them, so the loop's own structure is the ordinary one.
+/// Each check is worth one more bit than the last, so all seven answer 127.
+#[test]
+fn a_for_each_walks_the_platforms_collections() {
+    let project = r#"
+package app;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Main {
+    public static int run() {
+        int score = 0;
+
+        List<String> names = new ArrayList<String>();
+        names.add("moss");
+        names.add("fern");
+        names.add("stone");
+
+        int count = 0;
+        int letters = 0;
+        for (String name : names) {
+            count = count + 1;
+            letters = letters + name.length();
+        }
+        if (count == 3 && letters == 13) {
+            score = score + 1;
+        }
+
+        int kept = 0;
+        for (String name : names) {
+            if (name.equals("fern")) {
+                continue;
+            }
+            kept = kept + name.length();
+        }
+        if (kept == 9) {
+            score = score + 2;
+        }
+
+        int first = 0;
+        for (String name : names) {
+            first = name.length();
+            break;
+        }
+        if (first == 4) {
+            score = score + 4;
+        }
+
+        List<Integer> numbers = new ArrayList<Integer>();
+        numbers.add(13);
+        numbers.add(17);
+        numbers.add(19);
+        int sum = 0;
+        for (int n : numbers) {
+            sum = sum + n;
+        }
+        if (sum == 49) {
+            score = score + 8;
+        }
+
+        long wide = 0L;
+        for (long n : numbers) {
+            wide = wide + n;
+        }
+        if (wide == 49L) {
+            score = score + 16;
+        }
+
+        int seen = 0;
+        for (Object held : names) {
+            seen = seen + 1;
+        }
+        if (seen == 3) {
+            score = score + 32;
+        }
+
+        List<List<String>> groups = new ArrayList<List<String>>();
+        List<String> pair = new ArrayList<String>();
+        pair.add("ab");
+        pair.add("cde");
+        groups.add(pair);
+        List<String> single = new ArrayList<String>();
+        single.add("f");
+        groups.add(single);
+        int flat = 0;
+        for (List<String> group : groups) {
+            for (String name : group) {
+                flat = flat + name.length();
+            }
+        }
+        if (flat == 6) {
+            score = score + 64;
+        }
+
+        return score;
+    }
+}
+"#;
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(127)])
+    );
+}
+
+/// A project's own class implementing the platform's `Iterable` is a sequence the same loop walks.
+///
+/// `iterator()`, `hasNext()` and `next()` are all project functions here, so the dispatch is the
+/// closed-world `ref.test` chain rather than a library call: the static type names the interface
+/// and the runtime type answers with the project class. The elements are platform `Integer`s the
+/// project boxes and the binding unboxes. The four checks are worth 1, 2, 4 and 8, so they answer
+/// 15.
+#[test]
+fn a_for_each_walks_a_projects_own_iterable() {
+    let project = r"
+package app;
+
+import java.util.Iterator;
+
+public class Main {
+    public static int run() {
+        int score = 0;
+
+        int sum = 0;
+        for (int n : new Evens(4)) {
+            sum = sum + n;
+        }
+        if (sum == 20) {
+            score = score + 1;
+        }
+
+        Integer last = 0;
+        for (Integer n : new Evens(3)) {
+            last = n;
+        }
+        if (last.intValue() == 6) {
+            score = score + 2;
+        }
+
+        int skipped = 0;
+        for (int n : new Evens(4)) {
+            if (n == 4) {
+                continue;
+            }
+            skipped = skipped + n;
+        }
+        if (skipped == 16) {
+            score = score + 4;
+        }
+
+        int stopped = 0;
+        for (int n : new Evens(5)) {
+            stopped = stopped + n;
+            if (n == 6) {
+                break;
+            }
+        }
+        if (stopped == 12) {
+            score = score + 8;
+        }
+
+        return score;
+    }
+}
+
+class Evens implements Iterable<Integer> {
+    private int left;
+
+    Evens(int left) {
+        this.left = left;
+    }
+
+    public Iterator<Integer> iterator() {
+        return new EvensIterator(this.left);
+    }
+}
+
+class EvensIterator implements Iterator<Integer> {
+    private int left;
+    private int current;
+
+    EvensIterator(int left) {
+        this.left = left;
+        this.current = 0;
+    }
+
+    public boolean hasNext() {
+        return this.left > 0;
+    }
+
+    public Integer next() {
+        this.left = this.left - 1;
+        this.current = this.current + 2;
+        return Integer.valueOf(this.current);
+    }
+}
+";
+
+    let outcome = run_against_platform(project);
+    assert_eq!(
+        outcome,
+        jals_build::WasmRunOutcome::Returned(vec![jals_build::WasmValue::I32(15)])
+    );
+}

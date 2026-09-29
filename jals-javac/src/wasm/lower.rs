@@ -49,7 +49,9 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use jals_hir::{ClassTy, DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, TypedFile};
+use jals_hir::{
+    ClassTy, DefId, DefKind, ItemId, MemberId, Namespace, Primitive, ProjectIndex, Ty, TypedFile,
+};
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_DECL,
     FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
@@ -4388,11 +4390,12 @@ impl Lowering<'_> {
         self.discard(&expression, insn)
     }
 
-    /// `for (T v : array) body`, over an array.
+    /// `for (T v : iterable) body`: an indexed loop over an array, a protocol over an `Iterable`.
     ///
-    /// JLS §14.14.2 defines it as an indexed loop, and this is that loop: the array and the index live
-    /// in scratch locals so neither the iterable expression nor `array.len` is re-evaluated per step.
-    /// An `Iterable` would need `java.lang.Iterable`, which this host does not have.
+    /// JLS §14.14.2 defines both, and the array one is that definition: the array and the index live
+    /// in scratch locals so neither the iterable expression nor `array.len` is re-evaluated per
+    /// step. An `Iterable` runs on its `iterator`, which only a linked `java.lang.Iterable` supplies
+    /// — see [`for_each_iterator`](Self::for_each_iterator).
     fn for_each(&mut self, statement: &ast::ForEachStmt, insn: &mut Insn) -> Result<()> {
         let iterable = statement
             .iterable()
@@ -4400,11 +4403,19 @@ impl Lowering<'_> {
         let name: SyntaxToken = statement
             .name_token()
             .ok_or(WasmError::Unsupported("a `for`-each with no variable"))?;
-        let Some(Ty::Array(element)) = self.input.type_of_expr(Facts::span(iterable.syntax()))
+        let Some(ty) = self
+            .input
+            .type_of_expr(Facts::span(iterable.syntax()))
+            .cloned()
         else {
-            return Err(WasmError::Unsupported("a `for`-each over this type"));
+            return Err(WasmError::Unsupported(
+                "a `for`-each over a value with no type",
+            ));
         };
-        let element = self.layout.val_type(element)?;
+        let Ty::Array(element) = ty else {
+            return self.for_each_iterator(statement, &iterable, &name, insn);
+        };
+        let element = self.layout.val_type(&element)?;
         let array_type = self
             .layout
             .array_type(element)
@@ -4463,6 +4474,146 @@ impl Lowering<'_> {
         insn.local_set(index);
         insn.br(insn.depth() - repeat).end().end();
         Ok(())
+    }
+
+    /// `for (T v : iterable) body` over something that is not an array, which JLS §14.14.2 defines
+    /// as a loop over `iterable.iterator()`.
+    ///
+    /// The three calls are named on the *interfaces* that declare them rather than on the receiver's
+    /// own type. That resolves for any receiver assignable to `Iterable`, which is exactly the
+    /// condition checked before emitting — and it means the override chain is the one the interface's
+    /// member carries, so a single pair of functions serves every collection instead of one pair per
+    /// static type. `iterator()` and `next()` are interface methods, so both sides hold them at
+    /// `anyref`; `next()` erases to `Object`, which is what [`bind_element`](Self::bind_element)
+    /// brings down to the type the variable declares.
+    fn for_each_iterator(
+        &mut self,
+        statement: &ast::ForEachStmt,
+        iterable: &ast::Expr,
+        name: &SyntaxToken,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        const ITERABLE: &str = "java.lang.Iterable";
+        const ITERATOR: &str = "java.util.Iterator";
+        // Only a type whose members the index holds can be checked for `iterator()`, and a receiver
+        // that has none is a program the linter reports rather than one to emit for.
+        let iterable_ty = self
+            .input
+            .type_of_expr(Facts::span(iterable.syntax()))
+            .cloned();
+        let Some(Ty::Class(ClassTy::Project { id, args, .. })) = iterable_ty else {
+            return Err(WasmError::Unsupported("a `for`-each over this type"));
+        };
+        if self
+            .index
+            .resolve_member(id, "iterator", Namespace::Method)
+            .is_none()
+        {
+            return Err(WasmError::Unsupported("a `for`-each over a non-`Iterable`"));
+        }
+        let iterable_iface = self
+            .index
+            .item_by_fqn(ITERABLE)
+            .ok_or_else(|| WasmError::NoRepresentation(ITERABLE.to_owned()))?;
+        // The element comes from the `Iterable` instantiation, not from the receiver's own
+        // parameters: a non-generic `class Evens implements Iterable<Integer>` has none, and a
+        // `Pair<A, B> implements Iterable<B>` would name the wrong one.
+        let element = self
+            .index
+            .substitution_to(id, &args, iterable_iface)
+            .and_then(|args| args.into_iter().next());
+        let iterator_iface = self
+            .index
+            .item_by_fqn(ITERATOR)
+            .ok_or_else(|| WasmError::NoRepresentation(ITERATOR.to_owned()))?;
+        let iterator_method = self
+            .method_matching(iterable_iface, "iterator", &[], false)
+            .ok_or_else(|| WasmError::Unresolved(alloc::format!("{ITERABLE}.iterator")))?;
+        let has_next = self
+            .method_matching(iterator_iface, "hasNext", &[], false)
+            .ok_or_else(|| WasmError::Unresolved(alloc::format!("{ITERATOR}.hasNext")))?;
+        let next = self
+            .method_matching(iterator_iface, "next", &[], false)
+            .ok_or_else(|| WasmError::Unresolved(alloc::format!("{ITERATOR}.next")))?;
+        // An interface erases to `anyref`, so that is what the iterator, and the elements it hands
+        // out, are held at.
+        let iterator_ty = self.layout.class_ref(iterator_iface)?;
+
+        let label = self.pending_label.take();
+        let receiver_ty = self
+            .expr(iterable, insn)?
+            .ok_or(WasmError::Unsupported("a `for`-each over no value"))?;
+        let receiver = self.scratch(receiver_ty);
+        insn.local_set(receiver);
+        self.dispatch_to(
+            receiver,
+            receiver_ty,
+            iterator_method,
+            Some(iterator_ty),
+            insn,
+        )?;
+        let iterator = self.scratch(iterator_ty);
+        insn.local_set(iterator);
+
+        insn.block();
+        let leave = insn.depth();
+        insn.loop_();
+        let repeat = insn.depth();
+        // `it.hasNext()`, then leave when it is not.
+        insn.local_get(iterator);
+        self.dispatch_to(iterator, iterator_ty, has_next, Some(ValType::I32), insn)?;
+        insn.i32_eqz();
+        insn.br_if(insn.depth() - leave);
+        // The variable is bound before the body, and `continue` targets the test rather than an
+        // update, so it is re-made on the way back rather than skipped.
+        let id = self
+            .facts()
+            .def_at_token(name)
+            .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+        let variable = self.declare_local(id)?;
+        let declared = self.input.type_of_def(id).clone();
+        insn.local_get(iterator);
+        self.dispatch_to(iterator, iterator_ty, next, Some(iterator_ty), insn)?;
+        self.bind_element(element.as_ref(), &declared, insn)?;
+        insn.local_set(variable);
+        let cleanups = self.cleanups.len();
+        self.loops.push(Loop {
+            label,
+            leave,
+            repeat: Some(repeat),
+            cleanups,
+        });
+        if let Some(body) = statement.body() {
+            self.stmt(&body, insn)?;
+        }
+        self.loops.pop();
+        insn.br(insn.depth() - repeat).end().end();
+        Ok(())
+    }
+
+    /// Bring the element `iterator.next()` left on the stack down to the type the loop variable
+    /// declares.
+    ///
+    /// `next()` erases to `Object`, so a reference variable needs the same `ref.cast` erasure asks
+    /// for anywhere else. A *primitive* variable names its wrapper by the iterable's own type
+    /// argument — `for (int n : List<Integer>)` is an `intValue()` — which is why the element type
+    /// travels here; the declared type alone could not say which class to unbox.
+    fn bind_element(&self, element: Option<&Ty>, declared: &Ty, insn: &mut Insn) -> Result<()> {
+        let erased = ValType::Ref(RefType::nullable(HeapType::Any));
+        let target = self.layout.val_type(declared)?;
+        match Self::numeric(target) {
+            Some(target) => {
+                let element = element.ok_or(WasmError::Unsupported(
+                    "a `for`-each over an element of no type",
+                ))?;
+                let unboxed = self.unbox_ty(element, erased, insn)?;
+                if unboxed == target {
+                    return Ok(());
+                }
+                Self::widen(unboxed, target, insn)
+            }
+            None => self.narrow(erased, target, insn),
+        }
     }
 
     /// `label: statement`.
@@ -4726,16 +4877,68 @@ impl Lowering<'_> {
     /// The same `ref.test` chain a call site builds, without the call site: the overrides are a known,
     /// closed set with the whole project in one module, so testing them most-derived first answers what a
     /// vtable would. Used where there is no call expression to read a receiver out of — a resource's
-    /// `close`, which §14.20.3 calls and the source never writes.
-    fn dispatch_to(&self, receiver: u32, member: MemberId, insn: &mut Insn) -> Result<()> {
+    /// `close`, which §14.20.3 calls and the source never writes, and the `iterator`, `hasNext`, and
+    /// `next` a `for`-each runs on. `result` is the type the call leaves, `None` for a `void` one,
+    /// because the chain's block has to declare it.
+    fn dispatch_to(
+        &self,
+        receiver: u32,
+        receiver_ty: ValType,
+        member: MemberId,
+        result: Option<ValType>,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let info = self.index.member(member);
+        let owner = info.owner;
         let overriders = self.overriders(member);
         let fallback = self.layout.functions.get(&member).copied();
-        if overriders.is_empty() {
-            let function = fallback.ok_or(WasmError::Unsupported("a `close` with no body"))?;
-            insn.local_get(receiver).call(function);
+        // The realm arm, on the same terms a written call takes it: a consumer class that extends one
+        // of this library's classes is a subtype of whatever the chain below tests for, so a
+        // chain-first call would answer with the library's body and never ask the consumer.
+        let dispatched = self.layout.realm.is_some()
+            && !info.modifiers.is_static
+            && !info.modifiers.is_private
+            && info.kind == DefKind::Method
+            && !self.layout.imported(member)
+            && self.layout.member_types.contains_key(&member);
+        let realm = if dispatched {
+            Some(self.realm_slot(member)?)
+        } else {
+            None
+        };
+        if realm.is_none() && overriders.is_empty() {
+            let function = fallback.ok_or(WasmError::Unsupported("a method with no body"))?;
+            insn.local_get(receiver);
+            self.narrow(receiver_ty, self.layout.class_ref(owner)?, insn)?;
+            insn.call(function);
             return Ok(());
         }
-        insn.block();
+        if let Some((field, slot_ty)) = realm {
+            let build = self
+                .layout
+                .realm
+                .as_ref()
+                .ok_or(WasmError::Unsupported("a dispatch with no realm"))?;
+            let (structure, global) = (build.structure, build.global);
+            insn.global_get(global).ref_is_null().i32_eqz();
+            match result {
+                Some(ty) => insn.if_typed(ty),
+                None => insn.if_(),
+            };
+            insn.local_get(receiver);
+            // The slot is called at the declared member's type, so the receiver comes up to it from
+            // wherever the expression left it.
+            let slot_receiver = self.slot_receiver(member);
+            self.narrow(receiver_ty, slot_receiver, insn)?;
+            insn.global_get(global)
+                .struct_get(structure, field)
+                .call_ref(slot_ty);
+            insn.else_();
+        }
+        match result {
+            Some(ty) => insn.block_typed(ty),
+            None => insn.block(),
+        };
         let leave = insn.depth();
         for &(item, over) in &overriders {
             let Some(&function) = self.layout.functions.get(&over) else {
@@ -4756,6 +4959,7 @@ impl Lowering<'_> {
         match fallback {
             Some(function) => {
                 insn.local_get(receiver);
+                self.narrow(receiver_ty, self.layout.class_ref(owner)?, insn)?;
                 insn.call(function);
             }
             None => {
@@ -4763,6 +4967,9 @@ impl Lowering<'_> {
             }
         }
         insn.end();
+        if realm.is_some() {
+            insn.end();
+        }
         Ok(())
     }
 
@@ -4790,7 +4997,7 @@ impl Lowering<'_> {
             insn.if_();
             // The runtime type decides which `close` runs, exactly as it does at a call site: the
             // declared type is what named the method, and a subclass may have overridden it.
-            self.dispatch_to(*slot, close, insn)?;
+            self.dispatch_to(*slot, self.layout.val_type(declared)?, close, None, insn)?;
             insn.end();
         }
         Ok(())
@@ -7660,7 +7867,7 @@ impl Lowering<'_> {
             .item_by_fqn(wrapper)
             .ok_or_else(|| WasmError::Unresolved(wrapper.to_owned()))?;
         let member = self
-            .wrapper_member(owner, "valueOf", &[Ty::Primitive(primitive)], true)
+            .method_matching(owner, "valueOf", &[Ty::Primitive(primitive)], true)
             .ok_or_else(|| WasmError::Unresolved(alloc::format!("{wrapper}.valueOf")))?;
         let function = self
             .layout
@@ -7672,24 +7879,36 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// Unbox the reference on the stack down to the primitive its wrapper names (JLS §5.1.8), and
+    /// Unbox the value `value` on the stack down to the primitive its own static type names, and
     /// answer which primitive came back.
-    ///
-    /// The wrapper's own accessor is a library function and is called directly: the class comes
-    /// from the value's static type. A value that arrived *erased* — a type variable's `anyref`, an
-    /// element read out of a `List<Integer>` — is cast down to the wrapper first, the `ref.cast` a
-    /// written cast would emit. A reference that is no wrapper at all is not an unboxing conversion
-    /// the source could have written, and is refused as the gap in this backend that it is.
     fn unbox_value(
         &self,
         value: &ast::Expr,
         produced: ValType,
         insn: &mut Insn,
     ) -> Result<Numeric> {
-        let (wrapper, accessor, unboxed) = self
+        let ty = self
             .input
             .type_of_expr(Facts::span(value.syntax()))
-            .and_then(|ty| self.class_name(ty))
+            .cloned()
+            .ok_or(WasmError::Unsupported(
+                "an unboxing conversion of a value with no type",
+            ))?;
+        self.unbox_ty(&ty, produced, insn)
+    }
+
+    /// Unbox the reference on the stack down to the primitive `ty`'s wrapper names (JLS §5.1.8).
+    ///
+    /// The wrapper's own accessor is a library function and is called directly: the class comes
+    /// from the value's static type — or, for the element a `for`-each binds, from the iterable's
+    /// type argument, which is the only type that names it when the variable is primitive. A value
+    /// that arrived *erased* — a type variable's `anyref`, an element read out of a
+    /// `List<Integer>` — is cast down to the wrapper first, the `ref.cast` a written cast would
+    /// emit. A reference that is no wrapper at all is not an unboxing conversion the source could
+    /// have written, and is refused as the gap in this backend that it is.
+    fn unbox_ty(&self, ty: &Ty, produced: ValType, insn: &mut Insn) -> Result<Numeric> {
+        let (wrapper, accessor, unboxed) = self
+            .class_name(ty)
             .and_then(Self::wrapper_accessor)
             .ok_or(WasmError::Unsupported(
                 "an unboxing conversion of a value that is no wrapper",
@@ -7699,7 +7918,7 @@ impl Lowering<'_> {
             .item_by_fqn(wrapper)
             .ok_or_else(|| WasmError::Unresolved(wrapper.to_owned()))?;
         let member = self
-            .wrapper_member(owner, accessor, &[], false)
+            .method_matching(owner, accessor, &[], false)
             .ok_or_else(|| WasmError::Unresolved(alloc::format!("{wrapper}.{accessor}")))?;
         let function = self
             .layout
@@ -7712,14 +7931,15 @@ impl Lowering<'_> {
         Ok(unboxed)
     }
 
-    /// The member the wrapper class `owner` declares under `name` with exactly `params`.
+    /// The method `owner` declares under `name` with exactly `params`, when `is_static` matches.
     ///
-    /// The wrappers are the only callers: their `valueOf` and their accessors are known by name, and
-    /// the parameter list is what tells a `valueOf(int)` from the `valueOf(String)` a later platform
-    /// might add. Each is asked of the *linked* class where one supplies it and of the stub
+    /// Called where a protocol names a method the source never wrote: the wrappers' `valueOf` and
+    /// their accessors, and the `iterator` / `hasNext` / `next` a `for`-each runs on. The parameter
+    /// list is what tells a `valueOf(int)` from the `valueOf(String)` a later platform might add.
+    /// Each wrapper member is asked of the *linked* class where one supplies it and of the stub
     /// otherwise, so an unboxing of a wrapper no package provides lands on the library lookup and
     /// not here.
-    fn wrapper_member(
+    fn method_matching(
         &self,
         owner: ItemId,
         name: &str,
