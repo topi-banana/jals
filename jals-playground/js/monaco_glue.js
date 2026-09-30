@@ -78,7 +78,11 @@ export function syncModels(files) {
   for (const [path, model] of models) {
     // Generated Java models are the only ones `syncModels` owns; plaintext
     // pseudo-files (including a `build.java` script) keep their models.
-    if (model.getLanguageId() === "java" && !indexed.has(path) && model !== active) {
+    if (
+      model.getLanguageId() === "java" &&
+      !indexed.has(path) &&
+      model !== active
+    ) {
       model.dispose();
       models.delete(path);
     }
