@@ -11,8 +11,8 @@
 //! module builds. That package is a native package in the ordinary sense: Java with `native`
 //! declarations, and one Rust binding per declaration. The declarations reach the host as wasm
 //! imports, and [`Api::package`] is the table that answers them — every binding closes over this
-//! run's pending output, so a script's writes and directives are buffered exactly where the Rhai
-//! engine buffered them.
+//! run's pending output, so a script's writes and directives are buffered in one place until the
+//! run commits them.
 //!
 //! What crosses the boundary is numbers and arrays, never strings: a `native` method takes a
 //! `char[]` and answers with lengths and fills, because a `String`'s representation is the
@@ -21,9 +21,9 @@
 //!
 //! # What a script never sees
 //!
-//! `System.out` is captured and discarded, the way the Rhai engine discards `print`: the sink a
-//! platform package writes to is the host's, and a script's diagnostics belong in `Build.warning`
-//! and `Build.error`, where they are ordered, bounded, and travel with a failure. A script also
+//! `System.out` is captured and discarded: the sink a platform package writes to is the host's,
+//! and a script's diagnostics belong in `Build.warning` and `Build.error`, where they are ordered,
+//! bounded, and travel with a failure. A script also
 //! cannot read its own module's exports or reach the filesystem: every read is a project key
 //! through `Project`, and every write is buffered below the output root through `Output`.
 
@@ -102,8 +102,8 @@ pub(super) struct Engine;
 impl Engine {
     /// Compile, link, and run the project's configured Java script against `view`.
     ///
-    /// The returned [`PendingOutput`] is the same buffered state the Rhai engine produces — files,
-    /// directives, diagnostics, and the finished task plan — and the caller checks its error
+    /// The returned [`PendingOutput`] is buffered state — files, directives, diagnostics, and the
+    /// finished task plan — and the caller checks its error
     /// diagnostics and turns it into cache state. Nothing here publishes anything.
     ///
     /// `script` is the script's text, already read and size-checked by the caller.
@@ -1703,7 +1703,7 @@ impl Api {
         }
     }
 
-    /// A string list's length and every entry, bounded the way the Rhai API bounded them.
+    /// A string list's length and every entry, bounded by the host-collection limit.
     fn check_entries(
         entries: &[String],
         operation: &str,
@@ -1814,8 +1814,8 @@ impl Api {
 /// A failure in the script carries a *position in the script*, which is what a host renders as
 /// `path:line:column`; a failure anywhere else — the platform's Java, the API package's — is a
 /// defect in what shipped rather than in the script, so it keeps its logical path in front of the
-/// message and no position, exactly as the Rhai engine never attributed a host function's failure
-/// to the script's coordinates.
+/// message and no position: a host function's failure is never attributed to the script's
+/// coordinates.
 struct Failure;
 
 impl Failure {

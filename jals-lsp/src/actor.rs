@@ -692,19 +692,12 @@ impl Actor {
         self.is_script_diagnostic_uri(uri) || self.is_project_diagnostic_uri(uri)
     }
 
-    /// Rhai files are never Java diagnostic inputs. The exact configured script is also protected
-    /// when it uses another extension, so assembly diagnostics remain authoritative while open.
+    /// The exact configured script is never treated as a Java diagnostic input, so assembly
+    /// diagnostics remain authoritative while it is open.
     fn is_script_diagnostic_uri(&self, uri: &Url) -> bool {
         let Ok(path) = uri.to_file_path() else {
             return false;
         };
-        if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("rhai"))
-        {
-            return true;
-        }
         self.workspaces.iter().any(|slot| {
             slot.watch_policy()
                 .and_then(ProjectWatchPolicy::script)
@@ -1678,9 +1671,7 @@ impl AssembledWorkspace {
             .script
             .as_ref()
             .and_then(|script| match script {
-                BuildScript::Rhai { file } | BuildScript::Java { file } => {
-                    FileKey::parse(file).ok()
-                }
+                BuildScript::Java { file } => FileKey::parse(file).ok(),
             });
         let has_build_script = configured_script.is_some();
         let scopes = if has_build_script {

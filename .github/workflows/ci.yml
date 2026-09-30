@@ -488,13 +488,13 @@ jobs:
       # there is no configuration in which it stops being `no_std + alloc`.
       - run: cargo check -p jals-frontend
       - run: cargo check -p jals-project --all-features
-      - run: cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
-      # The `wasm-run` half of the same statement, and the one the browser rests on: the engine
-      # `jals run --invoke` reaches and the one a playground tab reaches are the same code, which
-      # holds only while it is portable on its own — `no_std + alloc`, no `native`. The playground
-      # build below compiles it for wasm32 too, but with `rhai` beside it, which is a different
-      # claim; and the feature is pinned to an unpublished revision, so it is the one here most
-      # likely to stop being portable without anybody editing this repository.
+      - run: cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
+      # The same statement's other half, and the one the browser rests on: the engine alone, the
+      # one `jals run --invoke` reaches, is portable without the script platform linked —
+      # `no_std + alloc`, no `native`. The playground build below compiles it for wasm32 too, but
+      # with `build-script` beside it, which is a different claim; and the feature is pinned to an
+      # unpublished revision, so it is the one here most likely to stop being portable without
+      # anybody editing this repository.
       - run: cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
       - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown

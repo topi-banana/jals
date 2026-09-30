@@ -49,7 +49,7 @@ impl core::fmt::Display for UnitId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Activity {
-    /// A project's `build.rhai` phase, before its task plan runs.
+    /// A project's `build.java` phase, before its task plan runs.
     Script,
     /// Discovering or preprocessing one node of the dependency graph.
     Resolve,

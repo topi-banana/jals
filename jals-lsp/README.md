@@ -63,11 +63,11 @@ Formatting and lint config are each discovered per document by searching upward 
 default. When the client supports file watching, edits to either file take effect without a
 server restart.
 
-Rhai `build.warning`/`build.error` messages and compilation/runtime failures are published on the
+`Build.warning`/`Build.error` messages and compilation/runtime failures are published on the
 configured script URI as `jals-build` diagnostics as well as logged to stderr. A published
 diagnostic carries its severity in the protocol field and its message bare; the stderr line has no
-such field, so there the diagnostic renders itself severity and all. Compilation/runtime
-failures use Rhai's exact source position; script-reported messages use a first-line fallback range.
+such field, so there the diagnostic renders itself severity and all. Compilation/runtime failures
+use the script's exact source position; script-reported messages use a first-line fallback range.
 A clean rerun or script removal clears the previous publication.
 Typed root build tasks are executed during workspace assembly. Exclusive physical source-tree
 publication is deferred, without fetching or writing, while an open document lies below the
@@ -86,7 +86,7 @@ A project workspace folds in the project's
 `jals-classpath`; the graph is assembled under `DependencyScope::Test`, so a `[dev-dependencies]`
 entry is an analysis input and a change to it reassembles the workspace exactly as a
 `[dependencies]` one does; the
-`reqwest` download runs on a dedicated thread to stay off the Tokio runtime), successful Rhai
+`reqwest` download runs on a dedicated thread to stay off the Tokio runtime), successful
 build-script generated sources and additional classpath entries, each dependency's
 extracted `sources` jar `.java` — or, when a jar ships none, a decompiled skeleton `.java` — as
 read-only navigation targets, each `git`/`path` source dependency's `.java` as both an index

@@ -2012,11 +2012,6 @@ impl BuildRemap {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum BuildScript {
-    /// A Rhai build script stored at a project-relative portable file path.
-    Rhai {
-        /// The script file, relative to the project root.
-        file: String,
-    },
     /// A Java build script stored at a project-relative portable file path.
     ///
     /// The script is compiled and run by the in-process wasm engine: its declarations reach the
@@ -2031,10 +2026,8 @@ impl BuildScript {
     /// The value of the script's serialized `type` tag.
     #[cfg(test)]
     const fn tag_name(&self) -> &'static str {
-        match self {
-            Self::Rhai { .. } => "rhai",
-            Self::Java { .. } => "java",
-        }
+        let Self::Java { .. } = self;
+        "java"
     }
 }
 
@@ -2509,7 +2502,7 @@ impl Manifest {
             })?;
         }
 
-        if let Some(BuildScript::Rhai { file } | BuildScript::Java { file }) = &self.build.script {
+        if let Some(BuildScript::Java { file }) = &self.build.script {
             let script = FileKey::parse(file)
                 .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
             // A script is always a portable project path, so it cannot be inside a `classes-dir`

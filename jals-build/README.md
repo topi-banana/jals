@@ -5,13 +5,13 @@ Cargo-style build orchestration for Java projects — the engine behind `jals bu
 
 A [`jals.toml`](#the-manifest-jalstoml) manifest is the Java analogue of `Cargo.toml`: it says
 where the sources live, where compiled classes go, which Java release to target, what is on the
-classpath, and optionally which Rhai script runs before compilation. This crate turns that manifest
-and already-resolved inputs into `javac`/`java` plans, clean keys, or scaffold files. With the `rhai`
-feature it can also evaluate the script against revisioned `jals-storage` project data, without
-giving the script direct host access:
+classpath, and optionally which `build.java` runs before compilation. This crate turns that manifest
+and already-resolved inputs into `javac`/`java` plans, clean keys, or scaffold files. With the
+`build-script` feature it can also compile and run the script against revisioned `jals-storage`
+project data, without giving the script direct host access:
 
 ```
-jals.toml + project snapshot ─▶ optional Rhai pre-build ─▶ generated files/directives
+jals.toml + project snapshot ─▶ optional Java pre-build ─▶ generated files/directives
               │                                                    │
               └──────────────────────┬─────────────────────────────┘
                                      ▼
@@ -34,10 +34,10 @@ own `&dyn Compiler` / `&dyn Runtime`, mixed selections need no routing composite
 filesystem-free `ToolResolver` and `BuiltinToolchain` — remains deterministic and testable with no
 JDK installed.
 
-The optional `rhai` feature adds [`execute_build_script`](#rhai-build-scripts). It is also portable:
-`jals-build --no-default-features --features rhai` is `no_std + alloc`, uses only typed project
-storage and its verified artifact cache, and builds for `wasm32-unknown-unknown`. The browser
-playground uses that exact configuration.
+The optional `build-script` feature adds [`execute_build_script`](#java-build-scripts). It is also
+portable: `jals-build --no-default-features --features build-script` is `no_std + alloc`, uses only
+typed project storage and its verified artifact cache, and builds for `wasm32-unknown-unknown`. The
+browser playground uses that exact configuration.
 
 Transitive project discovery is deliberately a deeper layer in `jals-project`, not this planner.
 It discovers stable path/Git/JAR graph nodes, preprocesses every unique node dependency-first, and
@@ -95,13 +95,13 @@ version = "0.1.0"
 # features = ["java25"]            # language features (release presets + individual); gates analysis, not javac
 # default-run = "server"           # which [[bin]] `jals run` runs when several exist
 
-# [features]                       # build features a `script` reads with `build.feature("…")`
+# [features]                       # build features a `script` reads with `Build.feature("…")`
 # default = ["server"]             # enabled when the command line selects none
 # server  = []
 # client  = []
 
 [build]
-# script = { type = "rhai", file = "build.rhai" } # optional pre-javac phase
+# script = { type = "java", file = "build.java" } # optional pre-javac phase
 source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
 classes-dir = "target/classes"    # javac -d
 # resource-dirs = ["src/main/resources"]  # packaged into the jar `[build] remap` writes
@@ -155,8 +155,8 @@ core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
 ### `[features]`
 
 Cargo's `[features]`, at the same top level: an open-ended map from a **build feature** name to the
-other features it enables. These are user-defined build-time toggles a [build script](#rhai-build-scripts)
-reads with `build.feature("…")` / `build.features()` to vary what it produces — distinct from
+other features it enables. These are user-defined build-time toggles a [build script](#java-build-scripts)
+reads with `Build.feature("…")` / `Build.features()` to vary what it produces — distinct from
 [`[package] features`](#package), which is a closed enum gating _language_ analysis and is never
 selected on the command line. With the `"attributes"` language feature on, source code tests the
 same resolved set via `#[cfg(feature = "…")]` (see [`[package]`](#package)).
@@ -180,7 +180,7 @@ Select them per invocation on `jals build` / `jals run`:
 
 Selection is **additive** — a feature never subtracts — so `--features client` keeps the `default`
 list unless `--no-default-features` is also given. The reserved `default` key is a resolution
-directive, not a queryable feature: it is expanded and then dropped, so `build.feature("default")`
+directive, not a queryable feature: it is expanded and then dropped, so `Build.feature("default")`
 is never true. A `--features` name that is not declared is an error before any work starts; a
 `default`/`enables` entry naming an undeclared feature is a manifest validation error. Omitting the
 section leaves the set empty.
@@ -189,8 +189,8 @@ section leaves the set empty.
 
 A list entry of the form `<dependency>/<feature>` — Cargo's `std = ["serde/std"]` — enables
 `<feature>` in that `[dependencies]` entry rather than in this project. It is a _directive_, never a
-queryable feature: `build.feature("render/vulkan")` is always false, and the name is absent from
-`build.features()`. The dependency must be a declared `git`/`path` entry; a `jar` runs no build
+queryable feature: `Build.feature("render/vulkan")` is always false, and the name is absent from
+`Build.features()`. The dependency must be a declared `git`/`path` entry; a `jar` runs no build
 script that could read a feature, and naming one — or an undeclared entry, or `dep/default` — is a
 manifest validation error. `/` is likewise rejected in a `[features]` **key** and in a
 [`[dependencies]` `features`](#dependencies) list, which names features of that dependency only.
@@ -213,7 +213,7 @@ nothing still leaves every dependency script cached.
 
 | Key             | Type             | Default                  | Maps to                                                                                                                                                         |
 | --------------- | ---------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `script`        | tagged table     | —                        | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                                            |
+| `script`        | tagged table     | —                        | optional pre-`javac` build phase; currently `{ type = "java", file = "build.java" }`                                                                            |
 | `source-dirs`   | array of strings | `["src/main/java"]`      | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                                              |
 | `classes-dir`   | string           | `"target/classes"`       | `javac -d` (also the dir `jals clean` removes)                                                                                                                  |
 | `resource-dirs` | array of strings | `["src/main/resources"]` | files packaged into the jar `[build] remap` writes — the **jar only**, never `jals run`'s classpath; non-root dirs outside `classes-dir`, a missing one skipped |
@@ -342,25 +342,25 @@ Three things diverge from Jinja on purpose:
 Rendered resources reach the **jar only**, exactly as unrendered ones do, and only when
 `[build] remap` declares the packaging step.
 
-### Rhai build scripts
+### Java build scripts
 
 Enable the optional pre-build phase with an inline tagged table:
 
 ```toml
 [build]
-script = { type = "rhai", file = "build.rhai" }
+script = { type = "java", file = "build.java" }
 ```
 
-The corresponding Rust model is `BuildScript::Rhai { file }`; `tag_name()` returns the exact serde
+The corresponding Rust model is `BuildScript::Java { file }`; `tag_name()` returns the exact serde
 tag used in the manifest:
 
 ```rust
 use jals_config::BuildScript;
 
-let script = BuildScript::Rhai {
-    file: "build.rhai".into(),
+let script = BuildScript::Java {
+    file: "build.java".into(),
 };
-assert_eq!(script.tag_name(), "rhai");
+assert_eq!(script.tag_name(), "java");
 ```
 
 `file` must be a non-root portable project-relative file path outside both `[build] classes-dir`
@@ -371,75 +371,93 @@ registered sources/classpath plus `javac`/JVM arguments and compile/run environm
 the later command. The LSP and playground run that same root adapter for analysis but do not spawn
 `javac`/`java`; root script failures are diagnosed and ordinary root analysis continues.
 
-The root adapter receives a `ProjectStorage` aggregate rather than a host path. It evaluates against
-one immutable `ProjectView`, buffers generated files and directives, then commits files in one
-revision-checked transaction only after successful evaluation. Immutable dependency preparation
-uses the same evaluator without that source-storage commit. Scripts get four scope objects; `tasks`
-records a typed DAG while the first three retain the direct APIs below:
+The root adapter receives a `ProjectStorage` aggregate rather than a host path. The script runs
+against one immutable `ProjectView`, buffers generated files and directives, and commits files in
+one revision-checked transaction only after a successful run. Immutable dependency preparation uses
+the same engine without that source-storage commit. A script is a class named `build` with a
+`public static void main()`; it reaches the host only through the static classes of the `jals.build`
+package:
 
-| Object    | Method                                                      | Effect                                                                                                                                                                                                                                                                                                                                                                      |
+```java
+import jals.build.Build;
+import jals.build.Output;
+
+class build {
+    public static void main() {
+        String key = Output.writeText("generated/BuildInfo.java",
+            "public final class BuildInfo {}");
+        Build.addSource(key);
+        Build.addJavacArg("-Xlint:all");
+        Build.warning("generated BuildInfo.java");
+    }
+}
+```
+
+`Project`, `Output`, and `Build` read the snapshot and record directives; `Tasks` records a typed
+DAG while the first three retain the direct APIs below:
+
+| Class     | Method                                                      | Effect                                                                                                                                                                                                                                                                                                                                                                      |
 | --------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `project` | `read(path)`                                                | Read a project file as an array of bytes (`0..=255`).                                                                                                                                                                                                                                                                                                                       |
-| `project` | `read_text(path)`                                           | Read a UTF-8 project file as a string.                                                                                                                                                                                                                                                                                                                                      |
-| `project` | `exists(path)`                                              | Test whether a project-relative file or directory exists.                                                                                                                                                                                                                                                                                                                   |
-| `project` | `read_dir(path)`                                            | List direct child paths in deterministic order.                                                                                                                                                                                                                                                                                                                             |
-| `project` | `walk_files(path)`                                          | List all files below a directory in deterministic order.                                                                                                                                                                                                                                                                                                                    |
-| `output`  | `write(path, bytes)`                                        | Buffer bytes below `target/jals/build/rhai/out` and return an `OutputPath`.                                                                                                                                                                                                                                                                                                 |
-| `output`  | `write_text(path, text)`                                    | Buffer UTF-8 text below the same output root and return an `OutputPath`.                                                                                                                                                                                                                                                                                                    |
-| `build`   | `env(name)`                                                 | Read a value from the environment map explicitly supplied by the host; returns `()` when absent.                                                                                                                                                                                                                                                                            |
-| `build`   | `feature(name)`                                             | Whether build feature `name` is enabled for **this project** — its own `[features]` selection at the root, or, as a dependency, what its dependents asked for closed over its own `[features]` (see [`[features]`](#features)). A `<dependency>/<feature>` name is never enabled here; it is a forwarding directive. Always fingerprinted — no `rerun_` declaration needed. |
-| `build`   | `features()`                                                | The enabled build features for this project, in lexical order.                                                                                                                                                                                                                                                                                                              |
-| `build`   | `rerun_if_changed(path)`                                    | Track one project file for cache invalidation.                                                                                                                                                                                                                                                                                                                              |
-| `build`   | `rerun_if_env_changed(name)`                                | Track one supplied environment value for cache invalidation.                                                                                                                                                                                                                                                                                                                |
-| `build`   | `add_source(path)`                                          | Add a project file or returned `OutputPath` to the later source set.                                                                                                                                                                                                                                                                                                        |
-| `build`   | `add_classpath(path)`                                       | Add a project file or returned `OutputPath` to the classpath.                                                                                                                                                                                                                                                                                                               |
-| `build`   | `add_javac_arg(arg)` / `add_jvm_arg(arg)`                   | Append compiler or JVM arguments in call order.                                                                                                                                                                                                                                                                                                                             |
-| `build`   | `set_compile_env(name, value)` / `set_run_env(name, value)` | Add environment entries to the compiler or runtime request.                                                                                                                                                                                                                                                                                                                 |
-| `build`   | `warning(message)` / `error(message)`                       | Report a non-fatal warning or a fatal diagnostic. Any error prevents publication.                                                                                                                                                                                                                                                                                           |
-| `build`   | `metadata(key, value)`                                      | Return deterministic host-readable metadata without changing a tool invocation.                                                                                                                                                                                                                                                                                             |
+| `Project` | `read(path)`                                                | Read a project file as a byte array.                                                                                                                                                                                                                                                                                                                                        |
+| `Project` | `readText(path)`                                            | Read a UTF-8 project file as a string.                                                                                                                                                                                                                                                                                                                                      |
+| `Project` | `exists(path)`                                              | Test whether a project-relative file or directory exists.                                                                                                                                                                                                                                                                                                                   |
+| `Project` | `readDir(path)`                                             | List direct child paths in deterministic order.                                                                                                                                                                                                                                                                                                                             |
+| `Project` | `walkFiles(path)`                                           | List all files below a directory in deterministic order.                                                                                                                                                                                                                                                                                                                    |
+| `Output`  | `write(path, bytes)`                                        | Buffer bytes below `target/jals/build/script/out` and return the generated file's key.                                                                                                                                                                                                                                                                                      |
+| `Output`  | `writeText(path, text)`                                     | Buffer UTF-8 text below the same output root and return the key.                                                                                                                                                                                                                                                                                                            |
+| `Build`   | `env(name)`                                                 | Read a value from the environment map explicitly supplied by the host; returns `null` when absent.                                                                                                                                                                                                                                                                          |
+| `Build`   | `feature(name)`                                             | Whether build feature `name` is enabled for **this project** — its own `[features]` selection at the root, or, as a dependency, what its dependents asked for closed over its own `[features]` (see [`[features]`](#features)). A `<dependency>/<feature>` name is never enabled here; it is a forwarding directive. Always fingerprinted — no `rerunIfChanged` declaration needed. |
+| `Build`   | `features()`                                                | The enabled build features for this project, in lexical order.                                                                                                                                                                                                                                                                                                              |
+| `Build`   | `rerunIfChanged(path)`                                      | Track one project file for cache invalidation.                                                                                                                                                                                                                                                                                                                              |
+| `Build`   | `rerunIfEnvChanged(name)`                                   | Track one supplied environment value for cache invalidation.                                                                                                                                                                                                                                                                                                                |
+| `Build`   | `addSource(path)`                                           | Add a project file or returned output key to the later source set.                                                                                                                                                                                                                                                                                                          |
+| `Build`   | `addClasspath(path)`                                        | Add a project file or returned output key to the classpath.                                                                                                                                                                                                                                                                                                                 |
+| `Build`   | `addJavacArg(arg)` / `addJvmArg(arg)`                       | Append compiler or JVM arguments in call order.                                                                                                                                                                                                                                                                                                                             |
+| `Build`   | `setCompileEnv(name, value)` / `setRunEnv(name, value)`     | Add environment entries to the compiler or runtime request.                                                                                                                                                                                                                                                                                                                 |
+| `Build`   | `warning(message)` / `error(message)`                       | Report a non-fatal warning or a fatal diagnostic. Any error prevents publication.                                                                                                                                                                                                                                                                                           |
+| `Build`   | `metadata(key, value)`                                      | Return deterministic host-readable metadata without changing a tool invocation.                                                                                                                                                                                                                                                                                             |
 
-Root scripts can use these `tasks` methods. They only record work; network/archive effects run
-asynchronously after Rhai evaluation and capability preflight succeed:
+Root scripts can use these `Tasks` methods. They only record work; network/archive effects run
+asynchronously after the run and capability preflight succeed. Every method answers an `int` handle
+— the node's index in the plan — and later calls take handles as inputs:
 
 | Method                                                                           | Result/effect                                                                 |
 | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `https_url(url)`                                                                 | Typed HTTPS URL. A fetch still requires an expected digest and byte limit.    |
-| `project_jar(path)`                                                              | Typed JAR from the immutable project snapshot.                                |
-| `sha1(hex)` / `sha256(hex)` / `bytes(n)`                                         | Typed verification and size values.                                           |
-| `fetch_json(url, digest, max)` / `fetch_jar(...)` / `fetch_text(...)`            | Verified cache-first artifact fetch (JSON, JAR, or UTF-8 text).               |
-| `json_at(json, path)` / `json_find_string(json, path, field, value)`             | Typed JSON projection without exposing fetched values to Rhai.                |
-| `json_url(json, path)` / `json_sha1(...)` / `json_sha256(...)` / `json_u64(...)` | Values for a dependent fetch, resolved by the host DAG executor.              |
-| `extract_java(jar, prefix)`                                                      | Safe `.java` source tree below `prefix`, with the prefix stripped.            |
-| `nested_jar(jar, member)`                                                        | Extract one nested `.jar` member and treat it as a JAR.                       |
-| `remap_jar(jar, mappings)`                                                       | Deobfuscate a JAR with Mojang/ProGuard mappings text (hierarchy-aware).       |
-| `remap_jar(jar, mappings, format)`                                               | The same, over a stated mapping grammar.                                      |
-| `proguard()` / `tiny_v2(from, to)`                                               | The grammar `remap_jar` reads. Tiny v2 names the namespace pair to read.      |
-| `merge_jars(base, overlay)`                                                      | Deterministic JAR union; overlay wins path conflicts.                         |
-| `decompile_java(jar, prefix)`                                                    | Compile-oriented skeleton source tree below `prefix`.                         |
-| `add_classpath(jar)`                                                             | Add a task-produced JAR to the root classpath.                                |
-| `add_nested_classpath(jar)`                                                      | Expand every nested `.jar` member onto the root classpath (library bundlers). |
-| `publish_tree(owner, tree, destination, "replace-root", intent)`                 | Atomically replace an exclusive physical source subtree.                      |
+| `Tasks.httpsUrl(url)`                                                            | Typed HTTPS URL. A fetch still requires an expected digest and byte limit.    |
+| `Tasks.projectJar(path)`                                                         | Typed JAR from the immutable project snapshot.                                |
+| `Tasks.sha1(hex)` / `sha256(hex)` / `bytes(n)`                                   | Typed verification and size values; `bytes` takes a `long`.                   |
+| `Tasks.fetchJson(url, digest, max)` / `fetchJar(...)` / `fetchText(...)`         | Verified cache-first artifact fetch (JSON, JAR, or UTF-8 text).               |
+| `Tasks.jsonAt(json, path)` / `jsonFindString(json, path, field, value)`          | Typed JSON projection; a path is a `String[]` of keys and indices.            |
+| `Tasks.jsonUrl(...)` / `jsonSha1(...)` / `jsonSha256(...)` / `jsonU64(...)`      | Values for a dependent fetch, resolved by the host DAG executor.              |
+| `Tasks.extractJava(jar, prefix)`                                                 | Safe `.java` source tree below `prefix`, with the prefix stripped.            |
+| `Tasks.nestedJar(jar, member)`                                                   | Extract one nested `.jar` member and treat it as a JAR.                       |
+| `Tasks.remapJar(jar, mappings)`                                                  | Deobfuscate a JAR with Mojang/ProGuard mappings text (hierarchy-aware).       |
+| `Tasks.remapJarAs(jar, mappings, format)`                                        | The same, over a stated mapping grammar.                                      |
+| `Tasks.proguard()` / `Tasks.tinyV2(from, to)`                                    | The grammar `remapJarAs` reads. Tiny v2 names the namespace pair to read.      |
+| `Tasks.mergeJars(base, overlay)`                                                 | Deterministic JAR union; overlay wins path conflicts.                         |
+| `Tasks.decompileJava(jar, prefix)`                                               | Compile-oriented skeleton source tree below `prefix`.                         |
+| `Tasks.addClasspath(jar)`                                                        | Add a task-produced JAR to the root classpath.                                |
+| `Tasks.addNestedClasspath(jar)`                                                  | Expand every nested `.jar` member onto the root classpath (library bundlers). |
+| `Tasks.publishTree(owner, tree, destination, intent)`                            | Atomically replace an exclusive physical source subtree.                      |
 
-`remap_jar` and `merge_jars` both drop a signed jar's signature block
+A declaration is refused where it is written when it cannot run: a handle from nowhere, a node of
+the wrong kind — a JSON value where a JAR belongs — or a plan that would exceed a limit names the
+call, not the run.
+
+`Tasks.remapJar` and `Tasks.mergeJars` both drop a signed jar's signature block
 (`META-INF/*.{SF,DSA,RSA,EC}`) and the per-entry digests in its manifest. Renaming every class leaves
 both describing bytes that no longer exist, and a union carries members the signer never saw; a JVM
 refuses either archive with `SecurityException: signer information does not match` — so a jar that
 kept them would compile against but never run. A Minecraft client jar carries about 3.7 MB of them.
-The two agree because a release that ships deobfuscated reaches `merge_jars` without passing through
-a remap at all.
+The two agree because a release that ships deobfuscated reaches `Tasks.mergeJars` without passing
+through a remap at all.
 
 For example:
 
-```rhai
-let jar = tasks.project_jar("vendor/example-sources.jar");
-let sources = tasks.extract_java(jar, "net/example");
-tasks.publish_tree(
-    "example-sources",
-    sources,
-    "src/main/java/net/example",
-    "replace-root",
-    "navigation"
-);
+```java
+int jar = Tasks.projectJar("vendor/example-sources.jar");
+int sources = Tasks.extractJava(jar, "net/example");
+Tasks.publishTree("example-sources", sources, "src/main/java/net/example", "navigation");
 ```
 
 `intent` is `"compile"` or `"navigation"`, and there is no default: it says what a consumer does
@@ -447,20 +465,16 @@ with the tree, which is the one thing the task graph cannot infer — a tree wit
 a tree that is the only carrier of its package are written identically. It changes nothing for the
 root, where a publication becomes real files either way; see the dependency section below.
 
-The four-argument form every script spelled before the intent existed is still registered, and fails
-naming the argument to add. A script that omits it is one whose author has not decided, so there is
-nothing to default to — but what they meet has to be that, and not a signature dump.
-
-`replace-root` is deliberately explicit and destructive: after every non-empty task result succeeds,
-the complete destination is replaced, including files manually added or edited below it. The
-destination must be a strict descendant of a configured source root and may not overlap another
-owner or managed build inputs. Failures leave the previous tree untouched. Ownership is recorded at
+Publication is deliberately destructive: after every non-empty task result succeeds, the complete
+destination is replaced, including files manually added or edited below it. The destination must be
+a strict descendant of a configured source root and may not overlap another owner or managed build
+inputs. Failures leave the previous tree untouched. Ownership is recorded at
 `target/jals/build/tasks/ownership-v1.json`; dropping an owner or running `jals clean` removes its
 root before build state. Outside declared roots, files are never changed.
 
 `jals build --offline` and `jals run --offline` permit verified cache hits but no task fetch. The
 native LSP executes the same task plan, always offline: opening a folder in an editor runs whatever
-`build.rhai` it contains, and nobody reviews a repository before opening it, so the server consumes
+`build.java` it contains, and nobody reviews a repository before opening it, so the server consumes
 only what a real `jals build` already fetched and verified into the cache. It also defers
 publication while an open document is below the destination. The browser playground rejects physical
 publication before any fetch. Tasks expose no shell/process API.
@@ -470,11 +484,12 @@ difference: publication is virtual. Every artifact lands in the _consumer's_ ver
 dependency's own snapshot is byte-identical afterwards — a dependency is never written to, which is
 what made the whole facility unavailable there before.
 
-- `add_classpath` / `add_nested_classpath` reach the consumer's compile classpath and analysis,
-  exactly like a `jar` dependency's classes.
-- `publish_tree` produces values rather than files on disk, and its `intent` decides which of two
-  things the consumer receives. Its `destination` is validated as a strict source-root descendant
-  either way — a destination with no package below it is a mistake whoever reads the tree.
+- `Tasks.addClasspath` / `Tasks.addNestedClasspath` reach the consumer's compile classpath and
+  analysis, exactly like a `jar` dependency's classes.
+- `Tasks.publishTree` produces values rather than files on disk, and its `intent` decides which of
+  two things the consumer receives. Its `destination` is validated as a strict source-root
+  descendant either way — a destination with no package below it is a mistake whoever reads the
+  tree.
 
 `"navigation"` is the **contract most publications want**: a dependency exports its types through
 the classpath, and a published tree is a *view* of types defined there. The consumer receives the
@@ -488,7 +503,7 @@ dependency's own sources, is lowered by the dependency's own frontend, and reach
 compiler as an ordinary source dependency under a node token. It is a *routing*, not a fan-out: a
 compile publication is not also a navigation source, or an editor would mount one type twice.
 
-A `replace-root` destination is owned by its publication in a dependency as well. Building a
+A publication destination is owned by its publication in a dependency as well. Building a
 dependency in its own directory leaves the tree there as real files, and those are read as what they
 are — output of the same plan — rather than captured as authored sources and compiled a second time.
 So whether a consumer compiles never depends on whether anyone once ran a build in a directory they
@@ -531,7 +546,7 @@ Two things the check will not claim, and one it says plainly:
   lose the warning for every root a project publishes as soon as it gains one jar, so the report
   says what it could not see instead — for every dependency kind, since a `git`/`path` dependency's
   sources reach a consumer's compiler too. That is also why the report does not offer the two fixes
-  as equals: `tasks.add_classpath` is the one it reads, and a `[dependencies]` jar carries the types
+  as equals: `Tasks.addClasspath` is the one it reads, and a `[dependencies]` jar carries the types
   just as well but leaves the warning exactly where it was. A publication a dependency backs is a
   blind spot the report names, not a finding it stands behind.
 - **A `compile` publication is reported too**, and says something else: those types do reach a
@@ -542,34 +557,40 @@ Each dependency execution is memoized under its project identity, plan, and reso
 re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,
 or re-decompile a graph that has not changed.
 
-A concise `build.rhai` that generates and registers a Java source is:
+A concise `build.java` that generates and registers a Java source is:
 
-```rhai
-let source = output.write_text(
-    "generated/BuildInfo.java",
-    "public final class BuildInfo { public static final String VALUE = \"rhai\"; }\n"
-);
-build.add_source(source);
-build.add_javac_arg("-Xlint:all");
-build.add_jvm_arg("-Djals.build.script=rhai");
-build.set_run_env("JALS_BUILD_SCRIPT", "rhai");
-build.rerun_if_changed("src/main/java/Main.java");
-build.rerun_if_env_changed("CI");
-build.warning("generated BuildInfo.java");
-build.metadata("generator", "rhai");
+```java
+import jals.build.Build;
+import jals.build.Output;
+
+class build {
+    public static void main() {
+        String source = Output.writeText("generated/BuildInfo.java",
+            "public final class BuildInfo {}");
+        Build.addSource(source);
+        Build.addJavacArg("-Xlint:all");
+        Build.addJvmArg("-Djals.build.script=java");
+        Build.setRunEnv("JALS_BUILD_SCRIPT", "java");
+        Build.rerunIfChanged("src/main/java/Main.java");
+        Build.rerunIfEnvChanged("CI");
+        Build.warning("generated BuildInfo.java");
+        Build.metadata("generator", "java");
+    }
+}
 ```
 
-For CLI builds, `build.env` sees only `JALS_`-prefixed host variables plus `OUT_DIR` (always
-`target/jals/build/rhai/out`), `JALS_MANIFEST_DIR` (`.`), and the optional
+For CLI builds, `Build.env` sees only `JALS_`-prefixed host variables plus `OUT_DIR` (always
+`target/jals/build/script/out`), `JALS_MANIFEST_DIR` (`.`), and the optional
 `JALS_PACKAGE_NAME`/`JALS_PACKAGE_VERSION`. The fixed values replace same-named host entries. The LSP
 and playground deliberately supply only those fixed project values, not their host/browser
 environment.
 
-The rest of the host environment is withheld on purpose. A script can forward anything `build.env`
+The rest of the host environment is withheld on purpose. A script can forward anything `Build.env`
 returns into a task fetch URL, so inheriting wholesale would expose every credential on the machine
-(`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, registry tokens, …) to an unreviewed `build.rhai` —
+(`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, registry tokens, …) to an unreviewed `build.java` —
 including a **dependency's**, which the user never looked at. Pass host state deliberately by naming
-it with the `JALS_` prefix (`JALS_MC_SIDE=client jals build`). For the root script, `set_compile_env`/`set_run_env` contribute entries to the eventual
+it with the `JALS_` prefix (`JALS_MC_SIDE=client jals build`). For the root script,
+`Build.setCompileEnv`/`Build.setRunEnv` contribute entries to the eventual
 CLI subprocesses; dependency process directives remain node-local. The LSP/playground do not apply
 process-only flag/environment directives because they spawn no JDK tools.
 
@@ -579,7 +600,7 @@ entries are stably deduplicated while preserving their first-occurrence order. A
 with ordinary project and source-dependency sources. A diagnostic renders itself as
 `<severity>: <message>`, and a host that writes it into a plain string renders the whole thing
 rather than spelling the severity again; `message()` alone is for a destination that already carries
-severity in a field of its own. `build.error`, a Rhai compile/evaluation error, a bad path, or a
+severity in a field of its own. `Build.error`, a script compile/runtime error, a bad path, or a
 limit violation publishes no partial generated output — and the resulting error reports every
 diagnostic the run emitted, in order, so a warning that preceded the fatal one stays with it.
 Metadata is available in `BuildScriptOutput` for host integrations and is not otherwise interpreted
@@ -588,7 +609,7 @@ by `javac` or `java`.
 Manifest-backed source dependencies use the lower-level immutable preparation API instead. The
 project graph invokes every unique binary, legacy-source, and JALS-source node unconditionally in
 dependency-first order (the first two are no-ops). A dependency script exports only paths explicitly
-registered with `build.add_source` and `build.add_classpath`. Its `javac`/JVM arguments, compile/run
+registered with `Build.addSource` and `Build.addClasspath`. Its `javac`/JVM arguments, compile/run
 environment, and metadata remain node-local and never propagate to a parent or root invocation.
 Generated bytes are read from the immutable preparation result and published as node-scoped,
 digest-verified artifacts; the dependency source snapshot and its host tree are never mutated.
@@ -600,16 +621,16 @@ read back through digest-verified lookups. The native adapter persists them unde
 `target/jals/cache`; memory hosts retain them in their aggregate. A fingerprint covers the API/state
 versions, script path and bytes, `jals.toml`, limits, tracked project bytes, declared environment
 values, and the project's resolved build features. A matching cache hit restores outputs and all
-directives without evaluating Rhai.
+directives without evaluating the script.
 
 The root uses the distinguished `BuildScriptCacheScope::ROOT`; each dependency uses a scope derived
-from its stable graph node identity. Identical `build.rhai` and output paths in two dependencies
+from its stable graph node identity. Identical `build.java` and output paths in two dependencies
 therefore cannot collide in cache state or generated artifacts.
 
-If the script calls no `rerun_if_changed`, the conservative default fingerprints every project file
+If the script calls no `Build.rerunIfChanged`, the conservative default fingerprints every project file
 except `target/jals/build/**`. Calling it at least once narrows project-file tracking to the declared
 set; the script and manifest remain tracked independently. Only names passed to
-`rerun_if_env_changed` contribute environment values to the fingerprint. The resolved build-feature
+`Build.rerunIfEnvChanged` contribute environment values to the fingerprint. The resolved build-feature
 set is different: it is always an input, whether or not the script reads it, so a changed selection
 can never reuse a build made under a different one — at the root a changed `--features`, and for a
 dependency a changed `[dependencies] features` list. Managed build-output paths
@@ -624,33 +645,31 @@ has committed, not a failed build.
 
 `jals clean` first removes exclusive task-owned source roots, then both `classes-dir` and
 `target/jals/build`, including stale
-`target/jals/build/rhai/out` files after a script is removed. It intentionally leaves the shared
+`target/jals/build/script/out` files after a script is removed. It intentionally leaves the shared
 verified cache at `target/jals/cache`; the next build can safely restore matching output from it.
 
 #### Sandbox and WebAssembly
 
-The synchronous script has no API for host filesystem access, spawning processes, clock/time, or
-randomness. It can declare bounded, digest-verified task fetches, but cannot inspect fetched bytes or
-perform network I/O during evaluation. Project reads and output writes go only through validated storage keys; output paths
-cannot escape the dedicated root. Module loading, Rhai time support, custom syntax, `print`, and
-`debug` do not provide host capabilities (`print`/`debug` output is discarded).
+A script has no API for host filesystem access, spawning processes, clock/time, or randomness. It
+can declare bounded, digest-verified task fetches, but cannot inspect fetched bytes or perform
+network I/O while it runs. Project reads and output writes go only through validated storage keys;
+output paths cannot escape the dedicated root. `System.out` is captured and discarded.
 
 For the root project, compiler/JVM arguments, classpath entries, and compile/run environment
-directives are inert during the Rhai phase but intentionally affect the later JDK subprocess started
+directives are inert during the script phase but intentionally affect the later JDK subprocess started
 by an explicit CLI `build`/`run`. They can enable compiler plugins, annotation processors, agents,
 or other JDK features, so root build scripts remain trusted project code rather than a security
 boundary for the subsequent compiler process. Dependency process directives do not propagate. The
 LSP and playground never spawn that process.
 
-Default limits include 1 MiB script source, 1,000,000 operations, 1,024 variables, 256 functions,
-32 nested calls, expression depths of 64/32, 1 MiB strings, 65,536-item arrays, 4,096-entry maps,
-4 KiB/128-segment paths, 1 MiB aggregate directives, 256 output files, 4 MiB per output, 16 MiB
-total output, 4 MiB cached state, 4,096 task nodes, 16,384 task edges, 1 MiB task literals, 256 task
-terminals, and 32 publication roots. Hosts may supply stricter non-zero `BuildScriptLimits`. The
-same bounded engine builds for `wasm32-unknown-unknown` with:
+Default limits include 1 MiB script source, 1,000,000 operations, 1 MiB strings, 65,536-item
+arrays, 4,096-entry maps, 4 KiB/128-segment paths, 1 MiB aggregate directives, 256 output files,
+4 MiB per output, 16 MiB total output, 4 MiB cached state, 4,096 task nodes, 16,384 task edges,
+1 MiB task literals, 256 task terminals, and 32 publication roots. Hosts may supply stricter
+non-zero `BuildScriptLimits`. The same bounded engine builds for `wasm32-unknown-unknown` with:
 
 ```sh
-cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
 ```
 
 See [`examples/build_script`](../examples/build_script) for a runnable project.
@@ -770,7 +789,7 @@ one **primary form** — `jar` (compiled classes), `git` (a checked-out project 
 | `branch` / `tag` / `rev` | string                 | git       | _optional_, **at most one** — which commit to check out (default: the repo's default branch)                                                                                                                                                                                                                                                                                                                                                                       |
 | `path`                   | string                 | path      | a local project root (relative to the manifest dir)                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `dir`                    | string                 | git, path | _optional_ selected **project root** within the repository/path (e.g. `core`). Manifest probing and all child-relative paths start there.                                                                                                                                                                                                                                                                                                                          |
-| `features`               | array of feature names | git, path | _optional_ (default `[]`) — the [build features](#features) to enable in **that** dependency, which its `build.rhai` reads with `build.feature("…")`. Cargo's per-dependency `features`. These name features of the dependency itself, so a `<dependency>/<feature>` entry is rejected — [forwarding](#forwarding-a-feature-to-a-dependency) is written in `[features]`. Not available on `jar` (no build script to read them), where writing it is a parse error. |
+| `features`               | array of feature names | git, path | _optional_ (default `[]`) — the [build features](#features) to enable in **that** dependency, which its `build.java` reads with `Build.feature("…")`. Cargo's per-dependency `features`. These name features of the dependency itself, so a `<dependency>/<feature>` entry is rejected — [forwarding](#forwarding-a-feature-to-a-dependency) is written in `[features]`. Not available on `jar` (no build script to read them), where writing it is a parse error. |
 | `default-features`       | bool                   | git, path | _optional_ (default `true`) — whether that dependency resolves its own `[features] default` list (Cargo's `default-features`). Not available on `jar`, where writing it is a parse error.                                                                                                                                                                                                                                                                          |
 
 ```toml
@@ -914,7 +933,7 @@ picks the `main-class` `jals run` should execute from `[[bin]]`/`default-run`/`[
 `InitOptions { name }.scaffold()` (for `jals init`) and `CleanTargets::keys` (for `jals clean`)
 round out the pure planning surface.
 
-With the `rhai` feature, `prepare_build_script(view, cache, cache_scope, manifest, environment,
+With the `build-script` feature, `prepare_build_script(view, cache, cache_scope, manifest, environment,
 limits)` is the immutable execution/cache seam. It returns `Ok(None)` when no script is configured,
 or a `PreparedBuildScript` whose `output(revision)` exposes registrations/directives,
 `file_bytes(view, key)` resolves generated or existing registered files, and `persist(cache)`
@@ -953,7 +972,7 @@ returns typed compile-classpath artifacts for CLI materialization and path roots
 cargo test -p jals-build --all-features
 cargo clippy -p jals-build --all-targets --all-features -- -D warnings
 cargo check -p jals-build --no-default-features
-cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-project --all-features
 cargo build -p jals-playground --target wasm32-unknown-unknown
@@ -963,7 +982,7 @@ cargo build -p jals-playground --target wasm32-unknown-unknown
 
 # Roadmap
 
-`jals-build` today is a thin, faithful `javac`/`java` wrapper with a portable Rhai pre-build phase,
+`jals-build` today is a thin, faithful `javac`/`java` wrapper with a portable Java pre-build phase,
 backed by the implemented transitive JALS source-project graph in `jals-project`.
 The goal is to grow it into a **Cargo-for-Java** front end: dependency management, packaging,
 testing, and richer build configuration. Each item below names its Cargo analogue (or marks a
@@ -1205,7 +1224,7 @@ mc-client-test = { path = "../minecraft_client_test" }
 - **One name, one entry.** A name declared in both tables is rejected — a deliberate divergence
   from Cargo, which lets the dev entry override. Here a name denotes one entry wherever it is read
   (`dep:<name>`, `<name>/<feature>`, one discovery edge), and two specs under it have no reading.
-- **What still does not cross the edge.** `build.add_jvm_arg` reaches the test JVM only from the
+- **What still does not cross the edge.** `Build.addJvmArg` reaches the test JVM only from the
   *root* project's script, so a dev-dependency contributes classpath and sources but no JVM flags.
   [`examples/minecraft_client_test`](../examples/minecraft_client_test) is a worked example, and
   documents what a consumer therefore writes itself.
@@ -1226,7 +1245,7 @@ mc-client-test = { path = "../minecraft_client_test" }
 
 Direct host capabilities stay in `jals-cli`, a native adapter, or a future host-only helper crate:
 process spawning, host filesystem walking, and network fetches. Portable `jals-build` code either
-plans data or operates through `ProjectStorage`; Rhai scripts receive only the latter's typed,
+plans data or operates through `ProjectStorage`; build scripts receive only the latter's typed,
 revisioned project/cache contract. This keeps the portable feature set deterministic, unit-testable
 without a JDK, and `wasm32`-buildable.
 

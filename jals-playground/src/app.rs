@@ -1018,8 +1018,7 @@ impl App {
             .script
             .as_ref()
             .and_then(|script| match script {
-                jals_config::BuildScript::Rhai { file }
-                | jals_config::BuildScript::Java { file } => FileKey::parse(file).ok(),
+                jals_config::BuildScript::Java { file } => FileKey::parse(file).ok(),
             });
         ProjectDiagnostics::assemble(
             outcome,
