@@ -28,20 +28,20 @@ never sees this project.
 
 ## What crosses the dependency edge, and what does not
 
-|                                            | Crosses                            | Where it comes from                                                       |
-| ------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------- |
+|                                            | Crosses                            | Where it comes from                                                        |
+| ------------------------------------------ | ---------------------------------- | -------------------------------------------------------------------------- |
 | `GameClient.java`                          | yes, as a compile input            | `[build] source-dirs`, lowered under this project's own frontend           |
-| the ~60 runtime jars                       | yes, onto the consumer's classpath | `tasks.add_classpath` in `build.rhai`                                      |
+| the ~60 runtime jars                       | yes, onto the consumer's classpath | `Tasks.addClasspath` in `build.java`                                       |
 | the game jar and its navigation sources    | yes                                | the `minecraft` SDK, reached from both sides of a diamond                  |
-| **`-Xmx2G`**                               | **no**                             | `build.add_jvm_arg` reaches a test JVM only from the *root* project's script |
-| **`--release`**                            | **no**                             | `build.add_javac_arg` is the same rule, so `GameClient.java` is compiled at whatever `--release` the consumer set |
+| **`-Xmx2G`**                               | **no**                             | `Build.addJvmArg` reaches a test JVM only from the *root* project's script |
+| **`--release`**                            | **no**                             | `Build.addJavacArg` is the same rule, so `GameClient.java` is compiled at whatever `--release` the consumer set |
 
 So a consumer writes the JVM argument itself; the compiler one it already has, because a mod
 compiled against a release is capped at that release's class-file level either way:
 
-```rhai
-if build.feature("client-test") {
-    build.add_jvm_arg("-Xmx2G");
+```java
+if (Build.feature("client-test")) {
+    Build.addJvmArg("-Xmx2G");
 }
 ```
 
@@ -51,7 +51,7 @@ Leaving it out does not fail cleanly — the boot dies inside the resource reloa
 ## 43 releases, and where the lines are
 
 One name selects this harness, and it answers one question: **which release**. A release feature
-(`1.20.1`) routes `minecraft/1.20.1` into the SDK and names one *threshold*. `build.rhai` rejects a
+(`1.20.1`) routes `minecraft/1.20.1` into the SDK and names one *threshold*. `build.java` rejects a
 selection that names none, because the SDK would fall back to its own newest release while every
 threshold here stayed off — the oldest source compiled against the newest game.
 
@@ -78,7 +78,7 @@ fourteen and not forty-three:
 
 | threshold       | what moves at it                                                                                             |
 | --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `since-1.14.4`  | the bottom of the chain: every release reaches it, so `build.rhai` errors when it is off — no release was named |
+| `since-1.14.4`  | the bottom of the chain: every release reaches it, so `build.java` errors when it is off — no release was named |
 | `since-1.15`    | the game window is behind `getWindow()`; on 1.14.4 it is the public `window` field                             |
 | `since-1.16`    | `getMessage()` returns a `Component`; the overworld is `overworld()` rather than `getLevel(DimensionType.OVERWORLD)`; `LevelSettings` takes a name and a difficulty; `createLevel` replaces `selectLevel` |
 | `since-1.17`    | `--release 16`                                                                                                 |
@@ -129,7 +129,7 @@ oldest releases run on Java 8.
 ### The library pins
 
 The ~60 jars a client loads at boot are per release and per platform, so all 43 sets are pinned in
-`build.rhai` — 2287 rows, 379 distinct jars, linux/x86_64 — as data the script loops over. A
+`runtime.tsv` — 2287 rows, 379 distinct jars, linux/x86_64 — as data the script parses. A
 generator writes them:
 
 ```sh
@@ -137,7 +137,7 @@ python3 examples/scripts/gen-client-runtime.py
 ```
 
 It takes no arguments and rewrites every release, reading the release list and each release's
-metadata digest out of `examples/minecraft/build.rhai`'s own `CATALOG` rather than restating either.
+metadata digest out of `examples/minecraft/build.java`'s own `CATALOG` rather than restating either.
 It refuses to write anything at all if it cannot read one library of one release: a table that is
 partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
 

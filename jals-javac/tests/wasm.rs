@@ -8,7 +8,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
-use jals_javac::wasm::{CompileWasm, WasmError, WasmOptions};
+use jals_javac::wasm::{CompileWasm, Positions, WasmError, WasmOptions};
 use jals_syntax::SyntaxNode;
 
 /// Whether `name` is on this host. A missing engine is a missing *oracle*, not a broken compiler,
@@ -312,8 +312,8 @@ public class App {
     assert_invoke(&[helper, main], "run", &["20"], "41");
 }
 
-/// A library type has no wasm representation, and saying so is the honest answer — there is no
-/// `java.base` on a wasm host, and inventing one is a separate decision from compiling.
+/// A library type has no wasm representation here, and saying so is the honest answer — this
+/// compile links no package, and inventing one is a separate decision from compiling.
 #[test]
 fn a_library_type_is_reported_rather_than_guessed() {
     let source = r#"
@@ -326,7 +326,7 @@ public class Greeter {
     let error = compile(&[source]).expect_err("library types are out of scope");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::NoRepresentation(_) | WasmError::Unsupported(_)
         ),
         "expected a scope error, got {error}"
@@ -1489,8 +1489,8 @@ public class Areas {
 /// methods are a class's, and `==` on two constants is `ref.eq`, which is exactly what enum identity is.
 ///
 /// What an enum cannot have here is anything from `java.lang.Enum`: `name()`, `toString()`, and
-/// `valueOf(String)` all involve a `String`, which has no wasm representation by this backend's existing
-/// design. A call to one reports rather than being guessed at.
+/// `valueOf(String)` all involve a `String`, which these compiles do not link a package to provide.
+/// A call to one reports rather than being guessed at.
 #[test]
 fn an_enum_gets_its_constants_as_globals() {
     let source = r"
@@ -1588,7 +1588,7 @@ fn the_enum_shapes_that_need_more_are_reported() {
     let error = compile(&[source]).expect_err("this enum has no constructor to build with");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an `enum` constant with no matching constructor")
         ),
         "got {error}"
@@ -1615,7 +1615,7 @@ fn a_type_in_an_enum_constant_body_has_no_owning_type() {
     let error = compile(&[source]).expect_err("an `enum` constant is not an owning type");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an enclosing type with no name")
         ),
         "got {error}"
@@ -1630,8 +1630,8 @@ fn a_type_in_an_enum_constant_body_has_no_owning_type() {
 /// to write directly: the constructor stores each parameter into its slot and an accessor reads one back.
 ///
 /// `equals`, `hashCode`, and `toString` are *not* synthesised here. All three come from
-/// `java.lang.Record`, and two of them involve a `String`, which has no wasm representation by this
-/// backend's design — a call to one reports rather than being guessed at.
+/// `java.lang.Record`, and two of them involve a `String`, which these compiles do not link a
+/// package to provide — a call to one reports rather than being guessed at.
 #[test]
 fn a_record_gets_a_constructor_and_accessors() {
     let source = r"
@@ -1881,7 +1881,7 @@ public class Outer {
     let error = compile(&[outside]).expect_err("a `static` method has no enclosing instance");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("a `new` of an inner class outside an instance method")
         ),
         "got {error}"
@@ -2587,7 +2587,7 @@ public class Reader {
 /// unconditionally (§14.30.2), including a `null` component that a `ref.test` would reject. `var` is that
 /// same case spelled without the type, and its binding takes the component's.
 ///
-/// The selector is an interface rather than `Object`: a wasm host has no `java.base`, and an interface
+/// The selector is an interface rather than `Object`: this compile links no package, and an interface
 /// type is held at the top of the reference hierarchy, which is exactly what a pattern narrows from.
 #[test]
 fn a_record_pattern_deconstructs() {
@@ -2782,7 +2782,7 @@ public class Fall {
     let error =
         compile(&[source]).expect_err("this switch expression has a path that yields nothing");
     assert!(
-        matches!(error, WasmError::Unsupported(_)),
+        matches!(error.kind(), WasmError::Unsupported(_)),
         "expected a report, got {error}"
     );
 }
@@ -3081,7 +3081,7 @@ fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
     let error = compile(&[source]).expect_err("an array's length is not assignable");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an assignment to an array's length")
         ),
         "got {error}"
@@ -3141,7 +3141,8 @@ public class Through {
     assert_invoke(&[declared, implemented], "run", &["21"], "42");
 }
 
-/// `java.lang.Object` is represented, and it is the one library type that needs no `java.base`.
+/// `java.lang.Object` is represented, and it is the one library type representable with no package
+/// linked.
 ///
 /// It is the root of Java's reference hierarchy and `anyref` is wasm's, so a value of it sits
 /// exactly where an interface-typed one does. Refusing it put every file that so much as declares an
@@ -3268,6 +3269,91 @@ public class Host {
     assert_invoke(&[source], "run", &["3"], "110");
 }
 
+/// A compile error names the source it happened at: the boundary every expression passes through
+/// attaches the file and the byte range, and the innermost failure is the one kept.
+///
+/// The file id is the one the host numbered the inputs with — only the host can turn it into a
+/// path — and the range is a byte range into that file's text, which is what lets a caller draw a
+/// diagnostic instead of printing a bare reason. The range starts at the construct, not at the
+/// blank space in front of it, which is the range the inference memo is keyed by.
+#[test]
+fn a_compile_error_names_the_source_it_happened_at() {
+    let first = "public class First { public static int value() { return 3; } }";
+    let second = r#"
+public class Second {
+    public static void greet() {
+        System.out.println("hi");
+    }
+}
+"#;
+    let error = compile(&[first, second]).expect_err("a library type has no representation here");
+    let (file, range) = error
+        .location()
+        .unwrap_or_else(|| panic!("lowering knows where this failed: {error}"));
+    assert_eq!(file, FileId(1), "the error is in the second file: {error}");
+    assert_eq!(
+        &second[range], "System.out.println(\"hi\")",
+        "the span is the failing expression, not the statement or the method it is written in"
+    );
+}
+
+/// A compile that asked for positions carries the table, one entry per statement, and one that did
+/// not carries none.
+///
+/// The table is what a run reads back after a trap — the module itself holds nothing but indices —
+/// so what is pinned here is the shape a host depends on: an entry per statement, in the order the
+/// statements were lowered, and each one the *written* range of that statement rather than the
+/// trivia the parser attached in front of it.
+#[test]
+fn a_positions_compile_carries_the_statement_table() {
+    let source = r"
+public class Positions {
+    public static int run() {
+        int n = 1;
+        n = n + 1;
+        return n;
+    }
+}
+";
+    let module = compile_with(
+        &[source],
+        WasmOptions {
+            positions: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect("compiles with positions");
+    validate(&module);
+    let positions = Positions::of_module(&module).expect("the compile asked for the table");
+
+    let texts: Vec<&str> = (0..3)
+        .map(|index| {
+            let (file, range) = positions
+                .get(index)
+                .unwrap_or_else(|| panic!("entry {index} is in the table"));
+            assert_eq!(file, FileId(0), "every entry names the one source");
+            &source[range]
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["int n = 1;", "n = n + 1;", "return n;"],
+        "one entry per statement, in the order they were lowered"
+    );
+    assert_eq!(
+        positions.get(3),
+        None,
+        "and no entry past the last statement"
+    );
+
+    let plain = compile(&[source]).expect("compiles without positions");
+    assert_eq!(
+        Positions::of_module(&plain),
+        None,
+        "an ordinary compile pays nothing for a table nobody asked for"
+    );
+}
+
 /// Java's arrays are covariant and wasm's are invariant, so one is not the other.
 ///
 /// A wasm array is mutable, and declared subtyping over it would let a write of the wrong element
@@ -3285,7 +3371,7 @@ public class Covariant {
     let error = compile(&[source]).expect_err("wasm arrays are invariant");
     assert!(
         matches!(
-            error,
+            error.kind(),
             WasmError::Unsupported("an array where an array of another type is wanted")
         ),
         "got {error}"
@@ -3381,7 +3467,10 @@ public class Boxing {
 ";
     let error = compile(&[source]).expect_err("a wasm host has no `java.lang.Integer`");
     assert!(
-        matches!(error, WasmError::NoRepresentation(ref what) if what == "java.lang.Integer"),
+        matches!(
+            error.kind(),
+            WasmError::NoRepresentation(what) if what == "java.lang.Integer"
+        ),
         "got {error}"
     );
 }

@@ -4,7 +4,7 @@
 //! `#[function_component]`): [`Header`] (the top action bar, with the CORS-proxy input and the
 //! dependency-resolution status), [`FileTree`] (the config-files + workspace-files sidebar),
 //! [`EditorPane`] (the Monaco editor mount + lifecycle), and [`ResultPane`] (the CST dump and the
-//! compile report, on two tabs). The `jals.toml`, `jalsfmt.toml`, and `build.rhai` are edited in
+//! compile report, on two tabs). The `jals.toml`, `jalsfmt.toml`, and `build.java` are edited in
 //! the editor itself (see [`crate::app::App`]), so there are no dedicated config/dependency bars.
 //! The root [`crate::app::App`] owns all state and wires the components together with props and
 //! callbacks.

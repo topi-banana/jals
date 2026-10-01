@@ -78,7 +78,7 @@ impl ProjectScript {
     /// The graph-phase entry for a host that deliberately runs no script.
     ///
     /// `jals lint` analyses what is already on disk: opening a folder must not execute an unreviewed
-    /// `build.rhai`, so it enters the graph phase with nothing published and no task classpath.
+    /// `build.java`, so it enters the graph phase with nothing published and no task classpath.
     pub const fn skipped() -> Self {
         Self {
             output: None,
@@ -912,12 +912,20 @@ mod tests {
                 Entry::File(
                     FileKey::parse("deps/child/jals.toml").expect("portable key"),
                     b"[build]\nsource-dirs = [\"src\"]\n\
-                      script = { type = \"rhai\", file = \"build.rhai\" }\n"
+                      script = { type = \"java\", file = \"build.java\" }\n"
                         .to_vec(),
                 ),
                 Entry::File(
-                    FileKey::parse("deps/child/build.rhai").expect("portable key"),
-                    br#"tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#.to_vec(),
+                    FileKey::parse("deps/child/build.java").expect("portable key"),
+                    br#"import jals.build.Tasks;
+
+class build {
+    public static void main() {
+        Tasks.addClasspath(Tasks.projectJar("vendor/lib.jar"));
+    }
+}
+"#
+                    .to_vec(),
                 ),
                 Entry::File(
                     FileKey::parse("deps/child/vendor/lib.jar").expect("portable key"),
@@ -1087,14 +1095,22 @@ mod tests {
     fn script_classpath_directives_land_after_the_authored_entries() {
         block_on_inline(async {
             let manifest: Manifest = "[build]\nclasspath = [\"lib/first.class\"]\n\
-                 script = { type = \"rhai\", file = \"build.rhai\" }\n"
+                 script = { type = \"java\", file = \"build.java\" }\n"
                 .parse()
                 .expect("test manifest is valid");
             let mut storage = MemoryStorage::memory(
                 CodeTree::new([
                     Entry::File(
-                        FileKey::parse("build.rhai").expect("portable key"),
-                        br#"build.add_classpath("lib/second.class");"#.to_vec(),
+                        FileKey::parse("build.java").expect("portable key"),
+                        br#"import jals.build.Build;
+
+class build {
+    public static void main() {
+        Build.addClasspath("lib/second.class");
+    }
+}
+"#
+                        .to_vec(),
                     ),
                     Entry::File(
                         FileKey::parse("lib/first.class").expect("portable key"),

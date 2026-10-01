@@ -928,21 +928,28 @@ fn every_node_kind_preprocesses_and_scripts_export_only_sources_and_classpath() 
         write(
             project.path(),
             "scripted/jals.toml",
-            "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+            "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"java\", file = \"build.java\" }\n",
         );
         write(
             project.path(),
-            "scripted/build.rhai",
+            "scripted/build.java",
             r#"
-                let generated = output.write_text("Generated.java", "class Generated {}");
-                let generated_cp = output.write("generated.jar", [1, 2, 3]);
-                build.add_source(generated);
-                build.add_source("src/Existing.java");
-                build.add_classpath(generated_cp);
-                build.add_classpath("lib/existing.jar");
-                build.add_javac_arg("-should-not-propagate");
-                build.add_jvm_arg("-also-not-propagated");
-                build.metadata("private", "value");
+                import jals.build.Build;
+                import jals.build.Output;
+
+                class build {
+                    public static void main() {
+                        String generated = Output.writeText("Generated.java", "class Generated {}");
+                        String generatedCp = Output.write("generated.jar", new byte[] {1, 2, 3});
+                        Build.addSource(generated);
+                        Build.addSource("src/Existing.java");
+                        Build.addClasspath(generatedCp);
+                        Build.addClasspath("lib/existing.jar");
+                        Build.addJavacArg("-should-not-propagate");
+                        Build.addJvmArg("-also-not-propagated");
+                        Build.metadata("private", "value");
+                    }
+                }
             "#,
         );
         write(
@@ -1014,13 +1021,23 @@ fn node_tokens_isolate_identical_script_paths_and_outputs() {
             write(
                 project.path(),
                 &format!("{dependency}/jals.toml"),
-                "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                "[build]\nsource-dirs = [\"src\"]\nscript = { type = \"java\", file = \"build.java\" }\n",
             );
             write(
                 project.path(),
-                &format!("{dependency}/build.rhai"),
+                &format!("{dependency}/build.java"),
                 format!(
-                    "let source = output.write_text(\"Same.java\", \"class {class_name} {{}}\"); build.add_source(source);"
+                    "\
+import jals.build.Build;
+import jals.build.Output;
+
+class build {{
+    public static void main() {{
+        String source = Output.writeText(\"Same.java\", \"class {class_name} {{}}\");
+        Build.addSource(source);
+    }}
+}}
+"
                 ),
             );
         }
@@ -1345,14 +1362,21 @@ fn dependency_snapshots_exclude_git_and_jals_cache_inputs() {
         write(
             project.path(),
             "dep/jals.toml",
-            "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+            "[build]\nscript = { type = \"java\", file = \"build.java\" }\n",
         );
         write(
             project.path(),
-            "dep/build.rhai",
+            "dep/build.java",
             r#"
-                if project.exists("target/jals/cache/secret") || project.exists(".git/secret") {
-                    build.error("excluded host state leaked into the dependency snapshot");
+                import jals.build.Build;
+                import jals.build.Project;
+
+                class build {
+                    public static void main() {
+                        if (Project.exists("target/jals/cache/secret") || Project.exists(".git/secret")) {
+                            Build.error("excluded host state leaked into the dependency snapshot");
+                        }
+                    }
                 }
             "#,
         );
@@ -1555,9 +1579,9 @@ fn task_dependency(script: &str, files: &[(&str, &[u8])]) -> (Manifest, MemorySt
     let defaults: [(&str, &[u8]); 3] = [
         (
             "dep/jals.toml",
-            b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+            b"[build]\nscript = { type = \"java\", file = \"build.java\" }\n",
         ),
-        ("dep/build.rhai", script.as_bytes()),
+        ("dep/build.java", script.as_bytes()),
         // A source root the dependency actually has, so capturing it emits no warning.
         ("dep/src/main/java/Seed.java", b"class Seed {}"),
     ];
@@ -1660,10 +1684,16 @@ fn publishing_dependency_with(
     let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
     let script = format!(
         r#"
-            let archive = tasks.project_jar("vendor/sources.jar");
-            let tree = tasks.extract_java(archive, "net/example");
-            tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "{intent}");
-            {extra}
+            import jals.build.Tasks;
+
+            class build {{
+                public static void main() {{
+                    int archive = Tasks.projectJar("vendor/sources.jar");
+                    int tree = Tasks.extractJava(archive, "net/example");
+                    Tasks.publishTree("api", tree, "src/main/java/net/example", "{intent}");
+                    {extra}
+                }}
+            }}
         "#
     );
     let mut all: Vec<(&str, &[u8])> = vec![("dep/vendor/sources.jar", &sources)];
@@ -1679,7 +1709,7 @@ fn manifest_with_classpath(entries: &[&str]) -> Vec<u8> {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "[build]\nscript = {{ type = \"rhai\", file = \"build.rhai\" }}\nclasspath = [{list}]\n"
+        "[build]\nscript = {{ type = \"java\", file = \"build.java\" }}\nclasspath = [{list}]\n"
     )
     .into_bytes()
 }
@@ -1740,12 +1770,18 @@ fn a_dependency_build_task_puts_its_jar_on_the_consumer_classpath() {
         let game = jar(&[("pkg/Api.class", b"api")]);
         let script = format!(
             r#"
-                let game = tasks.fetch_jar(
-                    tasks.https_url("https://example.invalid/game.jar"),
-                    tasks.sha256("{}"),
-                    tasks.bytes(4096)
-                );
-                tasks.add_classpath(game);
+                import jals.build.Tasks;
+
+                class build {{
+                    public static void main() {{
+                        int game = Tasks.fetchJar(
+                            Tasks.httpsUrl("https://example.invalid/game.jar"),
+                            Tasks.sha256("{}"),
+                            Tasks.bytes(4096)
+                        );
+                        Tasks.addClasspath(game);
+                    }}
+                }}
             "#,
             jals_storage::ContentDigest::of(&game).to_hex()
         );
@@ -1799,13 +1835,19 @@ fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snap
         let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
         let script = format!(
             r#"
-                let archive = tasks.fetch_jar(
-                    tasks.https_url("https://example.invalid/sources.jar"),
-                    tasks.sha256("{}"),
-                    tasks.bytes(4096)
-                );
-                let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "navigation");
+                import jals.build.Tasks;
+
+                class build {{
+                    public static void main() {{
+                        int archive = Tasks.fetchJar(
+                            Tasks.httpsUrl("https://example.invalid/sources.jar"),
+                            Tasks.sha256("{}"),
+                            Tasks.bytes(4096)
+                        );
+                        int tree = Tasks.extractJava(archive, "net/example");
+                        Tasks.publishTree("api", tree, "src/main/java/net/example", "navigation");
+                    }}
+                }}
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -1872,13 +1914,19 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
         let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
         let script = format!(
             r#"
-                let archive = tasks.fetch_jar(
-                    tasks.https_url("https://example.invalid/sources.jar"),
-                    tasks.sha256("{}"),
-                    tasks.bytes(4096)
-                );
-                let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "generated/net/example", "replace-root", "navigation");
+                import jals.build.Tasks;
+
+                class build {{
+                    public static void main() {{
+                        int archive = Tasks.fetchJar(
+                            Tasks.httpsUrl("https://example.invalid/sources.jar"),
+                            Tasks.sha256("{}"),
+                            Tasks.bytes(4096)
+                        );
+                        int tree = Tasks.extractJava(archive, "net/example");
+                        Tasks.publishTree("api", tree, "generated/net/example", "navigation");
+                    }}
+                }}
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -1924,7 +1972,16 @@ fn a_dependency_build_script_error_reaches_the_consumer_with_its_message() {
         // reader only that something failed, which is why this asserts the sentence and not the
         // shape.
         let (root, view_storage) = task_dependency(
-            r#"build.warning("check the version features"); build.error("select at most one");"#,
+            r#"
+                import jals.build.Build;
+
+                class build {
+                    public static void main() {
+                        Build.warning("check the version features");
+                        Build.error("select at most one");
+                    }
+                }
+            "#,
             &[],
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
@@ -1973,8 +2030,14 @@ fn a_dependency_task_execution_is_memoized_across_preprocessing() {
         // makes the plan impossible to execute a second time. If the second preprocess still
         // succeeds with the same result, it can only have come from the recorded execution.
         let script = r#"
-            let vendor = tasks.project_jar("vendor/lib.jar");
-            tasks.add_classpath(vendor);
+            import jals.build.Tasks;
+
+            class build {
+                public static void main() {
+                    int vendor = Tasks.projectJar("vendor/lib.jar");
+                    Tasks.addClasspath(vendor);
+                }
+            }
         "#;
         let library = jar(&[("pkg/Api.class", b"api")]);
         let (root, with_jar) = task_dependency(script, &[("dep/vendor/lib.jar", &library)]);
@@ -2012,9 +2075,16 @@ fn a_memoized_dependency_execution_is_keyed_on_its_build_features() {
         // Two feature selections produce two plans. Sharing one record between them would serve
         // whichever ran first, silently building the wrong thing.
         let script = r#"
-            let name = if build.feature("wide") { "wide" } else { "narrow" };
-            let vendor = tasks.project_jar("vendor/" + name + ".jar");
-            tasks.add_classpath(vendor);
+            import jals.build.Build;
+            import jals.build.Tasks;
+
+            class build {
+                public static void main() {
+                    String name = Build.feature("wide") ? "wide" : "narrow";
+                    int vendor = Tasks.projectJar("vendor/" + name + ".jar");
+                    Tasks.addClasspath(vendor);
+                }
+            }
         "#;
         let narrow = jar(&[("pkg/Narrow.class", b"narrow")]);
         let wide = jar(&[("pkg/Wide.class", b"wide")]);
@@ -2022,7 +2092,7 @@ fn a_memoized_dependency_execution_is_keyed_on_its_build_features() {
             (
                 "dep/jals.toml",
                 b"[features]\nwide = []\n\
-                  [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                  [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
             ),
             ("dep/vendor/narrow.jar", &narrow),
             ("dep/vendor/wide.jar", &wide),
@@ -2064,14 +2134,20 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
         let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
         let script = format!(
             r#"
-                let archive = tasks.fetch_jar(
-                    tasks.https_url("https://example.invalid/sources.jar"),
-                    tasks.sha256("{}"),
-                    tasks.bytes(4096)
-                );
-                tasks.add_classpath(archive);
-                let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "navigation");
+                import jals.build.Tasks;
+
+                class build {{
+                    public static void main() {{
+                        int archive = Tasks.fetchJar(
+                            Tasks.httpsUrl("https://example.invalid/sources.jar"),
+                            Tasks.sha256("{}"),
+                            Tasks.bytes(4096)
+                        );
+                        Tasks.addClasspath(archive);
+                        int tree = Tasks.extractJava(archive, "net/example");
+                        Tasks.publishTree("api", tree, "src/main/java/net/example", "navigation");
+                    }}
+                }}
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -2319,9 +2395,15 @@ fn a_compile_intent_publication_outside_a_source_root_is_rejected() {
         let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
         let (root, view_storage) = task_dependency(
             r#"
-                let archive = tasks.project_jar("vendor/sources.jar");
-                let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "generated/net/example", "replace-root", "compile");
+                import jals.build.Tasks;
+
+                class build {
+                    public static void main() {
+                        int archive = Tasks.projectJar("vendor/sources.jar");
+                        int tree = Tasks.extractJava(archive, "net/example");
+                        Tasks.publishTree("api", tree, "generated/net/example", "compile");
+                    }
+                }
             "#,
             &[("dep/vendor/sources.jar", &sources)],
         );
@@ -2401,7 +2483,7 @@ fn a_publication_the_task_classpath_backs_is_silent() {
         let classes = jar(&[("net/example/Api.class", b"class bytes")]);
         let (root, storage) = publishing_dependency_with(
             "navigation",
-            r#"tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#,
+            r#"Tasks.addClasspath(Tasks.projectJar("vendor/lib.jar"));"#,
             &[("dep/vendor/lib.jar", &classes)],
         );
 
@@ -2460,11 +2542,10 @@ fn only_the_unbacked_root_of_a_multi_root_publication_is_diagnosed() {
         let (root, storage) = publishing_dependency_with(
             "navigation",
             r#"
-                tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));
-                let extra = tasks.project_jar("vendor/library.jar");
-                let second = tasks.extract_java(extra, "org/vendor");
-                tasks.publish_tree("tool", second, "src/main/java/org/vendor", "replace-root",
-                                   "navigation");
+                Tasks.addClasspath(Tasks.projectJar("vendor/lib.jar"));
+                int extra = Tasks.projectJar("vendor/library.jar");
+                int second = Tasks.extractJava(extra, "org/vendor");
+                Tasks.publishTree("tool", second, "src/main/java/org/vendor", "navigation");
             "#,
             &[
                 ("dep/vendor/lib.jar", &classes),
@@ -2493,11 +2574,12 @@ fn two_publications_sharing_a_package_tree_are_covered_together() {
             "net/example/deep/Deep.java",
             b"package net.example.deep; class Deep {}",
         )]);
+        // `deepTree` rather than `tree`: the appended statements land in the same `main` the
+        // fixture's own `tree` local is declared in, and Java has no shadowing in one scope.
         let extra = r#"
-            let nested = tasks.project_jar("vendor/deep.jar");
-            let tree = tasks.extract_java(nested, "net/example/deep");
-            tasks.publish_tree("deep", tree, "src/main/java/net/example/deep", "replace-root",
-                               "navigation");
+            int nested = Tasks.projectJar("vendor/deep.jar");
+            int deepTree = Tasks.extractJava(nested, "net/example/deep");
+            Tasks.publishTree("deep", deepTree, "src/main/java/net/example/deep", "navigation");
         "#;
 
         let (root, storage) =
@@ -2518,7 +2600,7 @@ fn two_publications_sharing_a_package_tree_are_covered_together() {
             "navigation",
             &format!(
                 r#"{extra}
-                   tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#
+                   Tasks.addClasspath(Tasks.projectJar("vendor/lib.jar"));"#
             ),
             &[
                 ("dep/vendor/deep.jar", &deep),
@@ -2541,7 +2623,7 @@ fn a_publishing_dependency_with_dependencies_still_reports_and_says_what_it_coul
             &[
                 (
                     "dep/jals.toml",
-                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                    b"[build]\nscript = { type = \"java\", file = \"build.java\" }\n\
                       [dependencies]\nlib = { jar = \"vendor/lib.jar\" }\n",
                 ),
                 ("dep/vendor/lib.jar", &classes),
@@ -2563,15 +2645,14 @@ fn the_dependencies_caveat_belongs_to_the_report_and_not_to_each_root() {
         let (root, storage) = publishing_dependency_with(
             "navigation",
             r#"
-                let extra = tasks.project_jar("vendor/library.jar");
-                let second = tasks.extract_java(extra, "org/vendor");
-                tasks.publish_tree("tool", second, "src/main/java/org/vendor", "replace-root",
-                                   "navigation");
+                int extra = Tasks.projectJar("vendor/library.jar");
+                int second = Tasks.extractJava(extra, "org/vendor");
+                Tasks.publishTree("tool", second, "src/main/java/org/vendor", "navigation");
             "#,
             &[
                 (
                     "dep/jals.toml",
-                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                    b"[build]\nscript = { type = \"java\", file = \"build.java\" }\n\
                       [dependencies]\nlib = { jar = \"vendor/library.jar\" }\n",
                 ),
                 ("dep/vendor/library.jar", &library),
@@ -2615,10 +2696,9 @@ fn every_unread_classpath_entry_is_named_in_one_report() {
         let (root, storage) = publishing_dependency_with(
             "navigation",
             r#"
-                let extra = tasks.project_jar("vendor/library.jar");
-                let second = tasks.extract_java(extra, "org/vendor");
-                tasks.publish_tree("tool", second, "src/main/java/org/vendor", "replace-root",
-                                   "navigation");
+                int extra = Tasks.projectJar("vendor/library.jar");
+                int second = Tasks.extractJava(extra, "org/vendor");
+                Tasks.publishTree("tool", second, "src/main/java/org/vendor", "navigation");
             "#,
             &[
                 (
@@ -2680,9 +2760,15 @@ fn a_publication_at_a_source_root_is_rejected_before_the_check() {
         let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
         let (root, storage) = task_dependency(
             r#"
-                let archive = tasks.project_jar("vendor/sources.jar");
-                let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "src/main/java", "replace-root", "navigation");
+                import jals.build.Tasks;
+
+                class build {
+                    public static void main() {
+                        int archive = Tasks.projectJar("vendor/sources.jar");
+                        int tree = Tasks.extractJava(archive, "net/example");
+                        Tasks.publishTree("api", tree, "src/main/java", "navigation");
+                    }
+                }
             "#,
             &[("dep/vendor/sources.jar", &sources)],
         );
@@ -2713,12 +2799,18 @@ fn the_root_project_is_never_diagnosed() {
             CodeTree::new(
                 [
                     (
-                        "build.rhai",
+                        "build.java",
                         r#"
-                            let archive = tasks.project_jar("vendor/sources.jar");
-                            let tree = tasks.extract_java(archive, "net/example");
-                            tasks.publish_tree("api", tree, "src/main/java/net/example",
-                                               "replace-root", "navigation");
+                            import jals.build.Tasks;
+
+                            class build {
+                                public static void main() {
+                                    int archive = Tasks.projectJar("vendor/sources.jar");
+                                    int tree = Tasks.extractJava(archive, "net/example");
+                                    Tasks.publishTree("api", tree, "src/main/java/net/example",
+                                                      "navigation");
+                                }
+                            }
                         "#
                         .as_bytes()
                         .to_vec(),
@@ -2732,7 +2824,7 @@ fn the_root_project_is_never_diagnosed() {
             .unwrap(),
         );
         // The same publication a dependency would be diagnosed for, declared by the root itself.
-        let root = manifest("[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n");
+        let root = manifest("[build]\nscript = { type = \"java\", file = \"build.java\" }\n");
 
         assert!(publication_diagnoses(&root, &storage).await.is_empty());
     });

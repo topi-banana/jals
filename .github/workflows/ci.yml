@@ -488,13 +488,13 @@ jobs:
       # there is no configuration in which it stops being `no_std + alloc`.
       - run: cargo check -p jals-frontend
       - run: cargo check -p jals-project --all-features
-      - run: cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
-      # The `wasm-run` half of the same statement, and the one the browser rests on: the engine
-      # `jals run --invoke` reaches and the one a playground tab reaches are the same code, which
-      # holds only while it is portable on its own — `no_std + alloc`, no `native`. The playground
-      # build below compiles it for wasm32 too, but with `rhai` beside it, which is a different
-      # claim; and the feature is pinned to an unpublished revision, so it is the one here most
-      # likely to stop being portable without anybody editing this repository.
+      - run: cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
+      # The same statement's other half, and the one the browser rests on: the engine alone, the
+      # one `jals run --invoke` reaches, is portable without the script platform linked —
+      # `no_std + alloc`, no `native`. The playground build below compiles it for wasm32 too, but
+      # with `build-script` beside it, which is a different claim; and the feature is pinned to an
+      # unpublished revision, so it is the one here most likely to stop being portable without
+      # anybody editing this repository.
       - run: cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
       - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
@@ -515,7 +515,7 @@ jobs:
     #
     # - `features`: the selection the README's own command line uses. It is passed to `lint` as well
     #   as to `build`, because an unset selection is a different project: for `minecraft_mod` it is
-    #   rejected outright (its `build.rhai` requires a release to be named), and for the SDK it
+    #   rejected outright (its `build.java` requires a release to be named), and for the SDK it
     #   resolves to a *different* release from the one just built, whose artifacts no offline
     #   analysis could then find. Two cells may name the same `dir` with different selections; the
     #   `name` is what separates them, and `minecraft_mod` uses that below.
@@ -565,8 +565,8 @@ jobs:
             dir: examples/hello_world_native
             run: true
             invoke: --invoke greet
-          - name: rhai_build_script
-            dir: examples/rhai_build_script
+          - name: build_script
+            dir: examples/build_script
             run: true
           # `test: true` is what makes this cell check the claim its README makes: that
           # `jals test` finds the `#[test]` methods in both source trees and that all of them
@@ -807,7 +807,7 @@ jobs:
     #
     # The list is `examples/minecraft_mod/jals.toml`'s own, read out of the manifest rather than
     # written down again here. A 43-row copy in this file would be the copy that drifts — which is
-    # the argument the example's own `build.rhai` makes for holding no catalog — and the manifest is
+    # the argument the example's own `build.java` makes for holding no catalog — and the manifest is
     # where a release is added, so a new release gets a jar with no edit to this workflow at all.
     # The version features are the `[features]` keys that start with a digit; the thresholds
     # (`since-…`) and the SDK axes (`server`, `mixin`, …) do not, and `tomllib` is in the runner's
@@ -948,7 +948,7 @@ jobs:
     # The same two things `mod-jar-setup` produces, for the other end of the same claim. That job
     # checks all 43 releases *compile a mod*; this one checks all 43 compile the **harness** those
     # mods are tested with — and, because a build script's tasks execute, it is also what verifies
-    # every one of the 2287 library digests `examples/minecraft_client_test/build.rhai` pins.
+    # every one of the 2287 library digests `examples/minecraft_client_test/runtime.tsv` pins.
     #
     # A separate list from `mod-jar-setup`'s, read out of the harness's own manifest, because the
     # two projects declare their releases independently. They agree today; a cell that fails because
@@ -1005,7 +1005,7 @@ jobs:
           - uses: actions/checkout@v7
           # One JDK for all 43, for the reason `mod-jar` gives: `javac` compiles at any `--release`
           # it still supports and reads a newer classpath class without complaint. The harness's
-          # own `build.rhai` derives `--release` from the release's era, 8 through 21.
+          # own `build.java` derives `--release` from the release's era, 8 through 21.
           - name: Set up JDK (the harness compiles against the game's class files)
             uses: actions/setup-java@v6
             with:

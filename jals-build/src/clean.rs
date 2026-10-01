@@ -156,10 +156,10 @@ mod tests {
     #[test]
     fn validated_script_path_is_outside_every_clean_target() {
         let manifest: Manifest =
-            "[build]\nscript = { type = \"rhai\", file = \"scripts/build.rhai\" }\n"
+            "[build]\nscript = { type = \"java\", file = \"scripts/build.java\" }\n"
                 .parse()
                 .unwrap();
-        let script = FileKey::parse("scripts/build.rhai").unwrap();
+        let script = FileKey::parse("scripts/build.java").unwrap();
 
         assert!(
             CleanTargets::keys(&manifest)

@@ -1,0 +1,9 @@
+[package]
+name = "build_script"
+version = "0.1.0"
+
+[build]
+script = { type = "java", file = "build.java" }
+
+[run]
+main-class = "Main"

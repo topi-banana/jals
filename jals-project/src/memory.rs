@@ -400,11 +400,20 @@ mod tests {
             let root_view = view(&[
                 (
                     "deps/parent/jals.toml",
-                    b"[build]\nsource-dirs = [\"src\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n[dependencies]\nchild = { path = \"../child\" }\n",
+                    b"[build]\nsource-dirs = [\"src\"]\nscript = { type = \"java\", file = \"build.java\" }\n[dependencies]\nchild = { path = \"../child\" }\n",
                 ),
                 (
-                    "deps/parent/build.rhai",
-                    br#"let source = output.write_text("Generated.java", "class Generated {}"); build.add_source(source);"#,
+                    "deps/parent/build.java",
+                    br#"import jals.build.Build;
+import jals.build.Output;
+
+class build {
+    public static void main() {
+        String source = Output.writeText("Generated.java", "class Generated {}");
+        Build.addSource(source);
+    }
+}
+"#,
                 ),
                 ("deps/parent/src/Parent.java", b"class Parent {}"),
                 (
@@ -567,34 +576,56 @@ mod tests {
             let root_view = view(&[
                 (
                     "empty/jals.toml",
-                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                    b"[build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
                 (
-                    "empty/build.rhai",
+                    "empty/build.java",
                     br#"
-                        if build.env("OUT_DIR") != "target/jals/build/rhai/out"
-                            || build.env("JALS_MANIFEST_DIR") != "."
-                            || build.env("JALS_PACKAGE_NAME") != ()
-                            || build.env("JALS_PACKAGE_VERSION") != ()
-                            || build.env("HOST_VALUE") != "kept" {
-                            build.error("empty package environment was not derived locally");
+                        import jals.build.Build;
+
+                        class build {
+                            public static void main() {
+                                String out = Build.env("OUT_DIR");
+                                String manifest = Build.env("JALS_MANIFEST_DIR");
+                                String name = Build.env("JALS_PACKAGE_NAME");
+                                String version = Build.env("JALS_PACKAGE_VERSION");
+                                String host = Build.env("HOST_VALUE");
+                                if (out == null || !out.equals("target/jals/build/script/out")
+                                    || manifest == null || !manifest.equals(".")
+                                    || name != null
+                                    || version != null
+                                    || host == null || !host.equals("kept")) {
+                                    Build.error("empty package environment was not derived locally");
+                                }
+                            }
                         }
                     "#,
                 ),
                 (
                     "meta/jals.toml",
                     b"[package]\nname = \"dependency\"\nversion = \"1.2.3\"\n\
-                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                      [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
                 (
-                    "meta/build.rhai",
+                    "meta/build.java",
                     br#"
-                        if build.env("OUT_DIR") != "target/jals/build/rhai/out"
-                            || build.env("JALS_MANIFEST_DIR") != "."
-                            || build.env("JALS_PACKAGE_NAME") != "dependency"
-                            || build.env("JALS_PACKAGE_VERSION") != "1.2.3"
-                            || build.env("HOST_VALUE") != "kept" {
-                            build.error("package environment was not derived locally");
+                        import jals.build.Build;
+
+                        class build {
+                            public static void main() {
+                                String out = Build.env("OUT_DIR");
+                                String manifest = Build.env("JALS_MANIFEST_DIR");
+                                String name = Build.env("JALS_PACKAGE_NAME");
+                                String version = Build.env("JALS_PACKAGE_VERSION");
+                                String host = Build.env("HOST_VALUE");
+                                if (out == null || !out.equals("target/jals/build/script/out")
+                                    || manifest == null || !manifest.equals(".")
+                                    || name == null || !name.equals("dependency")
+                                    || version == null || !version.equals("1.2.3")
+                                    || host == null || !host.equals("kept")) {
+                                    Build.error("package environment was not derived locally");
+                                }
+                            }
                         }
                     "#,
                 ),
@@ -630,14 +661,21 @@ mod tests {
             let root_view = view(&[
                 (
                     "dep/jals.toml",
-                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                    b"[build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
                 (
-                    "dep/build.rhai",
+                    "dep/build.java",
                     br#"
-                        let source = output.write_text("Generated.java", "class Generated {}");
-                        build.add_source(source);
-                        build.warning("script completed");
+                        import jals.build.Build;
+                        import jals.build.Output;
+
+                        class build {
+                            public static void main() {
+                                String source = Output.writeText("Generated.java", "class Generated {}");
+                                Build.addSource(source);
+                                Build.warning("script completed");
+                            }
+                        }
                     "#,
                 ),
             ]);
@@ -780,18 +818,26 @@ mod tests {
         });
     }
 
-    /// A dependency `build.rhai` that registers one source per feature it is asked about, so the
+    /// A dependency `build.java` that registers one source per feature it is asked about, so the
     /// generated file names spell out the exact set the script saw.
     const FEATURE_PROBE: &[u8] = br#"
-        for name in ["hello", "world", "root-only", "a", "b", "ok", "soft", "vulkan", "spirv"] {
-            if build.feature(name) {
-                let source = output.write_text(name + ".java", "class X {}");
-                build.add_source(source);
+        import jals.build.Build;
+        import jals.build.Output;
+
+        class build {
+            public static void main() {
+                String[] names = { "hello", "world", "root-only", "a", "b", "ok", "soft", "vulkan", "spirv" };
+                for (String name : names) {
+                    if (Build.feature(name)) {
+                        String source = Output.writeText(name + ".java", "class X {}");
+                        Build.addSource(source);
+                    }
+                }
             }
         }
     "#;
 
-    const PROBE_MANIFEST: &[u8] = b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    const PROBE_MANIFEST: &[u8] = b"[build]\nscript = { type = \"java\", file = \"build.java\" }\n";
 
     /// The basenames the graph's dependency scripts generated, sorted.
     fn generated(graph: &PreprocessedProjectGraph) -> Vec<String> {
@@ -861,9 +907,9 @@ mod tests {
                 (
                     "dep/jals.toml",
                     b"[features]\nhello = []\n\
-                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                      [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
             ]);
             let environment = BuildScriptEnvironment::new()
                 .with_features(BTreeSet::from(["root-only".to_owned()]));
@@ -884,9 +930,9 @@ mod tests {
                 (
                     "dep/jals.toml",
                     b"[features]\ndefault = [\"a\"]\na = []\nb = []\nhello = [\"b\"]\n\
-                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                      [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
             ]);
             let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
             assert_eq!(generated(&graph), ["a.java", "b.java", "hello.java"]);
@@ -906,9 +952,9 @@ mod tests {
                 (
                     "dep/jals.toml",
                     b"[features]\ndefault = [\"a\"]\na = []\nb = []\nhello = [\"b\"]\n\
-                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                      [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
             ]);
             let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
             assert_eq!(generated(&graph), ["b.java", "hello.java"]);
@@ -930,9 +976,9 @@ mod tests {
                 (
                     "dep/jals.toml",
                     b"[features]\ndefault = [\"a\"]\na = []\n\
-                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                      [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
                 (
                     "mid/jals.toml",
                     b"[dependencies]\nshared = { path = \"../dep\" }\n",
@@ -954,7 +1000,7 @@ mod tests {
             );
             let root_view = view(&[
                 ("dep/jals.toml", PROBE_MANIFEST),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
             ]);
             let selected =
                 preprocess_selecting(&root, &root_view, &BuildScriptEnvironment::new(), &["gpu"])
@@ -981,11 +1027,11 @@ mod tests {
                     "mid/jals.toml",
                     b"[features]\nvulkan = [\"sub/spirv\"]\n\
                       [dependencies]\nsub = { path = \"../sub\" }\n\
-                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                      [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
-                ("mid/build.rhai", FEATURE_PROBE),
+                ("mid/build.java", FEATURE_PROBE),
                 ("sub/jals.toml", PROBE_MANIFEST),
-                ("sub/build.rhai", FEATURE_PROBE),
+                ("sub/build.java", FEATURE_PROBE),
             ]);
             let graph = preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
             assert_eq!(generated(&graph), ["spirv.java", "vulkan.java"]);
@@ -1006,9 +1052,9 @@ mod tests {
                 (
                     "dep/jals.toml",
                     b"[features]\nhello = []\nworld = []\n\
-                      [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+                      [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
                 ),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
                 (
                     "mid/jals.toml",
                     b"[dependencies]\nshared = { path = \"../dep\", features = [\"world\"] }\n",
@@ -1096,7 +1142,7 @@ mod tests {
                     b"[dependencies]\ndep = { path = \"../dep\", features = [\"default\"] }\n",
                 ),
                 ("dep/jals.toml", PROBE_MANIFEST),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
             ]);
             let error = MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
                 .await
@@ -1129,7 +1175,7 @@ mod tests {
             );
             let root_view = view(&[
                 ("dep/jals.toml", PROBE_MANIFEST),
-                ("dep/build.rhai", FEATURE_PROBE),
+                ("dep/build.java", FEATURE_PROBE),
                 ("libs/x.jar", b"not really a jar"),
             ]);
             let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)

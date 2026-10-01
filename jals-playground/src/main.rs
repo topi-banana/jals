@@ -1,13 +1,13 @@
 //! `jals-playground`: a browser playground for the `jals` formatter and workspace, built on the
 //! Monaco Editor.
 //!
-//! A sidebar on the left holds editable `jals.toml`, `jalsfmt.toml`, and `build.rhai` files over an
+//! A sidebar on the left holds editable `jals.toml`, `jalsfmt.toml`, and `build.java` files over an
 //! in-memory workspace of Java files; pick one to edit it in the center pane — a Monaco editor with
 //! Java syntax highlighting. Diagnostics (syntax errors, lint findings, cross-file type mismatches
 //! and unresolved types) are recomputed as you type and shown inline as Monaco markers. Editing
 //! `jalsfmt.toml` updates the `jals-fmt` [`Config`] used by the top-right *Format* button (and
 //! Monaco's *Format Document* action, which rewrite the buffer in place), and editing `jals.toml`
-//! runs its Rhai build script and re-resolves its `[dependencies]` (downloaded through the header's
+//! runs its Java build script and re-resolves its `[dependencies]` (downloaded through the header's
 //! CORS proxy). Generated Java is indexed immediately. The right pane has two tabs: *Syntax tree*
 //! dumps the lossless CST, and *Build output* reports what the top-right *Build* button produced —
 //! the whole workspace compiled in-process by `jals-javac` into a downloadable `.jar` or a

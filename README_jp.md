@@ -11,7 +11,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 コンパイル済み classpath や `[dependencies]`（明示的なローカル/リモート jar、および transitive な
 `git`/`path` JALS source project。jar に source が無ければ逆コンパイルして読める Java を生成）から型を
 解決することもできます。これらと並んで、`jals.toml` マニフェストから JDK の `javac` / `java` を
-ラップし、コンパイル前に sandbox 化された Rhai build script も実行できる Cargo 風のビルド
+ラップし、コンパイル前に sandbox 化された `build.java` も実行できる Cargo 風のビルド
 フロントエンド（`jals build` / `run` / `test` / `clean` / `init`）も備えています。
 
 > The English README is available at [README.md](README.md).
@@ -37,7 +37,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
   しません。`[toolchain] runtime = "wasm"` を選ぶと、同じテストを `jals` に組み込まれたエンジン上で
   WebAssembly export として実行します——どの段階でも JDK は要りません。
 - **Cargo 風の Java ビルド。** `Cargo.toml` の Java 版にあたる `jals.toml` マニフェストが
-  `jals build` / `run` / `test` / `clean` / `init` を駆動します。任意の Rhai script は `javac` より先に、
+  `jals build` / `run` / `test` / `clean` / `init` を駆動します。任意の `build.java` は `javac` より先に、
   制限付きの storage-only API だけを使って source を生成し、flag・classpath・environment を追加します。
 - **transitive な source-project graph。** `git`/`path` 依存自体を JALS project にできます。stable な
   node identity で diamond を重複排除し、一意な各 node を dependency-first で preprocess してから、
@@ -46,7 +46,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
   （`jals-editor` / `jals-syntax` / `jals-fmt` / `jals-lint` / `jals-hir` / `jals-classfile` /
   `jals-decompile` / `jals-javac` / `jals-storage` / `jals-config`）は `no_std` で
   `wasm32-unknown-unknown` 向けにビルドでき、`jals-classpath` の解決コア、`jals-project` の
-  in-memory graph、`jals-build` の Rhai runner も同様です（ホスト I/O は `native` feature の背後に
+  in-memory graph、`jals-build` の build-script runner も同様です（ホスト I/O は `native` feature の背後に
   あります）。これによりブラウザ playground は同じ解析・project-graph・build-script stack を
   クライアント側だけで動かせます。
 
@@ -69,11 +69,11 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 | [`jals-exec`](jals-exec)             | native・browser・inline host 共通の current-thread 実行コンテキスト。確定的な worker fan-out と runtime に依存しない協調 yield を提供します。                                                                                                                                                                                                                   |
 | [`jals-storage`](jals-storage)       | revision付きの確定的なproject storage。portable codeは検証済み`FileKey`/`DirKey`、不変`CodeTree` snapshot、transaction、overlay、SHA-256検証付きartifact cacheを使い、memory/native adapterが同じsealed contractを実装します。                                                                                                                                  |
 | [`jals-project`](jals-project)       | stable な node identity を持つ transitive path/Git/JAR project graph を探索し、選択 root 直下の正確な `jals.toml` だけを probe し、resolved から preprocessed への phase transition を必須にして、dependency input を node-scoped な検証済み artifact としてのみ `jals-classpath` へ公開します。portable in-memory host と native acquisition host を含みます。 |
-| [`jals-build`](jals-build)           | Cargo 風のビルドオーケストレータ。`jals.toml` を `javac`/`java` の計画・clean key・プロジェクト雛形へ変換し、任意の Rhai pre-build script を revision 付き project storage 上で実行します。`jals build`/`run`/`test`/`clean`/`init` と LSP/playground の build phase を支えます。                                                                                      |
+| [`jals-build`](jals-build)           | Cargo 風のビルドオーケストレータ。`jals.toml` を `javac`/`java` の計画・clean key・プロジェクト雛形へ変換し、任意の Java pre-build script を revision 付き project storage 上で実行します。`jals build`/`run`/`test`/`clean`/`init` と LSP/playground の build phase を支えます。                                                                                      |
 | [`jals-lsp`](jals-lsp)               | Language Server Protocol サーバ（`jals lsp` サブコマンド）。同じ CST とセマンティック層から診断・ドキュメントシンボル・整形・hover・定義へのジャンプ・参照検索などを提供。ホスト専用。                                                                                                                                                                          |
 | [`jals-progress`](jals-progress)     | 実行中の作業を「データ」として表す語彙。portable な crate はここを通して事実だけを報告し、`--timings` はその台帳を自己完結した HTML ページとして描画する。描画そのものは持たない——事実がどう見えるかはホストが決める。 |
 | [`jals-cli`](jals-cli)               | `jals` コマンドラインバイナリ。端末はここが所有する: 出力は単一の `Shell` を必ず通り、cargo 風の表示がイベント列をステータス行とプログレスバーに変える。                                                                                                                                                                                                                                                                                                                                 |
-| [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、構文/format/解析/Rhai build-script の各層をブラウザ上だけで動かします。                                                                                                                                                                    |
+| [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、構文/format/解析/Java build-script の各層をブラウザ上だけで動かします。                                                                                                                                                                    |
 | [`jinja`](crates/jinja)              | [minijinja](https://docs.rs/minijinja) と同形の API を持つ汎用 Jinja2 テンプレートエンジン。依存ゼロで `jals` の型を一切名指ししません。`jals-project` が `[build.resources] template` の描画に使います。プロダクト crate では唯一の非 `jals-*` crate であり、`crates/` という置き場所がそれを表しています。                                                          |
 
 残り 2 つのワークスペースメンバーは開発専用のツールで、製品には含まれません:
@@ -383,7 +383,7 @@ release = 21                        # javac --release N
 # source-dirs = ["src/main/java"]   # -sourcepath のルート。.java 探索の対象でもある
 # classes-dir = "target/classes"    # javac -d
 # classpath   = ["libs/guava.jar"]  # -classpath エントリ
-# script = { type = "rhai", file = "build.rhai" }
+# script = { type = "java", file = "build.java" }
 
 [run]
 main-class = "com.example.Main"     # `jals run` のエントリポイント
@@ -392,23 +392,23 @@ main-class = "com.example.Main"     # `jals run` のエントリポイント
 # source project は transitive に探索され、`dir` で monorepo 内の project を選択する
 shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
-# `features` はその dependency 自身の build.rhai で有効になる build feature（Cargo と同じ）。
+# `features` はその dependency 自身の build.java で有効になる build feature（Cargo と同じ）。
 # `default-features = false` でその dependency 自身の `default` リストを適用しない
 render = { path = "../render", features = ["vulkan"], default-features = false }
 ```
 
-`script` を設定すると、`build.rhai` は source 探索と `javac` より先に実行されます。project snapshot と
-選択された `[features]` を読み、通常の生成物を `target/jals/build/rhai/out` 以下へ書き、
+`script` を設定すると、`build.java` は source 探索と `javac` より先に実行されます。project snapshot と
+選択された `[features]` を読み、通常の生成物を `target/jals/build/script/out` 以下へ書き、
 生成 source・classpath entry・`javac`/JVM
-flag・compile/run environment entry を追加できます。さらに型付き `tasks` DAG で、size/digest 検証付き
+flag・compile/run environment entry を追加できます。さらに型付き `Tasks` の語彙で、size/digest 検証付き
 download、JSON projection、安全な sources JAR 展開、mappings による jar remap（Mojang/ProGuard・tiny v2）、jar merge、
 compile 向け decompile、排他的な物理 source tree の publish を宣言できます。
-Rhai は task 結果を読めず process も起動しません。`replace-root` は宣言した destination 以下を全置換し、
+script は task 結果を読めず process も起動しません。publish は宣言した destination 以下を全置換し、
 通常出力と同じ transaction で publish されます。native CLI と LSP は task を実行し、LSP は destination
 内に open document があれば延期します。browser は物理 publish を fetch 前に拒否します。完全な API、fingerprint/cache、
 sandbox limit、Rust の `BuildScript` model は
-[`jals-build` の Rhai reference](jals-build/README.md#rhai-build-scripts)を、実行可能な例は
-[`examples/rhai_build_script`](examples/rhai_build_script)を参照してください。
+[`jals-build` の Java reference](jals-build/README.md#java-build-scripts)を、実行可能な例は
+[`examples/build_script`](examples/build_script)を参照してください。
 source archive task の形は [`examples/task_source_archive`](examples/task_source_archive)、
 remap 済み Minecraft の例は [`examples/minecraft`](examples/minecraft)
 にあります。その上に Mixin mod を組み立てる例が
@@ -423,7 +423,7 @@ client を起動して assert します。しかも同じ 43 リリースのい�
 入りません。この harness が各リリースの runtime jar 約 60 本を pin し、client API 用の threshold
 chain を自前で持つため、mod 側の test はリリース名を一切書きません。
 
-root Rhai phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess
+root build-script phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess
 environment directive は、後続の明示的な `jals build` / `run` による JDK process へ意図的に反映され
 ます。信頼していない checkout をビルドする前に、project code と同様に root build script を確認して
 ください。
@@ -443,9 +443,9 @@ dependency cycle がある場合、`jals build`/`run` は hard failure になり
 
 graph node は stable identity を持つため、dependency 名が異なる diamond でも一度だけ visit されます。
 一意な各 node は dependency-first 順に、無条件かつちょうど一度 preprocess transition を通ります。
-binary node と legacy-source node では no-op、manifest-backed node では任意の Rhai script を実行します。
-dependency script が export するのは `build.add_source` で登録した source と
-`build.add_classpath` で登録した classpath だけです。`javac`/JVM argument、compile/run environment、
+binary node と legacy-source node では no-op、manifest-backed node では任意の build script を実行します。
+dependency script が export するのは `Build.addSource` で登録した source と
+`Build.addClasspath` で登録した classpath だけです。`javac`/JVM argument、compile/run environment、
 metadata は node-local のままで伝播しません。output・classpath entry・source snapshot は node identity
 の下へ digest 検証済み artifact として publish され、dependency source tree は変更されません。root
 script は、process argument/environment と revision-check 付き root output 更新を含む従来の完全な
@@ -573,7 +573,7 @@ public class Foo {
 ## Playground
 
 `jals-playground` は小さなブラウザアプリ（[Yew](https://yew.rs) 製、[Trunk](https://trunkrs.dev)
-でビルド・配信）で、`wasm32` にコンパイルした構文・format・解析・sandbox 化された Rhai build-script
+でビルド・配信）で、`wasm32` にコンパイルした構文・format・解析・sandbox 化された Java build-script
 の各層を、サーバを介さずブラウザ上だけで動かします。生成 Java source・remote jar・`jals.toml` の
 portable な in-memory path-project graph もブラウザ内で解決するため、hover / 補完 / 型検査がそれらを
 認識できます。browser は Git dependency を clone できず、Git support を提供すると見なさず各 entry
@@ -704,8 +704,8 @@ cargo build --release --target wasm32-unknown-unknown \
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
 # portable in-memory project graph は dependency-script preparation と artifact projection を含む
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
-# Rhai feature はホスト I/O を持たず wasm 対応で、browser host も同じ engine をビルドする
-cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+# build-script feature はホスト I/O を持たず wasm 対応で、browser host も同じ engine をビルドする
+cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
@@ -737,7 +737,7 @@ free function はできる限り避けます。associated function は親とな�
 - `jals-editor` / `jals-syntax` / `jals-fmt` / `jals-lint` / `jals-hir` / `jals-classfile` /
   `jals-decompile` / `jals-javac` / `jals-storage` / `jals-config` は `no_std` crate として
   `wasm32-unknown-unknown` 向けにビルドできる。
-  `jals-classpath` の解決コア（`--no-default-features`）と、portable な `rhai` feature を有効にした
+  `jals-classpath` の解決コア（`--no-default-features`）と、portable な `build-script` feature を有効にした
   `jals-build`、`jals-project` の in-memory graph も `wasm32` 向けにビルドできる。
 
 ## ステータス

@@ -63,7 +63,7 @@ pub const SAMPLE_FILES: &[(&str, &str)] = &[
 ];
 
 pub const MANIFEST_PATH: &str = "jals.toml";
-pub const BUILD_SCRIPT_PATH: &str = "build.rhai";
+pub const BUILD_SCRIPT_PATH: &str = "build.java";
 
 /// The shared editor core driven through the [`MonacoHost`], plus the path of the active file.
 ///
@@ -73,7 +73,7 @@ pub struct Workspace {
     editor: Editor<MemorySource, MemoryCache, MonacoHost>,
     /// Path of the active file — a key into the core's tree, and the editor's backing store.
     active: FileKey,
-    /// Aggregate-local knowledge of files published by earlier Rhai executions.
+    /// Aggregate-local knowledge of files published by earlier build-script executions.
     build_script_session: BuildScriptSession,
     /// Configured script path whose editor buffer is currently staged as an overlay.
     staged_script: Option<FileKey>,
@@ -155,7 +155,7 @@ impl Workspace {
         workspace.set_classpath(classpath).await;
     }
 
-    /// Stage the live manifest and Rhai buffers into this workspace's own aggregate, execute the
+    /// Stage the live manifest and Java buffers into this workspace's own aggregate, execute the
     /// configured script there, then reload project Java files so generated sources join analysis.
     /// Existing Java overlays remain in storage and therefore survive the reload.
     /// [`run_build_script_with_proxy`](Self::run_build_script_with_proxy) with no CORS proxy.
@@ -190,7 +190,7 @@ impl Workspace {
     ) -> Result<ProjectScript, RootBuildScriptError> {
         let manifest_key = FileKey::parse(MANIFEST_PATH).expect("manifest pseudo-path is valid");
         let configured_script = match manifest.build.script.as_ref() {
-            Some(BuildScript::Rhai { file }) => {
+            Some(BuildScript::Java { file }) => {
                 Some(
                     FileKey::parse(file).map_err(|error| BuildScriptError::InvalidScriptPath {
                         path: file.clone(),
@@ -202,7 +202,7 @@ impl Workspace {
         };
         // The script is staged as a storage overlay, and an overlay unconditionally shadows the
         // base file. Pointing `script.file` at an indexed source (or at `jals.toml` itself) would
-        // therefore replace that file's contents with the Rhai editor buffer, and `sync_models`
+        // therefore replace that file's contents with the Java editor buffer, and `sync_models`
         // would then push the replacement into the user's Monaco model — losing their code.
         if let Some(script) = &configured_script
             && (script == &manifest_key || self.file_keys().any(|indexed| indexed == script))
@@ -444,7 +444,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use jals_build::build_script::RHAI_OUTPUT_ROOT;
+    use jals_build::build_script::BUILD_SCRIPT_OUTPUT_ROOT;
     use jals_editor::CompletionKind;
     use jals_exec::block_on_inline;
 
@@ -452,10 +452,10 @@ mod tests {
 
     use super::*;
 
-    const BUILD_MANIFEST: &str = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    const BUILD_MANIFEST: &str = "[build]\nscript = { type = \"java\", file = \"build.java\" }\n";
 
     fn alloc_manifest(script: &str) -> String {
-        format!("[build]\nscript = {{ type = \"rhai\", file = \"{script}\" }}\n")
+        format!("[build]\nscript = {{ type = \"java\", file = \"{script}\" }}\n")
     }
 
     fn build_manifest() -> Manifest {
@@ -463,7 +463,8 @@ mod tests {
     }
 
     fn output_key(path: &str) -> FileKey {
-        FileKey::parse(&format!("{RHAI_OUTPUT_ROOT}/{path}")).expect("test output path is valid")
+        FileKey::parse(&format!("{BUILD_SCRIPT_OUTPUT_ROOT}/{path}"))
+            .expect("test output path is valid")
     }
 
     #[test]
@@ -523,16 +524,23 @@ mod tests {
                     &build_manifest(),
                     BUILD_MANIFEST,
                     r#"
-                        let source = output.write_text(
-                            "com/example/Generated.java",
-                            "package com.example; public class Generated {}\n"
-                        );
-                        output.write_text(
-                            "com/example/Unregistered.java",
-                            "package com.example; public class Unregistered {}\n"
-                        );
-                        build.add_source(source);
-                    "#,
+                    import jals.build.Build;
+                    import jals.build.Output;
+
+                    class build {
+                        public static void main() {
+                            String source = Output.writeText(
+                                "com/example/Generated.java",
+                                "package com.example; public class Generated {}\n"
+                            );
+                            Output.writeText(
+                                "com/example/Unregistered.java",
+                                "package com.example; public class Unregistered {}\n"
+                            );
+                            Build.addSource(source);
+                        }
+                    }
+                "#,
                 )
                 .await
                 .expect("build script succeeds")
@@ -580,37 +588,55 @@ mod tests {
     fn build_script_environment_matches_host_project_metadata() {
         block_on_inline(async {
             let manifest_text = "[package]\nname = \"playground\"\nversion = \"1.2.3\"\n\
-                                 [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+                                 [build]\nscript = { type = \"java\", file = \"build.java\" }\n";
             let manifest: Manifest = manifest_text.parse().expect("test manifest is valid");
             let mut ws = Workspace::new().await;
             ws.run_build_script(
                 &manifest,
                 manifest_text,
                 r#"
-                    if build.env("OUT_DIR") != "target/jals/build/rhai/out" {
-                        throw "bad OUT_DIR";
-                    }
-                    if build.env("JALS_MANIFEST_DIR") != "." {
-                        throw "bad manifest directory";
-                    }
-                    if build.env("JALS_PACKAGE_NAME") != "playground" {
-                        throw "bad package name";
-                    }
-                    if build.env("JALS_PACKAGE_VERSION") != "1.2.3" {
-                        throw "bad package version";
+                    import jals.build.Build;
+
+                    class build {
+                        public static void main() {
+                            String outDir = Build.env("OUT_DIR");
+                            if (outDir == null || !outDir.equals("target/jals/build/script/out")) {
+                                throw new IllegalStateException("bad OUT_DIR");
+                            }
+                            String manifestDir = Build.env("JALS_MANIFEST_DIR");
+                            if (manifestDir == null || !manifestDir.equals(".")) {
+                                throw new IllegalStateException("bad manifest directory");
+                            }
+                            String packageName = Build.env("JALS_PACKAGE_NAME");
+                            if (packageName == null || !packageName.equals("playground")) {
+                                throw new IllegalStateException("bad package name");
+                            }
+                            String packageVersion = Build.env("JALS_PACKAGE_VERSION");
+                            if (packageVersion == null || !packageVersion.equals("1.2.3")) {
+                                throw new IllegalStateException("bad package version");
+                            }
+                        }
                     }
                 "#,
             )
             .await
-            .expect("host-parity environment is visible to Rhai");
+            .expect("host-parity environment is visible to a Java build script");
 
             ws.run_build_script(
                 &build_manifest(),
                 BUILD_MANIFEST,
                 r#"
-                    if build.env("JALS_PACKAGE_NAME") != () ||
-                       build.env("JALS_PACKAGE_VERSION") != () {
-                        throw "optional package metadata must be absent";
+                    import jals.build.Build;
+
+                    class build {
+                        public static void main() {
+                            if (Build.env("JALS_PACKAGE_NAME") != null
+                                || Build.env("JALS_PACKAGE_VERSION") != null) {
+                                throw new IllegalStateException(
+                                    "optional package metadata must be absent"
+                                );
+                            }
+                        }
                     }
                 "#,
             )
@@ -628,7 +654,15 @@ mod tests {
             ws.run_build_script(
                 &build_manifest(),
                 BUILD_MANIFEST,
-                r#"output.write_text("Stable.java", "class Stable {}\n");"#,
+                r#"
+                    import jals.build.Output;
+
+                    class build {
+                        public static void main() {
+                            Output.writeText("Stable.java", "class Stable {}\n");
+                        }
+                    }
+                "#,
             )
             .await
             .expect("initial build succeeds");
@@ -638,9 +672,15 @@ mod tests {
                     &build_manifest(),
                     BUILD_MANIFEST,
                     r#"
-                        output.write_text("Stable.java", "class Changed {}\n");
-                        output.write_text("Partial.java", "class Partial {}\n");
-                        throw "stop";
+                        import jals.build.Output;
+
+                        class build {
+                            public static void main() {
+                                Output.writeText("Stable.java", "class Changed {}\n");
+                                Output.writeText("Partial.java", "class Partial {}\n");
+                                throw new IllegalStateException("stop");
+                            }
+                        }
                     "#,
                 )
                 .await;
@@ -664,19 +704,24 @@ mod tests {
                     &build_manifest(),
                     BUILD_MANIFEST,
                     r#"
-                        let jar = tasks.fetch_jar(
-                            tasks.https_url("https://example.invalid/sources.jar"),
-                            tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-                            tasks.bytes(1024)
-                        );
-                        let sources = tasks.extract_java(jar, "net/example");
-                        tasks.publish_tree(
-                            "sources",
-                            sources,
-                            "src/main/java/net/example",
-                            "replace-root",
-                            "navigation"
-                        );
+                        import jals.build.Tasks;
+
+                        class build {
+                            public static void main() {
+                                int jar = Tasks.fetchJar(
+                                    Tasks.httpsUrl("https://example.invalid/sources.jar"),
+                                    Tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                                    Tasks.bytes(1024)
+                                );
+                                int sources = Tasks.extractJava(jar, "net/example");
+                                Tasks.publishTree(
+                                    "sources",
+                                    sources,
+                                    "src/main/java/net/example",
+                                    "navigation"
+                                );
+                            }
+                        }
                     "#,
                 )
                 .await
@@ -710,10 +755,17 @@ mod tests {
                 &build_manifest(),
                 BUILD_MANIFEST,
                 r#"
-                    let a = output.write_text("A.java", "class A { int oldValue; }\n");
-                    let b = output.write_text("B.java", "class B {}\n");
-                    build.add_source(a);
-                    build.add_source(b);
+                    import jals.build.Build;
+                    import jals.build.Output;
+
+                    class build {
+                        public static void main() {
+                            String a = Output.writeText("A.java", "class A { int oldValue; }\n");
+                            String b = Output.writeText("B.java", "class B {}\n");
+                            Build.addSource(a);
+                            Build.addSource(b);
+                        }
+                    }
                 "#,
             )
             .await
@@ -723,10 +775,17 @@ mod tests {
                 &build_manifest(),
                 BUILD_MANIFEST,
                 r#"
-                    let a = output.write_text("A.java", "class A { int newValue; }\n");
-                    let c = output.write_text("C.java", "class C {}\n");
-                    build.add_source(a);
-                    build.add_source(c);
+                    import jals.build.Build;
+                    import jals.build.Output;
+
+                    class build {
+                        public static void main() {
+                            String a = Output.writeText("A.java", "class A { int newValue; }\n");
+                            String c = Output.writeText("C.java", "class C {}\n");
+                            Build.addSource(a);
+                            Build.addSource(c);
+                        }
+                    }
                 "#,
             )
             .await
@@ -758,8 +817,18 @@ mod tests {
                 &build_manifest(),
                 BUILD_MANIFEST,
                 r#"
-                    let generated = output.write_text("Generated.java", "class Generated {}\n");
-                    build.add_source(generated);
+                    import jals.build.Build;
+                    import jals.build.Output;
+
+                    class build {
+                        public static void main() {
+                            String generated = Output.writeText(
+                                "Generated.java",
+                                "class Generated {}\n"
+                            );
+                            Build.addSource(generated);
+                        }
+                    }
                 "#,
             )
             .await
@@ -784,36 +853,45 @@ mod tests {
         block_on_inline(async {
             let mut ws = Workspace::new().await;
             let default_key = FileKey::parse(BUILD_SCRIPT_PATH).unwrap();
-            let custom_key = FileKey::parse("scripts/custom.rhai").unwrap();
+            let custom_key = FileKey::parse("scripts/custom.java").unwrap();
             let generated = output_key("Custom.java");
-            ws.run_build_script(&build_manifest(), BUILD_MANIFEST, "let first = 1;")
-                .await
-                .expect("fixed playground script path succeeds");
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                "class build { public static void main() {} }",
+            )
+            .await
+            .expect("fixed playground script path succeeds");
             let custom_text =
-                "[build]\nscript = { type = \"rhai\", file = \"scripts/custom.rhai\" }\n";
+                "[build]\nscript = { type = \"java\", file = \"scripts/custom.java\" }\n";
             let custom: Manifest = custom_text.parse().expect("custom manifest is valid");
+            let custom_script = r#"import jals.build.Output;
+
+class build {
+    public static void main() {
+        Output.writeText("Custom.java", "class Custom {}\n");
+    }
+}
+"#;
 
             let output = ws
-                .run_build_script(
-                    &custom,
-                    custom_text,
-                    r#"output.write_text("Custom.java", "class Custom {}\n");"#,
-                )
+                .run_build_script(&custom, custom_text, custom_script)
                 .await
                 .expect("the editor buffer executes at the custom path")
                 .expect("custom script is enabled");
 
             let view = ws.editor.workspace().view();
             assert!(view.file(&default_key).is_err());
-            assert_eq!(
-                view.file_text(&custom_key).unwrap(),
-                r#"output.write_text("Custom.java", "class Custom {}\n");"#
-            );
+            assert_eq!(view.file_text(&custom_key).unwrap(), custom_script);
             assert!(output.generated_files.contains(&generated));
             assert_eq!(ws.staged_script.as_ref(), Some(&custom_key));
 
             let error = ws
-                .run_build_script(&custom, custom_text, "let broken = ;")
+                .run_build_script(
+                    &custom,
+                    custom_text,
+                    "class build { public static void main() { int broken = \"text\"; } }",
+                )
                 .await
                 .expect_err("custom-path compile error is reported");
             let RootBuildScriptError::BuildScript(error) = &error else {
@@ -835,7 +913,7 @@ mod tests {
 
     /// The script buffer is staged as a storage overlay, and an overlay shadows the base file
     /// unconditionally. A `script.file` aimed at a real source would therefore replace that
-    /// source with the Rhai buffer, and the model sync would push the replacement into the user's
+    /// source with the Java buffer, and the model sync would push the replacement into the user's
     /// editor — silently destroying their code.
     #[test]
     fn a_script_path_may_not_collide_with_a_project_file() {
@@ -848,7 +926,11 @@ mod tests {
                 let text = alloc_manifest(path);
                 let manifest: Manifest = text.parse().expect("manifest parses");
                 let error = ws
-                    .run_build_script(&manifest, &text, "let x = 1;")
+                    .run_build_script(
+                        &manifest,
+                        &text,
+                        "class build { public static void main() { int x = 1; } }",
+                    )
                     .await
                     .expect_err("a colliding script path must be rejected");
                 assert!(matches!(
@@ -869,9 +951,13 @@ mod tests {
     fn staged_pseudo_files_are_not_indexed_or_listed_as_project_files() {
         block_on_inline(async {
             let mut ws = Workspace::new().await;
-            ws.run_build_script(&build_manifest(), BUILD_MANIFEST, "")
-                .await
-                .expect("empty script succeeds");
+            ws.run_build_script(
+                &build_manifest(),
+                BUILD_MANIFEST,
+                "class build { public static void main() {} }",
+            )
+            .await
+            .expect("script with no directives succeeds");
 
             let view = ws.editor.workspace().view();
             assert!(view.file(&FileKey::parse(MANIFEST_PATH).unwrap()).is_ok());
@@ -1175,7 +1261,17 @@ mod tests {
             ws.run_build_script(
                 &build_manifest(),
                 BUILD_MANIFEST,
-                r#"if project.exists(".jals") { throw "dependency source leaked"; }"#,
+                r#"
+                    import jals.build.Project;
+
+                    class build {
+                        public static void main() {
+                            if (Project.exists(".jals")) {
+                                throw new IllegalStateException("dependency source leaked");
+                            }
+                        }
+                    }
+                "#,
             )
             .await
             .expect("a later build script view excludes detached dependency sources");

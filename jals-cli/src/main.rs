@@ -1295,6 +1295,7 @@ impl RunArgs {
             // them. A project that declared none links an empty list, which is the ordinary run.
             libraries,
             foreign,
+            fuel: None,
             progress,
         };
         match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {
@@ -2038,7 +2039,7 @@ impl LintProject {
             DependencyScope::Test,
             jals_classpath::ProjectInputOptions::Analysis,
             // Lint analyses what is already on disk; opening a project to report diagnostics must
-            // not execute an unreviewed `build.rhai`.
+            // not execute an unreviewed `build.java`.
             RootScript::skipped(),
             &RootScriptInputs {
                 environment: &environment,
@@ -2845,7 +2846,7 @@ impl App {
     /// Only `JALS_`-prefixed host variables cross the boundary. The rest of the host environment
     /// stays out: a build script can forward anything it reads into a task fetch URL, so
     /// inheriting wholesale would expose every credential on the machine to an unreviewed
-    /// `build.rhai` — including a dependency's. See [`BuildScriptEnvironment::HOST_PREFIX`].
+    /// `build.java` — including a dependency's. See [`BuildScriptEnvironment::HOST_PREFIX`].
     ///
     /// Only the **root project's** own queryable half of `features` is installed here. A dependency
     /// node's script is given its own resolved set by the graph's preprocessing pass, from the
@@ -2862,7 +2863,7 @@ impl App {
         .for_project(manifest, features.features().clone())
     }
 
-    /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host
+    /// Execute the manifest's optional Java pre-build phase against a project snapshot. The host
     /// supplies environment values as plain data; scripts only read and publish through typed
     /// `jals-storage` keys.
     async fn run_build_script(
@@ -2885,14 +2886,14 @@ impl App {
         .await
         .context("opening project storage for the build script")?;
         let mut session = BuildScriptSession::new();
-        // The configured script's key and text, so a failure that carries a Rhai position can be
+        // The configured script's key and text, so a failure that carries a script position can be
         // pointed at the offending line rather than reported without a location.
         let script_key = manifest
             .build
             .script
             .as_ref()
             .and_then(|script| match script {
-                jals_config::BuildScript::Rhai { file } => FileKey::parse(file).ok(),
+                jals_config::BuildScript::Java { file } => FileKey::parse(file).ok(),
             });
         let script_text = script_key
             .as_ref()

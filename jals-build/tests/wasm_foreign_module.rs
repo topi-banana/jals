@@ -112,6 +112,7 @@ fn a_foreign_module_satisfies_a_native_declaration() {
             name: "core",
             bytes: &foreign_bytes,
         }],
+        fuel: None,
         progress: &jals_progress::Progress::SILENT,
     })
     .expect("the run links and executes");
@@ -134,6 +135,7 @@ fn without_the_module_the_import_is_unresolved() {
         natives: &jals_native::NativeBindings::new(),
         libraries: &[],
         foreign: &[],
+        fuel: None,
         progress: &jals_progress::Progress::SILENT,
     })
     .expect_err("the import nothing supplies");
@@ -224,6 +226,7 @@ fn a_foreign_module_can_import_from_an_earlier_one() {
                 bytes: &consumer_bytes,
             },
         ],
+        fuel: None,
         progress: &jals_progress::Progress::SILENT,
     })
     .expect("the run links and executes");
@@ -268,6 +271,7 @@ fn an_unresolved_import_is_reported_before_a_library_starts() {
             bytes: &library_bytes,
         }],
         foreign: &[],
+        fuel: None,
         progress: &jals_progress::Progress::SILENT,
     })
     .expect_err("the import nothing supplies");

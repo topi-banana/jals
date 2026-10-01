@@ -1,16 +1,13 @@
 //! Typed, declarative tasks recorded by a build script for later host execution.
 
-use alloc::boxed::Box;
-use alloc::format;
 use alloc::rc::Rc;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::fmt;
 
 use jals_storage::RelativePath;
-use rhai::{Array, Dynamic, Engine, EvalAltResult, INT, ImmutableString, Position};
 use serde::{Deserialize, Serialize};
 
 /// Limits for one declarative build-task graph.
@@ -38,6 +35,14 @@ pub struct TaskPlanLimits {
 pub struct TaskId(u32);
 
 impl TaskId {
+    /// The ID of the node at `index` — how an engine names a node a `Tasks` method already
+    /// recorded, since a plan is append-only and every input is a handle from an earlier call.
+    #[cfg(feature = "build-script")]
+    pub(crate) const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// The index this ID names in its plan.
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -348,24 +353,6 @@ pub enum TaskPublishIntent {
     Navigation,
 }
 
-impl TaskPublishIntent {
-    /// The intent a build script spelled, or `None` for anything else.
-    ///
-    /// Written out rather than derived from the serde representation because the two are
-    /// independent surfaces: the wire name is frozen by every cache record already written under
-    /// it, and the script keyword is frozen by every `build.rhai` in the wild.
-    ///
-    /// Private because the script keyword has exactly one reader — the Rhai binding below. A
-    /// consumer of a `TaskPlan` receives the parsed intent and never the word.
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "compile" => Some(Self::Compile),
-            "navigation" => Some(Self::Navigation),
-            _ => None,
-        }
-    }
-}
-
 /// A side effect requested from the host after all value nodes succeed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
@@ -624,6 +611,7 @@ pub enum TaskPlanError {
     InvalidJsonPath,
     InvalidPath,
     InvalidOwner,
+    Reentrant(&'static str),
 }
 
 impl fmt::Display for TaskPlanError {
@@ -656,46 +644,32 @@ impl fmt::Display for TaskPlanError {
             Self::InvalidJsonPath => f.write_str("build-task JSON path contains an empty segment"),
             Self::InvalidPath => f.write_str("build task contains an invalid portable path"),
             Self::InvalidOwner => f.write_str("build-task publication owner must not be empty"),
+            Self::Reentrant(what) => write!(f, "reentrant build-task {what}"),
         }
     }
 }
 
 impl core::error::Error for TaskPlanError {}
 
+/// One value node of the plan being recorded, as an engine holds it.
 #[derive(Debug, Clone, Copy)]
-struct TaskHandle {
+pub(crate) struct TaskHandle {
     id: TaskId,
 }
 
-macro_rules! handle {
-    ($name:ident) => {
-        #[derive(Debug, Clone, Copy)]
-        struct $name(TaskHandle);
-    };
+impl TaskHandle {
+    /// The node's index, which is the number a Java `Tasks` method answers with.
+    #[cfg(feature = "build-script")]
+    pub(crate) const fn index(self) -> u32 {
+        self.id.0
+    }
 }
-
-handle!(UrlTask);
-handle!(DigestTask);
-handle!(ByteCountTask);
-handle!(JsonTask);
-handle!(TextTask);
-handle!(JarTask);
-handle!(SourceTreeTask);
-
-/// A mapping grammar as a script value — the optional third argument of `tasks.remap_jar`.
-///
-/// Not a `handle!` type: every one of those names a node the plan will execute, and a format is not
-/// a step. It is a value rather than a pair of loose strings because a namespace pair means nothing
-/// without the format that names it — `tasks.tiny_v2("official", "named")` is the only way to write
-/// one, so a script cannot pair namespaces with a grammar that has none.
-#[derive(Debug, Clone)]
-struct MappingFormatValue(TaskMappingFormat);
 
 /// Running totals over a plan's nodes and terminals.
 ///
 /// Keeping these lets a builder validate one declaration at a time. Re-deriving them per
 /// declaration made recording a plan quadratic: with the default 4096-task limit, a script could
-/// spend minutes of CPU inside a native call that Rhai's operation counter never sees.
+/// spend minutes of CPU inside one host call, where no per-operation counter would see it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PlanCost {
     edges: usize,
@@ -735,7 +709,7 @@ impl PlanCost {
     }
 }
 
-/// Rhai-facing task graph builder. It records data only and never performs task effects.
+/// Task graph builder. It records data only and never performs task effects.
 #[derive(Clone)]
 pub(crate) struct TasksApi {
     plan: Rc<RefCell<TaskPlan>>,
@@ -753,43 +727,49 @@ impl TasksApi {
         }
     }
 
-    pub(crate) fn finish(self) -> Result<TaskPlan, TaskPlanError> {
-        let plan = Rc::try_unwrap(self.plan)
-            .map_err(|_| TaskPlanError::NonCanonicalNodeId)?
-            .into_inner();
+    /// Take the finished plan, checking it as a whole.
+    ///
+    /// Taken rather than unwrapped because the Java engine's bindings hold the builder for as long
+    /// as their module's package set lives — the run is over by the time this is called, and
+    /// taking the plan leaves an empty one nothing can extend.
+    pub(crate) fn finish(&self) -> Result<TaskPlan, TaskPlanError> {
+        let mut current = self
+            .plan
+            .try_borrow_mut()
+            .map_err(|_| TaskPlanError::Reentrant("completion"))?;
+        let plan = core::mem::replace(&mut *current, TaskPlan::new());
         plan.validate(self.limits)?;
         Ok(plan)
     }
 
-    fn push(&self, kind: TaskNodeKind) -> RhaiResult<TaskHandle> {
+    /// Record one value node, checked against its inputs and the running totals.
+    ///
+    /// A node may only reference nodes already in the plan, so the check is against the prefix
+    /// that exists and the totals start where the last declaration left them.
+    pub(crate) fn push(&self, kind: TaskNodeKind) -> Result<TaskHandle, TaskPlanError> {
         let mut plan = self
             .plan
             .try_borrow_mut()
-            .map_err(|_| Self::rhai_error("reentrant build-task declaration"))?;
+            .map_err(|_| TaskPlanError::Reentrant("declaration"))?;
         if plan.nodes.len() >= self.limits.max_tasks {
-            return Err(Self::rhai_error(
-                "build-task count exceeds its configured limit",
-            ));
+            return Err(TaskPlanError::Limit("count"));
         }
-        let id = TaskId(
-            u32::try_from(plan.nodes.len())
-                .map_err(|_| Self::rhai_error("build-task count cannot be represented"))?,
-        );
+        let id =
+            TaskId(u32::try_from(plan.nodes.len()).map_err(|_| TaskPlanError::Limit("count"))?);
         let index = plan.nodes.len();
         self.accept(plan.node_cost(index, &kind, self.limits))?;
         plan.nodes.push(TaskNode { id, kind });
         Ok(TaskHandle { id })
     }
 
-    fn terminal(&self, terminal: TaskTerminal) -> RhaiResult<()> {
+    /// Record one terminal — a classpath entry or a publication — the same way.
+    pub(crate) fn terminal(&self, terminal: TaskTerminal) -> Result<(), TaskPlanError> {
         let mut plan = self
             .plan
             .try_borrow_mut()
-            .map_err(|_| Self::rhai_error("reentrant build-task terminal declaration"))?;
+            .map_err(|_| TaskPlanError::Reentrant("terminal declaration"))?;
         if plan.terminals.len() >= self.limits.max_terminals {
-            return Err(Self::rhai_error(
-                "build-task terminal count exceeds its configured limit",
-            ));
+            return Err(TaskPlanError::Limit("terminal count"));
         }
         self.accept(plan.terminal_cost(&terminal, self.limits))?;
         plan.terminals.push(terminal);
@@ -798,403 +778,12 @@ impl TasksApi {
 
     /// Fold one declaration's cost into the running totals, leaving them unchanged if it is
     /// rejected — a script may catch the error and keep building.
-    fn accept(&self, added: Result<PlanCost, TaskPlanError>) -> RhaiResult<()> {
+    fn accept(&self, added: Result<PlanCost, TaskPlanError>) -> Result<(), TaskPlanError> {
         let total = added
             .and_then(|added| self.cost.get().add(added))
-            .and_then(|total| total.check(self.limits).map(|()| total))
-            .map_err(|error| Self::rhai_error(error.to_string()))?;
+            .and_then(|total| total.check(self.limits).map(|()| total))?;
         self.cost.set(total);
         Ok(())
-    }
-}
-
-type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
-
-impl TasksApi {
-    #[allow(clippy::unnecessary_box_returns)]
-    fn rhai_error(message: impl Into<String>) -> Box<EvalAltResult> {
-        Box::new(EvalAltResult::ErrorRuntime(
-            Dynamic::from(message.into()),
-            Position::NONE,
-        ))
-    }
-
-    fn path_from_array(path: Array, operation: &str) -> RhaiResult<Vec<String>> {
-        path.into_iter()
-            .map(|value| {
-                value
-                    .try_cast::<ImmutableString>()
-                    .map(ImmutableString::into_owned)
-                    .ok_or_else(|| {
-                        Self::rhai_error(format!("{operation} requires a string path array"))
-                    })
-            })
-            .collect()
-    }
-
-    fn https_url(api: &mut Self, value: ImmutableString) -> RhaiResult<UrlTask> {
-        api.push(TaskNodeKind::HttpsUrl {
-            value: value.into_owned(),
-        })
-        .map(UrlTask)
-    }
-
-    fn project_jar(api: &mut Self, path: ImmutableString) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::ProjectJar {
-            path: path.into_owned(),
-        })
-        .map(JarTask)
-    }
-
-    fn digest(
-        api: &Self,
-        value: ImmutableString,
-        algorithm: TaskDigestAlgorithm,
-    ) -> RhaiResult<DigestTask> {
-        api.push(TaskNodeKind::Digest {
-            algorithm,
-            value: value.into_owned(),
-        })
-        .map(DigestTask)
-    }
-
-    fn sha1(api: &mut Self, value: ImmutableString) -> RhaiResult<DigestTask> {
-        Self::digest(api, value, TaskDigestAlgorithm::Sha1)
-    }
-
-    fn sha256(api: &mut Self, value: ImmutableString) -> RhaiResult<DigestTask> {
-        Self::digest(api, value, TaskDigestAlgorithm::Sha256)
-    }
-
-    fn bytes(api: &mut Self, value: INT) -> RhaiResult<ByteCountTask> {
-        let value = u64::try_from(value)
-            .map_err(|_| Self::rhai_error("tasks.bytes requires a positive byte count"))?;
-        api.push(TaskNodeKind::ByteCount { value })
-            .map(ByteCountTask)
-    }
-
-    fn fetch(
-        api: &Self,
-        url: UrlTask,
-        digest: DigestTask,
-        max_bytes: ByteCountTask,
-        kind: TaskFetchKind,
-    ) -> RhaiResult<TaskHandle> {
-        api.push(TaskNodeKind::Fetch {
-            kind,
-            url: url.0.id,
-            digest: digest.0.id,
-            max_bytes: max_bytes.0.id,
-        })
-    }
-
-    fn fetch_json(
-        api: &mut Self,
-        url: UrlTask,
-        digest: DigestTask,
-        max_bytes: ByteCountTask,
-    ) -> RhaiResult<JsonTask> {
-        Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Json).map(JsonTask)
-    }
-
-    fn fetch_jar(
-        api: &mut Self,
-        url: UrlTask,
-        digest: DigestTask,
-        max_bytes: ByteCountTask,
-    ) -> RhaiResult<JarTask> {
-        Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Jar).map(JarTask)
-    }
-
-    fn fetch_text(
-        api: &mut Self,
-        url: UrlTask,
-        digest: DigestTask,
-        max_bytes: ByteCountTask,
-    ) -> RhaiResult<TextTask> {
-        Self::fetch(api, url, digest, max_bytes, TaskFetchKind::Text).map(TextTask)
-    }
-
-    fn json_at(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<JsonTask> {
-        api.push(TaskNodeKind::JsonAt {
-            json: json.0.id,
-            path: Self::path_from_array(path, "tasks.json_at")?,
-        })
-        .map(JsonTask)
-    }
-
-    fn json_find_string(
-        api: &mut Self,
-        json: JsonTask,
-        path: Array,
-        field: ImmutableString,
-        value: ImmutableString,
-    ) -> RhaiResult<JsonTask> {
-        api.push(TaskNodeKind::JsonFindString {
-            json: json.0.id,
-            path: Self::path_from_array(path, "tasks.json_find_string")?,
-            field: field.into_owned(),
-            value: value.into_owned(),
-        })
-        .map(JsonTask)
-    }
-
-    fn json_url(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<UrlTask> {
-        api.push(TaskNodeKind::JsonUrl {
-            json: json.0.id,
-            path: Self::path_from_array(path, "tasks.json_url")?,
-        })
-        .map(UrlTask)
-    }
-
-    fn json_digest(
-        api: &Self,
-        json: JsonTask,
-        path: Array,
-        algorithm: TaskDigestAlgorithm,
-        operation: &str,
-    ) -> RhaiResult<DigestTask> {
-        api.push(TaskNodeKind::JsonDigest {
-            json: json.0.id,
-            path: Self::path_from_array(path, operation)?,
-            algorithm,
-        })
-        .map(DigestTask)
-    }
-
-    fn json_sha1(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<DigestTask> {
-        Self::json_digest(
-            api,
-            json,
-            path,
-            TaskDigestAlgorithm::Sha1,
-            "tasks.json_sha1",
-        )
-    }
-
-    fn json_sha256(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<DigestTask> {
-        Self::json_digest(
-            api,
-            json,
-            path,
-            TaskDigestAlgorithm::Sha256,
-            "tasks.json_sha256",
-        )
-    }
-
-    fn json_u64(api: &mut Self, json: JsonTask, path: Array) -> RhaiResult<ByteCountTask> {
-        api.push(TaskNodeKind::JsonU64 {
-            json: json.0.id,
-            path: Self::path_from_array(path, "tasks.json_u64")?,
-        })
-        .map(ByteCountTask)
-    }
-
-    fn extract_java(
-        api: &mut Self,
-        jar: JarTask,
-        prefix: ImmutableString,
-    ) -> RhaiResult<SourceTreeTask> {
-        api.push(TaskNodeKind::ExtractJava {
-            jar: jar.0.id,
-            prefix: prefix.into_owned(),
-        })
-        .map(SourceTreeTask)
-    }
-
-    fn nested_jar(api: &mut Self, jar: JarTask, member: ImmutableString) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::NestedJar {
-            jar: jar.0.id,
-            member: member.into_owned(),
-        })
-        .map(JarTask)
-    }
-
-    /// `tasks.proguard()` — the ProGuard-style grammar, which names no namespaces of its own.
-    ///
-    /// Registered even though it is what `tasks.remap_jar(jar, mappings)` already means, so that a
-    /// script naming its format never has to drop back to the two-argument spelling to say the
-    /// default one.
-    const fn proguard(_api: &mut Self) -> MappingFormatValue {
-        MappingFormatValue(TaskMappingFormat::Proguard)
-    }
-
-    /// `tasks.tiny_v2(from, to)` — the tiny v2 grammar, read through one pair of its namespaces.
-    ///
-    /// The pair is checked here as well as in the manifest because this is a second way into the
-    /// same node: a script reaches `TaskNodeKind::RemapJar` without passing `[mappings]` at all.
-    fn tiny_v2(
-        _api: &mut Self,
-        from: ImmutableString,
-        to: ImmutableString,
-    ) -> RhaiResult<MappingFormatValue> {
-        if from.is_empty() || to.is_empty() {
-            return Err(Self::rhai_error(
-                "tasks.tiny_v2 needs two namespace names, e.g. \
-                 tasks.tiny_v2(\"official\", \"named\")",
-            ));
-        }
-        if from == to {
-            return Err(Self::rhai_error(
-                "tasks.tiny_v2 names the two namespaces a remap translates between, so naming one \
-                 twice renames nothing",
-            ));
-        }
-        Ok(MappingFormatValue(TaskMappingFormat::TinyV2 {
-            from: from.into_owned(),
-            to: to.into_owned(),
-        }))
-    }
-
-    /// `tasks.remap_jar(jar, mappings)` — deobfuscate a jar that closes over its own hierarchy,
-    /// reading ProGuard-style text.
-    ///
-    /// The two-argument spelling keeps meaning exactly what it always has. A grammar that names its
-    /// own namespaces cannot be written this way, which is what the third argument below is for.
-    fn remap_jar(api: &mut Self, jar: JarTask, mappings: TextTask) -> RhaiResult<JarTask> {
-        let format = MappingFormatValue(TaskMappingFormat::Proguard);
-        Self::remap_jar_as(api, jar, mappings, format)
-    }
-
-    /// `tasks.remap_jar(jar, mappings, format)` — the same step over a stated grammar.
-    ///
-    /// The direction stays deobfuscating and the hierarchy stays empty, as in the two-argument
-    /// form: a script fetching a game jar and its mappings is asking for exactly that, and the
-    /// manifest's `remap` keys are where the other direction and an extra hierarchy are said.
-    fn remap_jar_as(
-        api: &mut Self,
-        jar: JarTask,
-        mappings: TextTask,
-        format: MappingFormatValue,
-    ) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::RemapJar {
-            jar: jar.0.id,
-            mappings: mappings.0.id,
-            format: format.0,
-            direction: TaskRemapDirection::Deobfuscate,
-            hierarchy: Vec::new(),
-        })
-        .map(JarTask)
-    }
-
-    fn merge_jars(api: &mut Self, base: JarTask, overlay: JarTask) -> RhaiResult<JarTask> {
-        api.push(TaskNodeKind::MergeJars {
-            base: base.0.id,
-            overlay: overlay.0.id,
-        })
-        .map(JarTask)
-    }
-
-    fn decompile_java(
-        api: &mut Self,
-        jar: JarTask,
-        prefix: ImmutableString,
-    ) -> RhaiResult<SourceTreeTask> {
-        api.push(TaskNodeKind::DecompileJava {
-            jar: jar.0.id,
-            prefix: prefix.into_owned(),
-        })
-        .map(SourceTreeTask)
-    }
-
-    fn add_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
-        api.terminal(TaskTerminal::AddClasspath { jar: jar.0.id })
-    }
-
-    fn add_nested_classpath(api: &mut Self, jar: JarTask) -> RhaiResult<()> {
-        api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id })
-    }
-
-    /// The four-argument form every `build.rhai` written before the intent existed spells.
-    ///
-    /// Registered rather than left absent: Rhai resolves an overload by arity, so without this the
-    /// whole of what a script author meets is `Function not found: publish_tree (…)` — a signature
-    /// dump, when the thing they have to do is add one word. Every argument is discarded; the
-    /// error is the entire body. This is deliberately *not* a default intent, which is the
-    /// ambiguity the fifth argument exists to remove.
-    fn publish_tree_without_intent(
-        _api: &mut Self,
-        _owner: ImmutableString,
-        _tree: SourceTreeTask,
-        _destination: ImmutableString,
-        _mode: ImmutableString,
-    ) -> RhaiResult<()> {
-        Err(Self::rhai_error(
-            "tasks.publish_tree needs a fifth argument saying what a consumer does with the tree: \
-             `compile` (a consumer compiles it) or `navigation` (a consumer only reads it; the \
-             classpath defines these types)",
-        ))
-    }
-
-    /// `intent` has no default on purpose. What a consumer does with a published tree is the one
-    /// thing the task graph cannot infer — a tree with a JAR behind it and a tree that is the only
-    /// carrier of its package are written identically — and a script that does not say is a script
-    /// whose author has not decided.
-    fn publish_tree(
-        api: &mut Self,
-        owner: ImmutableString,
-        tree: SourceTreeTask,
-        destination: ImmutableString,
-        mode: &str,
-        intent: &str,
-    ) -> RhaiResult<()> {
-        if mode != "replace-root" {
-            return Err(Self::rhai_error(
-                "tasks.publish_tree supports only the `replace-root` mode",
-            ));
-        }
-        let Some(intent) = TaskPublishIntent::parse(intent) else {
-            return Err(Self::rhai_error(
-                "tasks.publish_tree needs an intent of `compile` (a consumer compiles this tree) \
-                 or `navigation` (a consumer only reads it; the classpath defines these types)",
-            ));
-        };
-        api.terminal(TaskTerminal::PublishTree {
-            owner: owner.into_owned(),
-            tree: tree.0.id,
-            destination: destination.into_owned(),
-            mode: TaskPublishMode::ReplaceRoot,
-            intent,
-        })
-    }
-
-    pub(crate) fn register_rhai(engine: &mut Engine) {
-        engine
-            .register_type_with_name::<Self>("Tasks")
-            .register_type_with_name::<UrlTask>("UrlTask")
-            .register_type_with_name::<DigestTask>("DigestTask")
-            .register_type_with_name::<ByteCountTask>("ByteCountTask")
-            .register_type_with_name::<JsonTask>("JsonTask")
-            .register_type_with_name::<TextTask>("TextTask")
-            .register_type_with_name::<JarTask>("JarTask")
-            .register_type_with_name::<SourceTreeTask>("SourceTreeTask")
-            .register_type_with_name::<MappingFormatValue>("MappingFormat")
-            .register_fn("https_url", Self::https_url)
-            .register_fn("project_jar", Self::project_jar)
-            .register_fn("sha1", Self::sha1)
-            .register_fn("sha256", Self::sha256)
-            .register_fn("bytes", Self::bytes)
-            .register_fn("fetch_json", Self::fetch_json)
-            .register_fn("fetch_jar", Self::fetch_jar)
-            .register_fn("fetch_text", Self::fetch_text)
-            .register_fn("json_at", Self::json_at)
-            .register_fn("json_find_string", Self::json_find_string)
-            .register_fn("json_url", Self::json_url)
-            .register_fn("json_sha1", Self::json_sha1)
-            .register_fn("json_sha256", Self::json_sha256)
-            .register_fn("json_u64", Self::json_u64)
-            .register_fn("extract_java", Self::extract_java)
-            .register_fn("nested_jar", Self::nested_jar)
-            .register_fn("proguard", Self::proguard)
-            .register_fn("tiny_v2", Self::tiny_v2)
-            .register_fn("remap_jar", Self::remap_jar)
-            .register_fn("remap_jar", Self::remap_jar_as)
-            .register_fn("merge_jars", Self::merge_jars)
-            .register_fn("decompile_java", Self::decompile_java)
-            .register_fn("add_classpath", Self::add_classpath)
-            .register_fn("add_nested_classpath", Self::add_nested_classpath)
-            .register_fn("publish_tree", Self::publish_tree_without_intent)
-            .register_fn("publish_tree", Self::publish_tree);
     }
 }
 
@@ -1202,7 +791,12 @@ impl TasksApi {
 mod tests {
     use super::*;
 
-    fn limits() -> TaskPlanLimits {
+    /// The node index a valid declaration answers, for tests that only need its identity.
+    fn push(api: &TasksApi, kind: TaskNodeKind) -> TaskId {
+        api.push(kind).expect("the declaration is valid").id
+    }
+
+    const fn limits() -> TaskPlanLimits {
         TaskPlanLimits {
             max_tasks: 32,
             max_edges: 64,
@@ -1235,24 +829,45 @@ mod tests {
 
     #[test]
     fn plan_round_trips_canonically() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
         let api = TasksApi::new(limits());
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api.clone());
-        engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    let url = tasks.https_url("https://example.invalid/sources.jar");
-                    let digest = tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-                    let jar = tasks.fetch_jar(url, digest, tasks.bytes(1024));
-                    let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("example", sources, "src/main/java/net/example", "replace-root", "navigation");
-                "#,
-            )
-            .unwrap();
-        drop(scope);
+        let url = push(
+            &api,
+            TaskNodeKind::HttpsUrl {
+                value: "https://example.invalid/sources.jar".to_owned(),
+            },
+        );
+        let digest = push(
+            &api,
+            TaskNodeKind::Digest {
+                algorithm: TaskDigestAlgorithm::Sha256,
+                value: "a".repeat(64),
+            },
+        );
+        let max_bytes = push(&api, TaskNodeKind::ByteCount { value: 1024 });
+        let jar = push(
+            &api,
+            TaskNodeKind::Fetch {
+                kind: TaskFetchKind::Jar,
+                url,
+                digest,
+                max_bytes,
+            },
+        );
+        let sources = push(
+            &api,
+            TaskNodeKind::ExtractJava {
+                jar,
+                prefix: "net/example".to_owned(),
+            },
+        );
+        api.terminal(TaskTerminal::PublishTree {
+            owner: "example".to_owned(),
+            tree: sources,
+            destination: "src/main/java/net/example".to_owned(),
+            mode: TaskPublishMode::ReplaceRoot,
+            intent: TaskPublishIntent::Navigation,
+        })
+        .unwrap();
         let plan = api.finish().unwrap();
         let bytes = serde_json::to_vec(&plan).unwrap();
         let decoded: TaskPlan = serde_json::from_slice(&bytes).unwrap();
@@ -1286,30 +901,56 @@ mod tests {
         );
     }
 
-    /// The namespace pair is the one thing a tiny v2 file cannot say about itself, so a script has
-    /// to — and it reaches the plan as an operand of the format rather than as a loose pair, which
-    /// is what stops it being written beside a grammar that has no namespaces.
+    /// The namespace pair is the one thing a tiny v2 file cannot say about itself, so the plan has
+    /// to carry it — and it reaches the plan as an operand of the format rather than as a loose
+    /// pair, which is what stops it being written beside a grammar that has no namespaces.
     #[test]
-    fn a_script_selects_the_namespace_pair_a_tiny_file_is_read_through() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
+    fn a_tiny_pair_reaches_the_plan_as_a_format_operand() {
         let api = TasksApi::new(limits());
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api.clone());
-        engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    let jar = tasks.project_jar("vendor/game.jar");
-                    let digest = tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-                    let url = tasks.https_url("https://example.invalid/yarn.tiny");
-                    let mappings = tasks.fetch_text(url, digest, tasks.bytes(1024));
-                    let named = tasks.remap_jar(jar, mappings, tasks.tiny_v2("official", "named"));
-                    tasks.add_classpath(named);
-                "#,
-            )
+        let jar = push(
+            &api,
+            TaskNodeKind::ProjectJar {
+                path: "vendor/game.jar".to_owned(),
+            },
+        );
+        let digest = push(
+            &api,
+            TaskNodeKind::Digest {
+                algorithm: TaskDigestAlgorithm::Sha256,
+                value: "a".repeat(64),
+            },
+        );
+        let url = push(
+            &api,
+            TaskNodeKind::HttpsUrl {
+                value: "https://example.invalid/yarn.tiny".to_owned(),
+            },
+        );
+        let max_bytes = push(&api, TaskNodeKind::ByteCount { value: 1024 });
+        let mappings = push(
+            &api,
+            TaskNodeKind::Fetch {
+                kind: TaskFetchKind::Text,
+                url,
+                digest,
+                max_bytes,
+            },
+        );
+        let named = push(
+            &api,
+            TaskNodeKind::RemapJar {
+                jar,
+                mappings,
+                format: TaskMappingFormat::TinyV2 {
+                    from: "official".to_owned(),
+                    to: "named".to_owned(),
+                },
+                direction: TaskRemapDirection::Deobfuscate,
+                hierarchy: Vec::new(),
+            },
+        );
+        api.terminal(TaskTerminal::AddClasspath { jar: named })
             .unwrap();
-        drop(scope);
         let plan = api.finish().unwrap();
         let remap = plan
             .nodes
@@ -1318,7 +959,7 @@ mod tests {
                 TaskNodeKind::RemapJar { format, .. } => Some(format),
                 _ => None,
             })
-            .expect("the script declared a remap");
+            .expect("the plan declared a remap");
         assert_eq!(
             remap,
             &TaskMappingFormat::TinyV2 {
@@ -1328,97 +969,45 @@ mod tests {
         );
     }
 
-    /// The two-argument spelling predates the format argument and is what every existing script
-    /// writes, so it has to keep meaning exactly what it meant.
-    #[test]
-    fn a_script_that_names_no_format_still_reads_proguard() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
-        let api = TasksApi::new(limits());
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api.clone());
-        engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    let jar = tasks.project_jar("vendor/game.jar");
-                    let digest = tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-                    let url = tasks.https_url("https://example.invalid/client.txt");
-                    let mappings = tasks.fetch_text(url, digest, tasks.bytes(1024));
-                    tasks.add_classpath(tasks.remap_jar(jar, mappings));
-                "#,
-            )
-            .unwrap();
-        drop(scope);
-        let plan = api.finish().unwrap();
-        assert!(plan.nodes.iter().any(|node| matches!(
-            &node.kind,
-            TaskNodeKind::RemapJar {
-                format: TaskMappingFormat::Proguard,
-                direction: TaskRemapDirection::Deobfuscate,
-                ..
-            }
-        )));
-    }
+    // The tiny v2 namespace-pair checks and the two-argument `remapJar` spelling are the Java
+    // vocabulary's, not the core builder's: `build_script/java.rs` asserts both the plans those
+    // calls record and every refusal message, so this suite no longer restates them.
 
-    #[test]
-    fn a_script_cannot_read_a_namespace_into_itself() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
-        let api = TasksApi::new(limits());
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api);
-        // A second way into the same node, so the check the manifest applies has to exist here too.
-        // Asserted on `tiny_v2` alone rather than through a whole remap, so what fails is the pair
-        // and not some other argument of the step it would have been passed to.
-        let mut pair = |from: &str, to: &str| {
-            engine.eval_with_scope::<Dynamic>(
-                &mut scope,
-                &format!("tasks.tiny_v2(\"{from}\", \"{to}\")"),
-            )
-        };
-        assert!(pair("official", "named").is_ok());
-        assert!(pair("named", "named").is_err());
-        assert!(pair("", "named").is_err());
-    }
-
-    /// What a consumer does with a published tree is the one thing the graph cannot infer, so the
-    /// script has to say — and the two answers have to reach the plan as two different terminals,
-    /// or nothing downstream could route on them.
+    /// What a consumer does with a published tree is the one thing the graph cannot infer — and the
+    /// two answers have to reach the plan as two different terminals, or nothing downstream could
+    /// route on them.
     #[test]
     fn a_publication_says_what_a_consumer_does_with_it() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
         let api = TasksApi::new(limits());
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api.clone());
-        engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    let jar = tasks.project_jar("sources.jar");
-                    let tree = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("view", tree, "src/main/java/net/example", "replace-root",
-                                       "navigation");
-                    tasks.publish_tree("carrier", tree, "src/main/java/org/vendor", "replace-root",
-                                       "compile");
-                "#,
-            )
-            .unwrap();
-        let error = engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    let jar = tasks.project_jar("other.jar");
-                    let tree = tasks.extract_java(jar, "net/other");
-                    tasks.publish_tree("bad", tree, "src/main/java/net/other", "replace-root",
-                                       "read-only");
-                "#,
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("intent"), "{error}");
-
-        drop(scope);
+        let jar = push(
+            &api,
+            TaskNodeKind::ProjectJar {
+                path: "sources.jar".to_owned(),
+            },
+        );
+        let tree = push(
+            &api,
+            TaskNodeKind::ExtractJava {
+                jar,
+                prefix: "net/example".to_owned(),
+            },
+        );
+        api.terminal(TaskTerminal::PublishTree {
+            owner: "view".to_owned(),
+            tree,
+            destination: "src/main/java/net/example".to_owned(),
+            mode: TaskPublishMode::ReplaceRoot,
+            intent: TaskPublishIntent::Navigation,
+        })
+        .unwrap();
+        api.terminal(TaskTerminal::PublishTree {
+            owner: "carrier".to_owned(),
+            tree,
+            destination: "src/main/java/org/vendor".to_owned(),
+            mode: TaskPublishMode::ReplaceRoot,
+            intent: TaskPublishIntent::Compile,
+        })
+        .unwrap();
         let plan = api.finish().unwrap();
         let intents: Vec<_> = plan
             .terminals
@@ -1437,86 +1026,64 @@ mod tests {
         );
     }
 
-    /// The fifth argument is a breaking change to every `build.rhai` in existence, so the four-
-    /// argument form is registered to fail rather than left to Rhai's overload resolution. What an
-    /// author meets has to be the word they must add — a signature dump is not a migration.
-    #[test]
-    fn the_pre_intent_publish_tree_says_what_to_add() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", TasksApi::new(limits()));
-        let error = engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    let jar = tasks.project_jar("sources.jar");
-                    let tree = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("old", tree, "src/main/java/net/example", "replace-root");
-                "#,
-            )
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("fifth argument"), "{error}");
-        // Named, because the whole point is that a reader does not have to go and look them up.
-        assert!(
-            error.contains("compile") && error.contains("navigation"),
-            "{error}"
-        );
-    }
+    // A pre-intent `publishTree` migration message belonged to the engine's predecessor; the Java
+    // vocabulary never had that spelling, so there is nothing for the core suite to carry.
 
     /// A fetch buffers up to its declared byte count *before* the digest is checked, so an
-    /// unbounded count is an out-of-memory switch. `tasks.json_u64` can even take the number from
+    /// unbounded count is an out-of-memory switch. `tasks.jsonU64` can even take the number from
     /// the fetched document, putting it under whoever serves that document.
     #[test]
     fn rejects_a_byte_count_over_the_fetch_limit() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
         let api = TasksApi::new(limits());
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api.clone());
 
         // `limits()` allows 1 MiB.
-        engine
-            .run_with_scope(&mut scope, "tasks.bytes(1048576);")
-            .expect("a byte count at the limit is accepted");
-        let error = engine
-            .run_with_scope(&mut scope, "tasks.bytes(1048577);")
-            .unwrap_err();
-        assert!(error.to_string().contains("byte count"));
+        push(&api, TaskNodeKind::ByteCount { value: 1_048_576 });
+        assert_eq!(
+            api.push(TaskNodeKind::ByteCount { value: 1_048_577 })
+                .unwrap_err(),
+            TaskPlanError::InvalidByteCount
+        );
 
-        drop(scope);
         let plan = api.finish().unwrap();
         assert_eq!(plan.nodes.len(), 1);
     }
 
     /// Declarations are checked incrementally, so a rejected one must leave the running totals
-    /// untouched — a script can catch the error and keep building, and `finish` revalidates the
-    /// whole plan, so the two views have to agree.
+    /// untouched — a caller that survives a refusal must not poison the plan `finish` revalidates.
     #[test]
     fn a_rejected_declaration_does_not_disturb_the_plan() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
         let api = TasksApi::new(limits());
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api.clone());
-        engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    let caught = 0;
-                    // Over the 4096-byte literal budget, and an escaping path: both rejected.
-                    for i in 0..8 {
-                        try { tasks.project_jar("../escape.jar"); } catch (error) { caught += 1; }
-                    }
-                    if caught != 8 { throw "expected every bad declaration to be rejected"; }
-                    let jar = tasks.project_jar("sources.jar");
-                    let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("example", sources, "src/main/java/net/example", "replace-root", "navigation");
-                "#,
-            )
-            .unwrap();
-        drop(scope);
+        // An escaping path, refused the same way every time.
+        for _ in 0..8 {
+            assert_eq!(
+                api.push(TaskNodeKind::ProjectJar {
+                    path: "../escape.jar".to_owned(),
+                })
+                .unwrap_err(),
+                TaskPlanError::InvalidPath
+            );
+        }
+        let jar = push(
+            &api,
+            TaskNodeKind::ProjectJar {
+                path: "sources.jar".to_owned(),
+            },
+        );
+        let sources = push(
+            &api,
+            TaskNodeKind::ExtractJava {
+                jar,
+                prefix: "net/example".to_owned(),
+            },
+        );
+        api.terminal(TaskTerminal::PublishTree {
+            owner: "example".to_owned(),
+            tree: sources,
+            destination: "src/main/java/net/example".to_owned(),
+            mode: TaskPublishMode::ReplaceRoot,
+            intent: TaskPublishIntent::Navigation,
+        })
+        .unwrap();
 
         let plan = api.finish().unwrap();
         assert_eq!(plan.nodes.len(), 2, "rejected nodes must not be recorded");
@@ -1527,28 +1094,35 @@ mod tests {
     /// The per-declaration checks must reject exactly what a whole-plan validation would.
     #[test]
     fn incremental_limits_match_whole_plan_validation() {
-        let mut engine = Engine::new();
-        TasksApi::register_rhai(&mut engine);
         let tight = TaskPlanLimits {
             max_tasks: 3,
             ..limits()
         };
         let api = TasksApi::new(tight);
-        let mut scope = rhai::Scope::new();
-        scope.push("tasks", api.clone());
-        let error = engine
-            .run_with_scope(
-                &mut scope,
-                r#"
-                    tasks.project_jar("a.jar");
-                    tasks.project_jar("b.jar");
-                    tasks.project_jar("c.jar");
-                    tasks.project_jar("d.jar");
-                "#,
-            )
+        push(
+            &api,
+            TaskNodeKind::ProjectJar {
+                path: "a.jar".to_owned(),
+            },
+        );
+        push(
+            &api,
+            TaskNodeKind::ProjectJar {
+                path: "b.jar".to_owned(),
+            },
+        );
+        push(
+            &api,
+            TaskNodeKind::ProjectJar {
+                path: "c.jar".to_owned(),
+            },
+        );
+        let error = api
+            .push(TaskNodeKind::ProjectJar {
+                path: "d.jar".to_owned(),
+            })
             .unwrap_err();
-        assert!(error.to_string().contains("build-task count"));
-        drop(scope);
+        assert!(error.to_string().contains("build-task count"), "{error}");
 
         let plan = api.finish().unwrap();
         assert_eq!(plan.nodes.len(), 3);

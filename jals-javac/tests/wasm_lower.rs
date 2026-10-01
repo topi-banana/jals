@@ -21,7 +21,7 @@
 
 use expect_test::expect;
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
-use jals_javac::wasm::{CompileWasm, ExportKind, Instr, Module, WasmOptions};
+use jals_javac::wasm::{CompileWasm, ExportKind, Instr, Module, WasmError, WasmOptions};
 use jals_syntax::SyntaxNode;
 use std::fmt::Write as _;
 
@@ -41,6 +41,15 @@ fn module_with(sources: &[&str], options: WasmOptions) -> Module {
 /// The two lists differ in exactly one way — a library declaration is never exported — so every
 /// test that cares about that distinction goes through here.
 fn module_of_parts(sources: &[&str], libraries: &[&str], options: WasmOptions) -> Module {
+    compile_parts(sources, libraries, options).unwrap_or_else(|error| panic!("compile: {error}"))
+}
+
+/// [`module_of_parts`] with the compile's own answer, for the tests that assert on a refusal.
+fn compile_parts(
+    sources: &[&str],
+    libraries: &[&str],
+    options: WasmOptions,
+) -> Result<Module, WasmError> {
     let texts: Vec<&str> = sources.iter().chain(libraries).copied().collect();
     let roots: Vec<(FileId, SyntaxNode)> = texts
         .iter()
@@ -70,7 +79,6 @@ fn module_of_parts(sources: &[&str], libraries: &[&str], options: WasmOptions) -
         .collect();
     let (inputs, libraries) = typed.split_at(sources.len());
     CompileWasm::module(inputs, libraries, &index, options)
-        .unwrap_or_else(|error| panic!("compile: {error}"))
 }
 
 /// The exported function named `export`, rendered as its declared locals followed by its
@@ -748,7 +756,10 @@ fn an_assert_compiles_to_nothing_by_default() {
 fn an_armed_assert_emits_a_conditional_trap() {
     let module = module_with(
         &["public class S { public static int run(int n) { assert n > 0; return n; } }"],
-        WasmOptions { assertions: true },
+        WasmOptions {
+            assertions: true,
+            ..WasmOptions::default()
+        },
     );
     let body = body_of(&module, "run");
     assert!(
@@ -774,7 +785,7 @@ public class S {
     let module = module_of(&[source]);
     assert!(!body_of(&module, "run").contains("If"));
 
-    // Armed: it is, and there is no `String` on this target.
+    // Armed: it is, and this compile links no package that has a `String`.
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), root.clone())])
@@ -784,8 +795,16 @@ public class S {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    let error = CompileWasm::module(&[typed], &[], &index, WasmOptions { assertions: true })
-        .expect_err("the condition is compiled now, and it names a library type");
+    let error = CompileWasm::module(
+        &[typed],
+        &[],
+        &index,
+        WasmOptions {
+            assertions: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect_err("the condition is compiled now, and it names a library type");
     assert!(
         error
             .to_string()
@@ -896,5 +915,113 @@ fn the_super_constructor_search_continues_past_an_ancestor_that_declares_none() 
     assert_eq!(
         calls, 1,
         "`C()` calls `G`'s initialiser through the constructor-less `P`"
+    );
+}
+
+/// A `java.lang` fragment with exactly what a concatenation resolves: `String(char[])` for the
+/// literal, and a builder with the constructor, one `append` per operand type the test writes, and
+/// `toString`. Nothing else is here, so an overload the lowering asks for and does not find is a
+/// test that fails rather than a method that quietly worked.
+const CONCAT_BUILDER: &str = r"
+package java.lang;
+
+public class String extends Object {
+    private char[] value;
+
+    public String(char[] value) {
+        this.value = value;
+    }
+
+    public int length() {
+        return this.value.length;
+    }
+}
+
+public class StringBuilder extends Object {
+    private String text;
+
+    public StringBuilder() {
+        this.text = new String(new char[0]);
+    }
+
+    public StringBuilder append(String s) {
+        return this;
+    }
+
+    public StringBuilder append(int i) {
+        return this;
+    }
+
+    public String toString() {
+        return this.text;
+    }
+}
+";
+
+/// A concatenation is one builder for the whole chain, not one per `+`.
+///
+/// The counts are the shape: `"a" + b + c` allocates the literal's `String` and one
+/// `StringBuilder`, and makes seven calls — the literal's constructor, the builder's, three
+/// `append`s, one `toString`, and the `length()` the method returns. A lowering that nested the
+/// operators per `+` would allocate a second builder and make four more calls, which is the
+/// difference between a chain that is linear in the number of `+`s and one that is quadratic. The
+/// JVM backend writes the flat chain for the same reason, flattening the left spine as this one
+/// does.
+#[test]
+fn a_concatenation_chain_shares_one_builder() {
+    let module = module_of_parts(
+        &[r#"public class A {
+    public static int run(int b, int c) {
+        String s = "a" + b + c;
+        return s.length();
+    }
+}"#],
+        &[CONCAT_BUILDER],
+        WasmOptions::default(),
+    );
+    let body = body_of(&module, "run");
+    assert_eq!(body.matches("StructNewDefault(").count(), 2, "{body}");
+    assert_eq!(body.matches("Call(").count(), 7, "{body}");
+}
+
+/// `java.lang.String` alone: enough for a literal and a `length()`, not enough for the builder a
+/// concatenation resolves. The fragment is what makes the refusal below about the *builder* — the
+/// full [`CONCAT_BUILDER`] would have supplied one.
+const STRING_ONLY: &str = r"
+package java.lang;
+
+public class String extends Object {
+    private char[] value;
+
+    public String(char[] value) {
+        this.value = value;
+    }
+
+    public int length() {
+        return this.value.length;
+    }
+}
+";
+
+/// A concatenation asks for its builder before it asks for anything else, and the refusal names it.
+///
+/// A package can supply `String` without supplying `StringBuilder` — the real platform supplies
+/// both, and a fragment need not — so the report has to be the class the source needed rather than
+/// `an undeclared class`, which is a message about the layout's inside rather than the program's.
+#[test]
+fn a_concatenation_names_the_builder_it_needs() {
+    let error = compile_parts(
+        &[r#"public class A {
+    public static int run(int b) {
+        return ("a" + b).length();
+    }
+}"#],
+        &[STRING_ONLY],
+        WasmOptions::default(),
+    )
+    .expect_err("the fragment declares no `StringBuilder`");
+    assert!(
+        matches!(error.kind(), WasmError::NoRepresentation(ty) if ty == "java.lang.StringBuilder"),
+        "the report names the class it could not lay out: {error}"
     );
 }

@@ -217,7 +217,7 @@ fn names_javac(cmd_line: &str) -> bool {
 #[cfg(unix)]
 #[test]
 fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
-    let manifest = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    let manifest = "[build]\nscript = { type = \"java\", file = \"build.java\" }\n";
     let dir = project(manifest);
     let jar = dir.path().join("sources.jar");
     let generated = b"package net.example;\npublic class Generated {}\n";
@@ -228,19 +228,24 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
             ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"),
         ],
     );
-    let script = dir.path().join("build.rhai");
+    let script = dir.path().join("build.java");
     std::fs::write(
         &script,
         r#"
-            let jar = tasks.project_jar("sources.jar");
-            let sources = tasks.extract_java(jar, "net/example");
-            tasks.publish_tree(
-                "example-sources",
-                sources,
-                "src/main/java/net/example",
-                "replace-root",
-                "navigation"
-            );
+            import jals.build.Tasks;
+
+            class build {
+                public static void main() {
+                    int jar = Tasks.projectJar("sources.jar");
+                    int sources = Tasks.extractJava(jar, "net/example");
+                    Tasks.publishTree(
+                        "example-sources",
+                        sources,
+                        "src/main/java/net/example",
+                        "navigation"
+                    );
+                }
+            }
         "#,
     )
     .unwrap();
@@ -260,16 +265,26 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
     assert_eq!(std::fs::read(&destination).unwrap(), generated);
     assert!(!destination.parent().unwrap().join("Manual.txt").exists());
 
-    std::fs::write(&script, "let no_tasks = true;\n").unwrap();
+    std::fs::write(
+        &script,
+        "class build { public static void main() { boolean noTasks = true; } }\n",
+    )
+    .unwrap();
     assert!(build_with_fake_javac(dir.path()).status.success());
     assert!(!destination.parent().unwrap().exists());
 
     std::fs::write(
         &script,
         r#"
-            let jar = tasks.project_jar("sources.jar");
-            let sources = tasks.extract_java(jar, "net/example");
-            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root", "navigation");
+            import jals.build.Tasks;
+
+            class build {
+                public static void main() {
+                    int jar = Tasks.projectJar("sources.jar");
+                    int sources = Tasks.extractJava(jar, "net/example");
+                    Tasks.publishTree("example-sources", sources, "src/main/java/net/example", "navigation");
+                }
+            }
         "#,
     )
     .unwrap();
@@ -293,7 +308,7 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
 #[cfg(unix)]
 #[test]
 fn build_dry_run_leaves_an_exclusive_publication_root_untouched() {
-    let manifest = "[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n";
+    let manifest = "[build]\nscript = { type = \"java\", file = \"build.java\" }\n";
     let dir = project(manifest);
     let jar = dir.path().join("sources.jar");
     write_source_jar(
@@ -304,11 +319,17 @@ fn build_dry_run_leaves_an_exclusive_publication_root_untouched() {
         )],
     );
     std::fs::write(
-        dir.path().join("build.rhai"),
+        dir.path().join("build.java"),
         r#"
-            let jar = tasks.project_jar("sources.jar");
-            let sources = tasks.extract_java(jar, "net/example");
-            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root", "navigation");
+            import jals.build.Tasks;
+
+            class build {
+                public static void main() {
+                    int jar = Tasks.projectJar("sources.jar");
+                    int sources = Tasks.extractJava(jar, "net/example");
+                    Tasks.publishTree("example-sources", sources, "src/main/java/net/example", "navigation");
+                }
+            }
         "#,
     )
     .unwrap();
@@ -356,17 +377,24 @@ fn build_dry_run_prints_javac_command() {
 fn build_dry_run_executes_and_publishes_build_script_outputs() {
     let dir = project(
         "[package]\nname = \"dry-run-script\"\n\
-         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+         [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
     );
     std::fs::write(
-        dir.path().join("build.rhai"),
+        dir.path().join("build.java"),
         r#"
-            let source = output.write_text(
-                "com/example/DryRunGenerated.java",
-                "package com.example; public class DryRunGenerated {}\n",
-            );
-            build.add_source(source);
-            build.add_source("src/main/java/com/example/Main.java");
+            import jals.build.Build;
+            import jals.build.Output;
+
+            class build {
+                public static void main() {
+                    String source = Output.writeText(
+                        "com/example/DryRunGenerated.java",
+                        "package com.example; public class DryRunGenerated {}\n"
+                    );
+                    Build.addSource(source);
+                    Build.addSource("src/main/java/com/example/Main.java");
+                }
+            }
         "#,
     )
     .unwrap();
@@ -385,7 +413,7 @@ fn build_dry_run_executes_and_publishes_build_script_outputs() {
     );
     let generated = dir
         .path()
-        .join("target/jals/build/rhai/out/com/example/DryRunGenerated.java");
+        .join("target/jals/build/script/out/com/example/DryRunGenerated.java");
     assert!(generated.is_file());
     let stdout = String::from_utf8(output.stdout).unwrap();
     // Both the authored and the script-generated source reach javac through the frontend's
@@ -395,7 +423,7 @@ fn build_dry_run_executes_and_publishes_build_script_outputs() {
         host_join(&staged, "src/main/java/com/example/Main.java"),
         host_join(
             &staged,
-            "target/jals/build/rhai/out/com/example/DryRunGenerated.java",
+            "target/jals/build/script/out/com/example/DryRunGenerated.java",
         ),
     ] {
         assert_eq!(
@@ -607,11 +635,17 @@ fn cfg_attribute_selects_code_and_preserves_lines_through_real_javac() {
 fn a_root_build_script_error_reports_every_diagnostic_it_emitted() {
     let dir = project(
         "[package]\nname = \"reported\"\n\
-         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+         [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
     );
     std::fs::write(
-        dir.path().join("build.rhai"),
-        "build.warning(\"check the version features\");\nbuild.error(\"select at most one\");\n",
+        dir.path().join("build.java"),
+        "import jals.build.Build;\n\
+         class build {\n\
+         \x20   public static void main() {\n\
+         \x20       Build.warning(\"check the version features\");\n\
+         \x20       Build.error(\"select at most one\");\n\
+         \x20   }\n\
+         }\n",
     )
     .unwrap();
 
@@ -641,17 +675,26 @@ fn a_root_build_script_error_reports_every_diagnostic_it_emitted() {
     );
 }
 
-/// The CLI used to report a broken `build.rhai` with no location at all: it held the Rhai position
+/// The CLI used to report a broken `build.java` with no location at all: it held the script position
 /// and never resolved it against the script's text. It now points at the offending line.
 #[test]
 fn a_failing_build_script_is_reported_at_the_line_it_failed_on() {
     let dir = project(
         "[package]\nname = \"positioned\"\n\
-         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+         [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
     );
+    // The in-process compiler silently recovers a malformed declaration like `int broken = ;`
+    // rather than reporting it, so the failing statement is a syntax error it does report: a `+`
+    // with no right operand. The point of the test — the failure names the line it happened on —
+    // is unchanged.
     std::fs::write(
-        dir.path().join("build.rhai"),
-        "let valid = 1;\nlet broken = ;\n",
+        dir.path().join("build.java"),
+        "class build {\n\
+         \x20   public static void main() {\n\
+         \x20       int valid = 1;\n\
+         \x20       int broken = 1 +;\n\
+         \x20   }\n\
+         }\n",
     )
     .unwrap();
 
@@ -664,29 +707,36 @@ fn a_failing_build_script_is_reported_at_the_line_it_failed_on() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
     // An `ariadne` report: the script's path, the failing line number, and the source line itself.
-    assert!(stderr.contains("build.rhai:2:"), "stderr: {stderr}");
-    assert!(stderr.contains("let broken = ;"), "stderr: {stderr}");
+    assert!(stderr.contains("build.java:4:"), "stderr: {stderr}");
+    assert!(stderr.contains("int broken = 1 +;"), "stderr: {stderr}");
     assert!(stderr.contains("build-script"), "stderr: {stderr}");
 }
 
 #[cfg(unix)]
 #[test]
-fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
+fn build_runs_java_and_passes_generated_inputs_to_javac() {
     let dir = project(
         "[package]\nname = \"generated\"\n\
-         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+         [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
     );
     std::fs::write(
-        dir.path().join("build.rhai"),
+        dir.path().join("build.java"),
         r#"
-            let source = output.write_text(
-                "com/example/Generated.java",
-                "package com.example; public class Generated {}\n",
-            );
-            build.add_source(source);
-            build.add_javac_arg("-Agenerated=true");
-            build.set_compile_env("JALS_SCRIPT_ENV", "from-rhai");
-            build.warning("generated BuildInfo.java");
+            import jals.build.Build;
+            import jals.build.Output;
+
+            class build {
+                public static void main() {
+                    String source = Output.writeText(
+                        "com/example/Generated.java",
+                        "package com.example; public class Generated {}\n"
+                    );
+                    Build.addSource(source);
+                    Build.addJavacArg("-Agenerated=true");
+                    Build.setCompileEnv("JALS_SCRIPT_ENV", "from-java");
+                    Build.warning("generated BuildInfo.java");
+                }
+            }
         "#,
     )
     .unwrap();
@@ -714,14 +764,14 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
     );
     let generated = dir
         .path()
-        .join("target/jals/build/rhai/out/com/example/Generated.java");
+        .join("target/jals/build/script/out/com/example/Generated.java");
     assert!(generated.is_file());
     let args = read_arg_lines(&captured_args);
     // The build script's output is root project source, so it goes through the frontend like
     // any authored file; javac sees the staged copy, not the script's own output path.
     let staged_generated = dir
         .path()
-        .join("target/jals/build/frontend/target/jals/build/rhai/out/com/example/Generated.java");
+        .join("target/jals/build/frontend/target/jals/build/script/out/com/example/Generated.java");
     assert!(
         args.iter().any(|arg| Path::new(arg) == staged_generated),
         "generated source should reach javac via the frontend staging tree; args: {args:?}"
@@ -731,7 +781,7 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
         "the pre-frontend generated file must not also be passed to javac"
     );
     assert!(args.iter().any(|arg| arg == "-Agenerated=true"));
-    assert_eq!(std::fs::read_to_string(captured_env).unwrap(), "from-rhai");
+    assert_eq!(std::fs::read_to_string(captured_env).unwrap(), "from-java");
     assert_eq!(
         std::fs::canonicalize(std::fs::read_to_string(captured_cwd).unwrap().trim()).unwrap(),
         std::fs::canonicalize(dir.path()).unwrap()
@@ -752,7 +802,7 @@ fn a_dependency_publication_reaches_javac_only_when_it_declares_compile_intent()
     std::fs::write(
         library.join("jals.toml"),
         "[package]\nname = \"library\"\n\
-         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+         [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
     )
     .unwrap();
     write_source_jar(
@@ -765,18 +815,23 @@ fn a_dependency_publication_reaches_javac_only_when_it_declares_compile_intent()
 
     let build = |intent: &str| {
         std::fs::write(
-            library.join("build.rhai"),
+            library.join("build.java"),
             format!(
                 r#"
-                    let jar = tasks.project_jar("sources.jar");
-                    let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree(
-                        "example-sources",
-                        sources,
-                        "src/main/java/net/example",
-                        "replace-root",
-                        "{intent}",
-                    );
+                    import jals.build.Tasks;
+
+                    class build {{
+                        public static void main() {{
+                            int jar = Tasks.projectJar("sources.jar");
+                            int sources = Tasks.extractJava(jar, "net/example");
+                            Tasks.publishTree(
+                                "example-sources",
+                                sources,
+                                "src/main/java/net/example",
+                                "{intent}"
+                            );
+                        }}
+                    }}
                 "#
             ),
         )
@@ -867,24 +922,32 @@ fn transitive_graph_sources_and_classpath_reach_compile_and_run() {
         dir.path().join("leaf/jals.toml"),
         "[package]\nname = \"leaf\"\n\
          [build]\nsource-dirs = [\"src\"]\nclasspath = [\"libs/manifest.jar\"]\n\
-         script = { type = \"rhai\", file = \"build.rhai\" }\n",
+         script = { type = \"java\", file = \"build.java\" }\n",
     )
     .unwrap();
     std::fs::write(
-        dir.path().join("leaf/build.rhai"),
+        dir.path().join("leaf/build.java"),
         r#"
-            if build.env("JALS_PACKAGE_NAME") != "leaf" {
-                build.error("dependency did not receive its own package environment");
+            import jals.build.Build;
+            import jals.build.Output;
+
+            class build {
+                public static void main() {
+                    String name = Build.env("JALS_PACKAGE_NAME");
+                    if (name == null || !name.equals("leaf")) {
+                        Build.error("dependency did not receive its own package environment");
+                    }
+                    String source = Output.writeText(
+                        "com/example/TransitiveGenerated.java",
+                        "package com.example; public class TransitiveGenerated {}\n"
+                    );
+                    String classpath = Output.write("script.jar", new byte[] {9, 8, 7});
+                    Build.addSource(source);
+                    Build.addClasspath(classpath);
+                    Build.addJavacArg("-Adependency-only=true");
+                    Build.addJvmArg("-Ddependency-only=true");
+                }
             }
-            let source = output.write_text(
-                "com/example/TransitiveGenerated.java",
-                "package com.example; public class TransitiveGenerated {}\n",
-            );
-            let classpath = output.write("script.jar", [9, 8, 7]);
-            build.add_source(source);
-            build.add_classpath(classpath);
-            build.add_javac_arg("-Adependency-only=true");
-            build.add_jvm_arg("-Ddependency-only=true");
         "#,
     )
     .unwrap();
@@ -1038,12 +1101,17 @@ fn graph_failures_prevent_javac() {
     std::fs::write(
         script.path().join("child/jals.toml"),
         "[build]\nsource-dirs = [\"src\"]\n\
-         script = { type = \"rhai\", file = \"build.rhai\" }\n",
+         script = { type = \"java\", file = \"build.java\" }\n",
     )
     .unwrap();
     std::fs::write(
-        script.path().join("child/build.rhai"),
-        "build.error(\"dependency script failed\");\n",
+        script.path().join("child/build.java"),
+        "import jals.build.Build;\n\
+         class build {\n\
+         \x20   public static void main() {\n\
+         \x20       Build.error(\"dependency script failed\");\n\
+         \x20   }\n\
+         }\n",
     )
     .unwrap();
 
@@ -1225,14 +1293,21 @@ fn dry_run_preprocesses_dependencies_without_mutating_their_tree() {
     std::fs::write(
         dir.path().join("child/jals.toml"),
         "[build]\nsource-dirs = [\"src\"]\n\
-         script = { type = \"rhai\", file = \"build.rhai\" }\n",
+         script = { type = \"java\", file = \"build.java\" }\n",
     )
     .unwrap();
     std::fs::write(
-        dir.path().join("child/build.rhai"),
+        dir.path().join("child/build.java"),
         r#"
-            let source = output.write_text("DryGenerated.java", "class DryGenerated {}\n");
-            build.add_source(source);
+            import jals.build.Build;
+            import jals.build.Output;
+
+            class build {
+                public static void main() {
+                    String source = Output.writeText("DryGenerated.java", "class DryGenerated {}\n");
+                    Build.addSource(source);
+                }
+            }
         "#,
     )
     .unwrap();
@@ -1322,13 +1397,20 @@ fn build_script_skips_non_unicode_environment_entries() {
 
     let dir = project(
         "[package]\nname = \"unicode-environment\"\n\
-         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+         [build]\nscript = { type = \"java\", file = \"build.java\" }\n",
     );
     std::fs::write(
-        dir.path().join("build.rhai"),
+        dir.path().join("build.java"),
         r#"
-            if build.env("JALS_UNICODE_ENV") != "visible" {
-                build.error("Unicode environment entry was not supplied");
+            import jals.build.Build;
+
+            class build {
+                public static void main() {
+                    String value = Build.env("JALS_UNICODE_ENV");
+                    if (value == null || !value.equals("visible")) {
+                        Build.error("Unicode environment entry was not supplied");
+                    }
+                }
             }
         "#,
     )
@@ -1362,7 +1444,7 @@ fn run_applies_script_jvm_args_environment_and_ordered_classpath() {
     let dir = project(
         "[package]\nname = \"script-run\"\n\
          [build]\n\
-         script = { type = \"rhai\", file = \"build.rhai\" }\n\
+         script = { type = \"java\", file = \"build.java\" }\n\
          classpath = [\"libs/base.jar\"]\n\
          [run]\nmain-class = \"com.example.Main\"\n\
          [dependencies]\n\
@@ -1376,13 +1458,19 @@ fn run_applies_script_jvm_args_environment_and_ordered_classpath() {
     std::fs::write(libs.join("alpha.jar"), b"alpha dependency").unwrap();
     std::fs::write(libs.join("beta.jar"), b"beta dependency").unwrap();
     std::fs::write(
-        dir.path().join("build.rhai"),
+        dir.path().join("build.java"),
         r#"
-            build.add_classpath("libs/base.jar");
-            build.add_classpath("libs/runtime.jar");
-            build.add_jvm_arg("-Dfrom.script=true");
-            build.set_compile_env("JALS_SCRIPT_ENV", "compile");
-            build.set_run_env("JALS_RUN_ENV", "from-rhai");
+            import jals.build.Build;
+
+            class build {
+                public static void main() {
+                    Build.addClasspath("libs/base.jar");
+                    Build.addClasspath("libs/runtime.jar");
+                    Build.addJvmArg("-Dfrom.script=true");
+                    Build.setCompileEnv("JALS_SCRIPT_ENV", "compile");
+                    Build.setRunEnv("JALS_RUN_ENV", "from-java");
+                }
+            }
         "#,
     )
     .unwrap();
@@ -1425,7 +1513,7 @@ fn run_applies_script_jvm_args_environment_and_ordered_classpath() {
     assert_eq!(Path::new(classpath[2]), libs.join("runtime.jar"));
     assert_eq!(std::fs::read(classpath[3]).unwrap(), b"alpha dependency");
     assert_eq!(std::fs::read(classpath[4]).unwrap(), b"beta dependency");
-    assert_eq!(std::fs::read_to_string(java_env).unwrap(), "from-rhai");
+    assert_eq!(std::fs::read_to_string(java_env).unwrap(), "from-java");
     assert_eq!(
         std::fs::canonicalize(std::fs::read_to_string(java_cwd).unwrap().trim()).unwrap(),
         std::fs::canonicalize(dir.path()).unwrap()
@@ -3134,14 +3222,14 @@ fn packaged_hierarchy_client(script: Option<&str>) -> Vec<u8> {
          remap = {{ with = \"mojmap\" }}\n\
          [mappings.mojmap]\nfile = \"maps/server.txt\"\n",
         if script.is_some() {
-            "script = { type = \"rhai\", file = \"build.rhai\" }\n"
+            "script = { type = \"java\", file = \"build.java\" }\n"
         } else {
             ""
         }
     );
     let dir = project(&manifest);
     if let Some(script) = script {
-        std::fs::write(dir.path().join("build.rhai"), script).unwrap();
+        std::fs::write(dir.path().join("build.java"), script).unwrap();
     }
     std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
     write_source_jar(
@@ -3199,7 +3287,15 @@ fn an_inherited_member_from_a_task_jar_is_reobfuscated() {
     );
 
     let with = packaged_hierarchy_client(Some(
-        r#"tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#,
+        r#"
+            import jals.build.Tasks;
+
+            class build {
+                public static void main() {
+                    Tasks.addClasspath(Tasks.projectJar("vendor/lib.jar"));
+                }
+            }
+        "#,
     ));
     assert!(
         contains_bytes(&with, "hierarchyProvedIt"),

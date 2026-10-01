@@ -39,7 +39,7 @@
 extern crate alloc;
 
 pub mod backend;
-#[cfg(feature = "rhai")]
+#[cfg(feature = "build-script")]
 pub mod build_script;
 #[cfg(feature = "native")]
 mod test_runner;
@@ -63,7 +63,7 @@ mod request;
 #[cfg(feature = "native")]
 mod staging;
 mod target;
-#[cfg(feature = "rhai")]
+#[cfg(feature = "build-script")]
 pub mod task;
 // Gated with the runner it plans for. The planning itself is pure, but a test plan is only ever
 // consumed by something that can start a JVM, so leaving it ungated puts an item with no caller

@@ -41,7 +41,7 @@ release:
 
 They are mutually **exclusive**: at most one may be active. `jals.toml` therefore keeps
 `default = ["server", "mixin", "mixinextras"]` — the default list carries a side and the two
-libraries, but deliberately no version — and `build.rhai` falls back to `DEFAULT_VERSION` (26.2, the
+libraries, but deliberately no version — and `build.java` falls back to `DEFAULT_VERSION` (26.2, the
 newest release) when no version feature is selected. Selecting a version needs nothing else:
 
 ```sh
@@ -50,7 +50,7 @@ jals build --features 1.20.1     # 1.20.1 + server + mixin + mixinextras
 jals build --features 1.16.5,client   # 1.16.5, client overlaid on server, + both libraries
 ```
 
-Two or more version features fail before any download, in `build.rhai` rather than in the manifest,
+Two or more version features fail before any download, in `build.java` rather than in the manifest,
 because `[features]` resolution is additive and cannot express exclusivity:
 
 ```
@@ -60,8 +60,8 @@ error: build script reported: error: select at most one Minecraft version featur
 
 `--all-features` therefore always fails here — it selects all 43 releases at once.
 
-Three boundaries are baked into the catalog at the top of `build.rhai`, carried by the two flags on
-each entry (`bundler?` and `obfuscated?`), which are independent of each other:
+Three boundaries are baked into the catalog at the top of `build.java`, carried by the two flag
+columns on each entry (`bundled` and `obfuscated`), which are independent of each other:
 
 - **1.14.4 is the floor.** Mojang published no official mappings before it, so earlier releases
   cannot be remapped and are not declared at all — `--features 1.14` is rejected by the CLI as an
@@ -133,7 +133,7 @@ cargo run -p jals-cli -- clean   # removes every owned publication root too
 
 The default `mixin` feature is a **third axis**, independent of both the side and the release: it
 fetches no Minecraft artifact at all, and composes freely with any combination of the two. When it
-is on, `build.rhai` fetches [SpongePowered Mixin](https://github.com/SpongePowered/Mixin) 0.8.7 from
+is on, `build.java` fetches [SpongePowered Mixin](https://github.com/SpongePowered/Mixin) 0.8.7 from
 the SpongePowered Maven repository — **both jars**, each pinned by SHA-1 exactly like every other
 fetch here:
 
@@ -208,18 +208,18 @@ together: `@Mixin`, `@Shadow`, `@Inject`, `@At`, `CallbackInfo`, `CallbackInfoRe
 
 ## What it demonstrates
 
-- `tasks.fetch_json` / `fetch_jar` / `fetch_text` with mandatory HTTPS + digest + byte cap.
-- `tasks.json_url` / `json_sha1` / `json_u64` projections over Mojang version metadata.
-- `tasks.nested_jar(jar, member)` — pull the game jar out of a 1.18+ server bundler.
-- `tasks.add_nested_classpath(jar)` — flatten every nested library jar onto the compile classpath.
-- `tasks.remap_jar(jar, mappings)` — hierarchy-aware Mojang mojmap deobfuscation. The default 26.2
+- `Tasks.fetchJson` / `fetchJar` / `fetchText` with mandatory HTTPS + digest + byte cap.
+- `Tasks.jsonUrl` / `jsonSha1` / `jsonU64` projections over Mojang version metadata.
+- `Tasks.nestedJar(jar, member)` — pull the game jar out of a 1.18+ server bundler.
+- `Tasks.addNestedClasspath(jar)` — flatten every nested library jar onto the compile classpath.
+- `Tasks.remapJar(jar, mappings)` — hierarchy-aware Mojang mojmap deobfuscation. The default 26.2
   build does not reach it; `--features 1.21.11` (or any release up to it) does.
-- `tasks.merge_jars(base, overlay)` — deterministic union, overlay wins on conflict.
-- `tasks.decompile_java(jar, prefix)` — compile-oriented skeleton source tree.
-- `tasks.extract_java(jar, prefix)` — its counterpart for a library that ships real `.java`: the
+- `Tasks.mergeJars(base, overlay)` — deterministic union, overlay wins on conflict.
+- `Tasks.decompileJava(jar, prefix)` — compile-oriented skeleton source tree.
+- `Tasks.extractJava(jar, prefix)` — its counterpart for a library that ships real `.java`: the
   Mixin and MixinExtras sources jars go through the same fetch → publish contract with no
   reconstruction step.
-- `tasks.publish_tree(..., "replace-root", "navigation")` + `tasks.add_classpath` — **paired three
+- `Tasks.publishTree(..., "navigation")` + `Tasks.addClasspath` — **paired three
   times**, once per root: the resolved game jar behind the decompiled tree, `mixin-0.8.7.jar` behind
   `org/spongepowered`, and `mixinextras-common-0.5.4.jar` behind `com/llamalad7`. Pairing them is
   what makes this project usable as a dependency at all, and `"navigation"` is the half of the pair
@@ -232,16 +232,16 @@ together: `@Mixin`, `@Shadow`, `@Inject`, `@At`, `CallbackInfo`, `CallbackInfoRe
   `src/main/java/com/llamalad7` (owner `mixinextras-0.5.4`). They are produced by disjoint task
   subgraphs, own disjoint destinations, and are enabled by unrelated features — so each appears, is
   replaced, or is removed on its own.
-- `build.feature("server")` / `build.feature("client")` / `build.feature("mixin")` /
-  `build.feature("mixinextras")` for `[features]` switching — the resolved feature set is always
-  part of the build-script fingerprint, so no `rerun_if_env_changed` is needed for it.
+- `Build.feature("server")` / `Build.feature("client")` / `Build.feature("mixin")` /
+  `Build.feature("mixinextras")` for `[features]` switching — the resolved feature set is always
+  part of the build-script fingerprint, so no `rerunIfEnvChanged` is needed for it.
 - **Mutually exclusive features on top of an additive `[features]` model**: the script scans its
-  catalog with `build.feature`, rejects a second match with `build.error` (which publishes nothing
+  catalog with `Build.feature`, rejects a second match with `Build.error` (which publishes nothing
   and runs no task), and falls back to `DEFAULT_VERSION` when none matched.
 - **One version-shaped pipeline**: the same task graph serves 43 releases, with the catalog's
-  `bundler?` and `obfuscated?` flags as its only two structural branches — independent of each
+  `bundled` and `obfuscated` flags as its only two structural branches — independent of each
   other, so 26.x takes the bundler path without the remap one — and the version threaded through
-  the metadata URL, the nested member path, and the `publish_tree` owner (`minecraft-<version>`).
+  the metadata URL, the nested member path, and the `publishTree` owner (`minecraft-<version>`).
   Switching versions swaps the owner of one destination and replaces the published tree wholesale.
 
 ## Compile-safety
@@ -375,5 +375,5 @@ Generated Minecraft sources and the original jars/mappings are Mojang's copyrigh
 This example only records the download URL and digests; artifacts stay local to your machine
 and must not be redistributed.
 
-See [`jals-build/README.md`](../../jals-build/README.md#rhai-build-scripts) for the complete
+See [`jals-build/README.md`](../../jals-build/README.md#java-build-scripts) for the complete
 task API.

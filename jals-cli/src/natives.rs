@@ -8,10 +8,11 @@
 //!
 //! # Why the registry is built per run rather than once
 //!
-//! `jals.io` writes text, and this crate has exactly one thing allowed to write to a stream. So the
-//! package is constructed *over* the run's [`Shell`]: the sink is a value the host supplies, which
-//! is the shape every stateful native package has and the reason a package is a `NativePackage`
-//! rather than a `const`.
+//! `jals.io` and `java.base`'s `System.out` write text, and this crate has exactly one thing
+//! allowed to write to a stream. So the packages are constructed *over* the run's [`Shell`]: the
+//! sink is a value the host supplies, which is the shape every stateful native package has and the
+//! reason a package is a `NativePackage` rather than a `const`. One console serves both, so the
+//! two write through the same stream in the order the program wrote them.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -46,9 +47,11 @@ impl Natives {
     /// Build the registry for one run.
     fn registry(shell: &Arc<Shell>) -> NativeRegistry {
         let mut registry = NativeRegistry::new();
-        registry.add(JalsIo::package(Rc::new(ShellConsole {
+        let console: Rc<dyn ConsoleSink> = Rc::new(ShellConsole {
             shell: Arc::clone(shell),
-        })));
+        });
+        registry.add(JalsIo::package(Rc::clone(&console)));
+        registry.add(jals_platform::Platform::package(console));
         registry
     }
 

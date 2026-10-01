@@ -9,4 +9,4 @@ default = []
 sources = []
 
 [build]
-script = { type = "rhai", file = "build.rhai" }
+script = { type = "java", file = "build.java" }

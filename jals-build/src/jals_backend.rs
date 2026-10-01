@@ -15,12 +15,12 @@
 use alloc::borrow::ToOwned as _;
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
 use jals_javac::lower::Compile;
-use jals_javac::wasm::CompileWasm;
+use jals_javac::wasm::{CompileWasm, WasmError};
 use jals_progress::{Activity, Outcome};
 use jals_storage::{ContentDigest, ProvenanceFold, RelativePath};
 use jals_syntax::{Parse, SyntaxNode};
@@ -75,6 +75,85 @@ impl JalsBackend {
         u16::try_from(release)
             .unwrap_or(u16::MAX)
             .saturating_add(44)
+    }
+
+    /// A wasm compile failure as a host reports it: `path:line:column: reason` when the lowering
+    /// knew where it happened, and the reason alone when it did not.
+    ///
+    /// A class-file backend prints that shape itself — `javac` writes `path:line: error: …` and
+    /// this backend passes its output through — while the wasm compiler is in-process and its
+    /// positions are formatted here. The file id numbers what the host handed over: the project's
+    /// sources first, then the selected packages' Java, then each linked library's, so resolving
+    /// one is walking those same lists in the same order.
+    fn wasm_failure(
+        error: &WasmError,
+        request: &BackendRequest<'_>,
+        natives: &NativePackageSet,
+        linked: &[jals_javac::wasm::LinkedLibrary<'_>],
+    ) -> String {
+        let Some((file, range)) = error.location() else {
+            return format!("{error}");
+        };
+        let Some((path, text)) = Self::wasm_source(file, request, natives, linked) else {
+            return format!("{error}");
+        };
+        let (line, column) = Self::line_column(text, range.start);
+        format!("{path}:{line}:{column}: {error}")
+    }
+
+    /// The path and text of the file a wasm compile failure happened in, when it was one of the
+    /// sources the compile was handed.
+    fn wasm_source<'a>(
+        file: FileId,
+        request: &'a BackendRequest<'_>,
+        natives: &'a NativePackageSet,
+        linked: &'a [jals_javac::wasm::LinkedLibrary<'_>],
+    ) -> Option<(String, &'a str)> {
+        let mut remaining = usize::try_from(file.0).ok()?;
+        if let Some(source) = request.tree.get(remaining) {
+            return core::str::from_utf8(&source.bytes)
+                .ok()
+                .map(|text| (source.path.to_string(), text));
+        }
+        remaining -= request.tree.len();
+        for (_, source) in natives.lowered_sources() {
+            if remaining == 0 {
+                return Some((source.path.to_owned(), source.text));
+            }
+            remaining -= 1;
+        }
+        for library in linked {
+            for source in &library.abi.sources {
+                if remaining == 0 {
+                    return Some((source.path.clone(), source.text.as_str()));
+                }
+                remaining -= 1;
+            }
+        }
+        None
+    }
+
+    /// The 1-based line and character column a byte offset falls on.
+    ///
+    /// Characters rather than bytes for the column: what a person points at is what is drawn, and a
+    /// multi-byte character before the failure would otherwise push the column past the mark.
+    fn line_column(text: &str, offset: usize) -> (usize, usize) {
+        let offset = offset.min(text.len());
+        let mut line = 1;
+        let mut start = 0;
+        for (index, character) in text.char_indices() {
+            if index >= offset {
+                break;
+            }
+            if character == '\n' {
+                line += 1;
+                start = index + 1;
+            }
+        }
+        let column = text
+            .get(start..offset)
+            .map_or(1, |rest| rest.chars().count() + 1);
+        (line, column)
     }
 
     /// A backend emitting class files for `release` (`--release N`), defaulting to Java 25 when the
@@ -200,11 +279,11 @@ impl JalsBackend {
             analyses.push(FileAnalysis::of(root).await);
         }
 
-        // The stdlib stubs stand in for `java.base`: the JVM supplies the implementations at run
-        // time, so a compile only ever needs the signatures. A native package's Java is the
-        // opposite case and is folded in as its own origin: it *is* compiled into the artifact, so
-        // what it does not declare the program does not have, and it outranks a stub of the same
-        // name.
+        // The stdlib stubs stand in for the JDK types a compile does not implement: on the JVM the
+        // implementations are supplied at run time, so a compile only ever needs the signatures —
+        // and on this target, where the implementations are linked in as a package, a package's Java
+        // outranks the stub of the same name. A native package's Java is that opposite case: it *is*
+        // compiled into the artifact, so what it does not declare the program does not have.
         let (project_roots, native_roots) = roots.split_at(project_files);
         let index = ProjectIndex::builder(project_roots)
             .with_native_packages(native_roots)
@@ -234,7 +313,10 @@ impl JalsBackend {
                 // The whole project is one module, so this arm *is* the wasm compile — and it
                 // returns past the `finish` below. Ending the unit here is what keeps a green
                 // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
-                let options = jals_javac::wasm::WasmOptions { assertions };
+                let options = jals_javac::wasm::WasmOptions {
+                    assertions,
+                    ..jals_javac::wasm::WasmOptions::default()
+                };
                 let linked: Vec<jals_javac::wasm::LinkedLibrary<'_>> = linked
                     .iter()
                     .map(|(name, abi)| jals_javac::wasm::LinkedLibrary { name, abi })
@@ -250,7 +332,12 @@ impl JalsBackend {
                         Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
                         Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
                     },
-                    Err(error) => BackendOutcome::failed(alloc::vec![format!("{error}")]),
+                    Err(error) => BackendOutcome::failed(alloc::vec![Self::wasm_failure(
+                        &error,
+                        request,
+                        &self.natives,
+                        &linked,
+                    )]),
                 };
                 report.finish(if outcome.success() {
                     Outcome::Completed
@@ -472,6 +559,40 @@ mod tests {
                 .iter()
                 .any(|m| m.starts_with("Arrays.java")),
             "expected a message naming the file, got {:?}",
+            outcome.messages
+        );
+    }
+
+    /// A wasm compile failure names the source position it happened on.
+    ///
+    /// The lowering records the innermost expression or statement whose lowering failed — see
+    /// `WasmError::location` — and this is the host side of it: the file id resolved back to the
+    /// path the request carried, the byte range into a line and a character column, and the reason
+    /// last.
+    #[test]
+    fn a_wasm_compile_failure_names_the_source_position() {
+        let tree = [source(
+            "Arrays.java",
+            "public class Arrays {\n    public static void m(int[] a) {\n        a.length = 1;\n    }\n}\n",
+        )];
+        let options = BackendOptions::default();
+        let request = BackendRequest {
+            progress: &jals_progress::Progress::SILENT,
+            tree: &tree,
+            classpath: &[],
+            libraries: &[],
+            options: &options,
+        };
+
+        let backend = JalsBackend::wasm(crate::Assertions::Disabled, NativePackageSet::empty());
+        let outcome = jals_exec::block_on_inline(backend.compile(&request)).expect("compile");
+        assert!(!outcome.success());
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .any(|message| message.starts_with("Arrays.java:3:9:")),
+            "expected the failing line and column in front of the reason, got {:?}",
             outcome.messages
         );
     }

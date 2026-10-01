@@ -1,7 +1,7 @@
 //! The root [`App`] component: it owns all playground state and orchestrates the UI.
 //!
 //! `App` holds the in-memory [`Workspace`] (behind a `futures::lock::Mutex`), the shared
-//! formatter [`Config`], the editable project buffers (`jals.toml` / `jalsfmt.toml` / `build.rhai`),
+//! formatter [`Config`], the editable project buffers (`jals.toml` / `jalsfmt.toml` / `build.java`),
 //! and the current syntax-tree dump, and wires the responsibility-split child components
 //! ([`Header`], [`FileTree`], [`EditorPane`], [`SyntaxPane`]) together with props and callbacks.
 //! The configuration files are edited as TOML in the editor itself — selecting one opens its
@@ -57,7 +57,7 @@ enum ConfigKind {
     Manifest,
     /// `jalsfmt.toml` — the formatter configuration.
     Fmt,
-    /// `build.rhai` — the portable project build script.
+    /// `build.java` — the portable project build script.
     Script,
 }
 
@@ -108,7 +108,7 @@ impl ConfigKind {
                  # .jar; `jals-wasm` emits one WebAssembly module for the whole project instead.\n\
                  # `javac` needs a host process to spawn, which a browser tab does not have.\n\
                  backend = { type = \"jals\" }\n\
-                 script = { type = \"rhai\", file = \"build.rhai\" }\n\
+                 script = { type = \"java\", file = \"build.java\" }\n\
                  \n\
                  [run]\n\
                  # The jar's `Main-Class`. Without it Build still produces a library jar.\n\
@@ -127,13 +127,20 @@ impl ConfigKind {
                  # reorder-imports = false\n"
             }
             ConfigKind::Script => {
-                "// Runs entirely in the browser and publishes below target/jals/build/rhai/out.\n\
-                 let source = output.write_text(\n\
-                     \"com/example/BuildInfo.java\",\n\
-                     \"package com.example;\\npublic final class BuildInfo {\\n    public static final String MESSAGE = \\\"Generated in the browser\\\";\\n}\\n\"\n\
-                 );\n\
-                 build.add_source(source);\n\
-                 build.warning(\"generated com.example.BuildInfo\");\n"
+                "// Runs entirely in the browser and publishes below target/jals/build/script/out.\n\
+                 import jals.build.Build;\n\
+                 import jals.build.Output;\n\
+                 \n\
+                 class build {\n\
+                     public static void main() {\n\
+                         String source = Output.writeText(\n\
+                             \"com/example/BuildInfo.java\",\n\
+                             \"package com.example;\\npublic final class BuildInfo {\\n    public static final String MESSAGE = \\\"Generated in the browser\\\";\\n}\\n\"\n\
+                         );\n\
+                         Build.addSource(source);\n\
+                         Build.warning(\"generated com.example.BuildInfo\");\n\
+                     }\n\
+                 }\n"
             }
         }
     }
@@ -323,7 +330,8 @@ pub enum Msg {
         generation: u64,
         result: Result<ClasspathResolution, String>,
     },
-    /// A successful Rhai execution reloaded generated Java and captured the new sidebar/model set.
+    /// A successful build-script execution reloaded generated Java and captured the new
+    /// sidebar/model set.
     BuildFinished {
         generation: u64,
         entries: Vec<TreeEntry>,
@@ -333,7 +341,7 @@ pub enum Msg {
         status: String,
         diagnostics: Vec<ProjectDiagnostic>,
     },
-    /// Rhai compilation/evaluation failed without publishing partial generated output.
+    /// Build-script compilation/evaluation failed without publishing partial generated output.
     BuildFailed {
         generation: u64,
         /// The status-line summary. The detail is in `diagnostics`, each with its own severity.
@@ -428,7 +436,7 @@ pub struct App {
     manifest_src: String,
     /// The `jalsfmt.toml` editor buffer. Parsed into the shared formatter [`Config`] on edit.
     fmt_src: String,
-    /// The editable `build.rhai` buffer, staged into the workspace aggregate before execution.
+    /// The editable `build.java` buffer, staged into the workspace aggregate before execution.
     build_src: String,
     /// Which config file is open in the editor, or `None` when a Java workspace file is active.
     active_config: Option<ConfigKind>,
@@ -735,7 +743,7 @@ impl App {
     ///
     /// Addressed by path rather than painted on the *current* model: two owners writing the current
     /// model is how a script diagnostic and a config parse error used to erase each other whenever
-    /// `build.rhai` happened to be the open editor.
+    /// `build.java` happened to be the open editor.
     fn repaint_config_model(&self, kind: ConfigKind) {
         let text = self.config_src(kind);
         let errors = self.config_errors.borrow();
@@ -831,7 +839,7 @@ impl App {
         self.set_config_diagnostic(ConfigKind::Fmt, error);
     }
 
-    /// Parse + validate `jals.toml` and start the Rhai/classpath pipeline. Invalid edits cancel
+    /// Parse + validate `jals.toml` and start the Java/classpath pipeline. Invalid edits cancel
     /// older result delivery and paint the manifest parse/validation marker.
     fn apply_manifest(&mut self, ctx: &Context<Self>, text: &str) -> bool {
         let manifest = match ConfigParseError::parse_manifest(text) {
@@ -848,7 +856,7 @@ impl App {
         self.start_build(ctx, manifest)
     }
 
-    /// Run the edited Rhai buffer when the current manifest configures a build script.
+    /// Run the edited Java buffer when the current manifest configures a build script.
     fn apply_script(&mut self, ctx: &Context<Self>) -> bool {
         let Ok(manifest) = ConfigParseError::parse_manifest(&self.manifest_src) else {
             return false;
@@ -888,7 +896,7 @@ impl App {
             return false;
         }
         let token = self.advance_build();
-        self.deps_status = Some("running bounded Rhai build script...".to_string());
+        self.deps_status = Some("running bounded Java build script...".to_string());
         self.project_diagnostics.clear();
         if self.editor_ready {
             self.repaint_config_markers();
@@ -999,7 +1007,7 @@ impl App {
     /// The script phase's diagnostics, assembled from whichever outcome it had.
     ///
     /// The script's key comes from the manifest and its text from the live editor buffer, so a
-    /// failure carrying a Rhai position resolves to a byte span the marker path can point at.
+    /// failure carrying a script position resolves to a byte span the marker path can point at.
     fn script_diagnostics(
         outcome: ScriptOutcome<'_>,
         manifest: &Manifest,
@@ -1010,7 +1018,7 @@ impl App {
             .script
             .as_ref()
             .and_then(|script| match script {
-                jals_config::BuildScript::Rhai { file } => FileKey::parse(file).ok(),
+                jals_config::BuildScript::Java { file } => FileKey::parse(file).ok(),
             });
         ProjectDiagnostics::assemble(
             outcome,
@@ -1301,6 +1309,9 @@ impl Component for App {
                     }
                     self.active_config = Some(kind);
                     let src = self.config_src(kind).to_string();
+                    // Before the model can be created: a `build.java` script must not select the
+                    // Java language, or the Java-only providers would analyse its text.
+                    monaco::mark_plaintext(kind.path());
                     monaco::switch_model(&path, &src);
                     // Selecting never executes a script or starts dependency resolution.
                     if kind == ConfigKind::Script {
@@ -1895,7 +1906,7 @@ mod tests {
     fn a_span_less_project_diagnostic_marks_the_first_line_of_its_own_model() {
         let mut app = App::initial();
         app.manifest_src = "[package]\r\nname = \"playground\"\r\n".to_owned();
-        app.build_src = "build.error(\"boom\");\n".to_owned();
+        app.build_src = "class build {\n    public static void main() {\n        Build.error(\"boom\");\n    }\n}\n".to_owned();
         let script = FileKey::parse(BUILD_SCRIPT_PATH).expect("script pseudo-path is valid");
         app.project_diagnostics = vec![
             ProjectDiagnostic {
@@ -1928,26 +1939,49 @@ mod tests {
         // shows the other's, which is what makes placing against `config_src(kind)` sound.
         assert_eq!(
             app.config_marker_entries(ConfigKind::Script, None),
-            [(0..20, jals_editor::DiagnosticSeverity::Error, "boom")]
+            [(0..13, jals_editor::DiagnosticSeverity::Error, "boom")]
         );
         // Nothing anchors to `jalsfmt.toml`; it is not part of project assembly.
         assert!(app.config_marker_entries(ConfigKind::Fmt, None).is_empty());
     }
 
     /// The span the assembly resolved, converted into Monaco's one-based UTF-16 coordinates —
-    /// which is the whole of what this host still does with a Rhai position. Resolving the position
-    /// itself is `BuildScriptPosition::byte_range`, tested in `jals-build`.
+    /// which is the whole of what this host still does with a script position. Resolving the
+    /// position itself is `BuildScriptPosition::byte_range`, tested in `jals-build`.
     #[test]
     fn a_script_failure_marks_the_position_it_reports() {
         block_on_inline(async {
             let manifest_text = ConfigKind::Manifest.seed();
             let manifest: Manifest = manifest_text.parse().expect("seed manifest is valid");
+            let compile_error = "\
+class build {
+    public static void main() {
+        int broken = \"text\";
+    }
+}
+";
+            let run_error = "\
+class build {
+    public static void main() {
+        throw new IllegalStateException(\"boom\");
+    }
+}
+";
+            let reported = "\
+import jals.build.Build;
+
+class build {
+    public static void main() {
+        Build.error(\"boom\");
+    }
+}
+";
             for (script, expected) in [
-                ("let valid = 1;\nlet broken = ;\n", Some(28..29)),
-                ("let valid = 1;\nthrow \"boom\";\n", Some(15..16)),
-                // `build.error` is reported by the script, not thrown by Rhai, so it has no
-                // position and the marker falls back to the head of the file.
-                ("build.error(\"boom\");\n", None),
+                (compile_error, Some(54..55)),
+                (run_error, Some(54..55)),
+                // `Build.error` is reported by the script, not thrown, so it has no position and
+                // the marker falls back to the head of the file.
+                (reported, None),
             ] {
                 let mut workspace = Workspace::new().await;
                 let error = workspace
@@ -1973,7 +2007,16 @@ mod tests {
         block_on_inline(async {
             let manifest_text = ConfigKind::Manifest.seed();
             let manifest: Manifest = manifest_text.parse().expect("seed manifest is valid");
-            let script = "build.warning(\"check the version features\");\nbuild.error(\"select at most one\");\n";
+            let script = "\
+import jals.build.Build;
+
+class build {
+    public static void main() {
+        Build.warning(\"check the version features\");
+        Build.error(\"select at most one\");
+    }
+}
+";
             let mut workspace = Workspace::new().await;
             let error = workspace
                 .run_build_script(&manifest, manifest_text, script)
@@ -2023,7 +2066,19 @@ mod tests {
             let manifest: Manifest = manifest_text.parse().expect("seed manifest is valid");
             let mut workspace = Workspace::new().await;
             let output = workspace
-                .run_build_script(&manifest, manifest_text, "build.warning(\"kept\");\n")
+                .run_build_script(
+                    &manifest,
+                    manifest_text,
+                    "\
+import jals.build.Build;
+
+class build {
+    public static void main() {
+        Build.warning(\"kept\");
+    }
+}
+",
+                )
                 .await
                 .expect("a warning does not fail the script");
 
@@ -2145,11 +2200,21 @@ mod tests {
                 CodeTree::new([
                     Entry::File(
                         FileKey::parse("deps/child/jals.toml").unwrap(),
-                        b"[build]\nsource-dirs = [\"src\"]\nclasspath = [\"lib/Box.class\"]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n".to_vec(),
+                        b"[build]\nsource-dirs = [\"src\"]\nclasspath = [\"lib/Box.class\"]\nscript = { type = \"java\", file = \"build.java\" }\n".to_vec(),
                     ),
                     Entry::File(
-                        FileKey::parse("deps/child/build.rhai").unwrap(),
-                        br#"let source = output.write_text("Generated.java", "class Generated {}"); build.add_source(source);"#.to_vec(),
+                        FileKey::parse("deps/child/build.java").unwrap(),
+                        br#"import jals.build.Build;
+import jals.build.Output;
+
+class build {
+    public static void main() {
+        String source = Output.writeText("Generated.java", "class Generated {}");
+        Build.addSource(source);
+    }
+}
+"#
+                        .to_vec(),
                     ),
                     Entry::File(
                         FileKey::parse("deps/child/src/Child.java").unwrap(),

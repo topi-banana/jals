@@ -22,7 +22,7 @@ Six declarations in `jals.toml` carry the whole thing:
 - **`[package] features = ["attributes"]`** — the jals dialect's `#[cfg(...)]`. Mojang renamed one
   API this mixin uses, so the source carries both spellings as live branches instead of the project
   carrying two source trees.
-- **`[build] script`** — a Rhai script deriving the class-file level `javac` compiles at, which is
+- **`[build] script`** — a Java script deriving the class-file level `javac` compiles at, which is
   one of the two things that vary with the release and are not names.
 - **`[build.resources] template`** — the other one: the `compatibilityLevel` the mixin configuration
   declares, rendered into the resource on its way into the jar.
@@ -77,7 +77,7 @@ branches on it:
 
 | threshold      | what branches on it                                          |
 | -------------- | ------------------------------------------------------------ |
-| `since-1.14.4` | `build.rhai`: was a release named at all?                     |
+| `since-1.14.4` | `build.java`: was a release named at all?                    |
 | `since-1.17`   | `--release 16`, `compatibilityLevel: JAVA_16`                 |
 | `since-1.18`   | `--release 17`, `compatibilityLevel: JAVA_17`                 |
 | `since-1.20.5` | `--release 21`, `compatibilityLevel: JAVA_21`                 |
@@ -91,7 +91,7 @@ which exists so that "no release named" stays distinguishable from "the oldest r
 `[dependencies] minecraft` leaves `default-features` at its `true` and the SDK falls back to its own
 newest release. That is no longer a build this project can do: the SDK would fall back while every
 threshold here stayed off, and the source would take its oldest branch against the newest game. So
-`build.rhai` says so instead of letting `javac` say it:
+`build.java` says so instead of letting `javac` say it:
 
 ```
 $ cargo run -p jals-cli -- build --manifest-path examples/minecraft_mod/jals.toml
@@ -196,8 +196,8 @@ address and the bytes. `max-bytes` is the published size rounded up to the next 
 what guarantees the content, so pinning an exact byte count would only ever break on a re-serve of
 identical text.
 
-To refresh the table: for each catalog entry in [`../minecraft/build.rhai`](../minecraft/build.rhai)
-whose `obfuscated?` flag is true, fetch
+To refresh the table: for each catalog entry in [`../minecraft/build.java`](../minecraft/build.java)
+whose `obfuscated` flag is true, fetch
 `https://piston-meta.mojang.com/v1/packages/<metadata sha1>/<version>.json` and project
 `downloads.server_mappings.{url, sha1, size}`.
 
@@ -246,23 +246,23 @@ appear in the mappings at all before 1.16. See the table in
 
 ## The build script
 
-`build.rhai` derives what `javac` needs that varies with the release, and it holds **no table of
+`build.java` derives what `javac` needs that varies with the release, and it holds **no table of
 releases**. `jals.toml` already routes 43 version features into the SDK, and the SDK's own build
 script is what rejects a second one; a catalog here would be a second copy of that rule and the
 first of the two to drift. So the script reads the threshold chain instead — which is also why a
 release added to `jals.toml` needs nothing here at all:
 
-```rhai
-let release = 8;
-if build.feature("since-1.20.5") {
+```java
+int release = 8;
+if (Build.feature("since-1.20.5")) {
     release = 21;
-} else if build.feature("since-1.18") {
+} else if (Build.feature("since-1.18")) {
     release = 17;
-} else if build.feature("since-1.17") {
+} else if (Build.feature("since-1.17")) {
     release = 16;
 }
-build.add_javac_arg("--release");
-build.add_javac_arg("" + release);
+Build.addJavacArg("--release");
+Build.addJavacArg("" + release);
 ```
 
 `--release` rather than `source`/`target`, because only `--release` also pins the platform API the
@@ -310,7 +310,7 @@ One field of that file is per-release, so it is **rendered rather than copied**:
 }
 ```
 
-`compatibilityLevel` must be at least the class-file version `javac` produced, and `build.rhai`
+`compatibilityLevel` must be at least the class-file version `javac` produced, and `build.java`
 produces one of four. The two derivations read the same threshold chain in their own vocabularies —
 `--release 17` there, `JAVA_17` here — which is one table rather than two: the chain is in
 `jals.toml`, and neither site has a list of releases in it.
@@ -353,7 +353,7 @@ Declaring the version names locally is what lets `[[mappings.mojmap]]` gate on t
 `minecraft/…` entry is pure routing and is never queryable in this project.
 
 **Version exclusivity is not restated here.** The forwarded selection reaches the SDK's own build
-script, whose `build.error` rejects a second version before any download:
+script, whose `Build.error` rejects a second version before any download:
 
 ```
 $ cargo run -p jals-cli -- build --manifest-path examples/minecraft_mod/jals.toml --features 1.20.1,1.19.4
@@ -372,7 +372,7 @@ snapshot this project does not own.
 
 ## JDK requirement
 
-`build.rhai` decides what the mod is compiled *to*; your JDK still decides what can be compiled *at
+`build.java` decides what the mod is compiled *to*; your JDK still decides what can be compiled *at
 all*, and the two are separate constraints. `--release 17` cannot relax the binding one: to compile
 against the SDK's classpath `javac` must be able to **read** the game's class files, and a JDK 21
 `javac` rejects a Java 25 class outright. So your JDK must be at least:
@@ -483,8 +483,8 @@ Three things, and each is here because it cannot live on the other side of the e
   `mc-client-test/<release>` beside its `minecraft/<release>` — the release reaches the harness by
   the route it already took to the same SDK node. It is one line per row and it is the whole of
   what this project tells the harness.
-- **`-Xmx2G`.** `build.add_jvm_arg` reaches a test JVM only from the *root* project's script, so a
-  dependency cannot contribute it. `build.rhai` writes the line; without it the boot dies inside the
+- **`-Xmx2G`.** `Build.addJvmArg` reaches a test JVM only from the *root* project's script, so a
+  dependency cannot contribute it. `build.java` writes the line; without it the boot dies inside the
   resource reload with an `OutOfMemoryError`.
 
 Everything else — the harness class and its fourteen thresholds, the 2287 pinned runtime libraries,

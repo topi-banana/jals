@@ -12,15 +12,19 @@
 //! unrelated classes and gets no struct type: a value of interface type is held as `anyref` and
 //! narrowed with `ref.cast` at each use. `java.lang.Object` sits in exactly the same place and for
 //! exactly the same reason — it is the root of Java's reference hierarchy and `anyref` is wasm's —
-//! which makes it the one library type this backend needs no `java.base` to represent. A **type
+//! which makes it the one library type representable with no package linked. A **type
 //! variable** joins them: JLS §4.6 erases it to its bound and to `Object` with none, and a field of
 //! type `T` is one field whatever a use instantiates it at.
 //!
 //! A value comes back down with the `ref.cast` the JVM backend spells `checkcast` wherever the
 //! *declaration* says what type is wanted: a receiver at its owner, an argument at its parameter, a
-//! `return` at its result, and any store at what it was declared to hold. What erasure cannot reach
-//! is the other conversion Java does at those places — a **boxing** one, whose result is a wrapper
-//! this host has no `java.base` to supply, and which is reported as the library type it needs.
+//! `return` at its result, and any store at what it was declared to hold. The same places cross the
+//! other way — the **boxing** and **unboxing** conversions of JLS §5.1.7 and §5.1.8 — and those go
+//! through the wrapper classes, which are `java.lang` types a linked package supplies: an `int`
+//! erased to `anyref` reaches its parameter as an `Integer`, and a `List<Integer>` element read back
+//! out is cast to `Integer` and asked for its `intValue`. A wrapper no linked package provides is
+//! refused by the name of the type it needed, which is the answer every other unrepresentable type
+//! gets rather than a report of a gap this backend does not have.
 //!
 //! Unlike the JVM backend, this one lowers from the syntax tree directly. wasm's control flow is
 //! structured (`block` / `loop` / `if`), so the nesting the source already has is the nesting the
@@ -86,15 +90,17 @@ mod abi;
 mod encode;
 mod insn;
 mod lower;
+mod positions;
 
 /// Numeric promotion is a source fact, so the type lives in `crate::facts`; it is named here
 /// because it is what [`Insn::convert`] takes. [`jvm`](crate::jvm) re-exports it for the same
 /// reason, so that neither backend's seam sends a caller to the other one for a name it needs.
 pub use crate::facts::Numeric;
-pub use abi::{AbiError, ClassType, ExportType, LibraryAbi, Source};
+pub use abi::{AbiError, ClassType, ExportType, LibraryAbi, Realm, Slot, Source};
 pub use encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Import, ImportKind, Module, RefType,
     StorageType, SubType, ValType,
 };
 pub use insn::{Insn, Instr, NumOp};
 pub use lower::{CompileWasm, LinkedLibrary, WasmError, WasmOptions};
+pub use positions::{POSITION_GLOBAL, Positions};

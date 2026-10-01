@@ -6,7 +6,7 @@
 //! Every host used to sequence its own. The language server re-derived a severity per call site,
 //! re-wrapped graph warnings into synthetic classpath ones to borrow an anchor, and never showed a
 //! classpath input warning to a client at all. The CLI printed one `warning:` line per channel and
-//! resolved no position for a failing script, so a broken `build.rhai` reported no location. The
+//! resolved no position for a failing script, so a broken `build.java` reported no location. The
 //! browser folded a failed phase into one joined string. The three had diverged observably. The one
 //! policy lives here now; hosts only map each [`ProjectDiagnostic`] to their protocol's shape — an
 //! LSP `Diagnostic`, a Monaco marker, an `ariadne` report — exactly as they already do for
@@ -15,7 +15,7 @@
 //! The policy, in order:
 //!
 //! 1. **The script phase.** [`Skipped`](ScriptOutcome::Skipped) reports nothing: `jals lint`
-//!    analyses a folder without executing an unreviewed `build.rhai`, and declining to run one is
+//!    analyses a folder without executing an unreviewed `build.java`, and declining to run one is
 //!    not a diagnostic. [`Ran`](ScriptOutcome::Ran) promotes `BuildScriptOutput::diagnostics` to
 //!    warnings with no severity test — a run that produced an error diverted the whole collection
 //!    into `BuildScriptError::ReportedErrors` before an output existed, so the collection is
@@ -45,7 +45,7 @@
 //! **Origin.** Every diagnostic names the project file it anchors to — the root manifest or the
 //! configured build script — and carries a byte [`span`](ProjectDiagnostic::span) within it when
 //! one is known. A host converts that span into its own coordinates and does nothing else.
-//! Resolving Rhai's 1-based, character-counted position is
+//! Resolving the 1-based, character-counted position a failing script reports is
 //! [`BuildScriptPosition::byte_range`](jals_build::build_script::BuildScriptPosition::byte_range),
 //! and running it here is why no `ProjectDiagnostic` names a `BuildScriptPosition`. (A
 //! [`ScriptOutcome`] does, transitively, through the error it borrows — the rule is about the value
@@ -534,11 +534,13 @@ impl ProjectDiagnostics {
             }
             // A complaint about `[build] script`, not about the script — which the host could not
             // anchor to anyway, since the path it names is not a usable key.
-            BuildScriptError::InvalidScriptPath { .. } => out.push(Self::error(
-                ProjectAnchor::Manifest,
-                ProjectDiagnosticCode::ProjectManifest,
-                error,
-            )),
+            BuildScriptError::InvalidScriptPath { .. } => {
+                out.push(Self::error(
+                    ProjectAnchor::Manifest,
+                    ProjectDiagnosticCode::ProjectManifest,
+                    error,
+                ));
+            }
             BuildScriptError::ScriptTooLarge { script, .. } => out.push(Self::error(
                 ProjectAnchor::Script(script.clone()),
                 ProjectDiagnosticCode::BuildScript,
@@ -757,14 +759,14 @@ mod tests {
         // `[build] script` and `[build] source-dirs` are manifest content. Anchoring either to the
         // script is anchoring it to a file the reader cannot fix it in — and for an unusable path,
         // to a file that has no key at all.
-        let script = key("build.rhai");
+        let script = key("build.java");
         let file = ScriptFile {
             key: &script,
             text: None,
         };
         for error in [
             RootBuildScriptError::BuildScript(BuildScriptError::InvalidScriptPath {
-                path: "../outside.rhai".into(),
+                path: "../outside.java".into(),
                 reason: "escapes the project root".into(),
             }),
             RootBuildScriptError::InvalidSourceRoot("../src".into()),
@@ -783,8 +785,8 @@ mod tests {
 
     #[test]
     fn a_positioned_script_failure_resolves_a_span_against_the_script_it_names() {
-        let script = key("build.rhai");
-        let source = "let a = 1;\nlet b = ;\n";
+        let script = key("build.java");
+        let source = "class build {\n    public static void main() {\n    }\n}\n";
         let error = RootBuildScriptError::BuildScript(BuildScriptError::Compile {
             script: script.clone(),
             position: None,
@@ -803,7 +805,7 @@ mod tests {
 
         // A different script than the error names: resolving in the wrong text would be a silently
         // wrong range, so the diagnostic is still reported and simply carries no span.
-        let other = key("other.rhai");
+        let other = key("other.java");
         let out = ProjectDiagnostics::assemble(
             ScriptOutcome::Failed(&error),
             GraphOutcome::NotReached,
@@ -976,7 +978,7 @@ mod tests {
     fn manifest_diagnostics_group_before_script_ones_and_keep_their_order() {
         // A host publishing per file wants contiguous groups; within a group the production order
         // is causal and survives, because the sort is stable.
-        let script = key("build.rhai");
+        let script = key("build.java");
         let error = RootBuildScriptError::BuildScript(BuildScriptError::ReportedErrors(vec![
             BuildScriptDiagnostic::warning("first"),
             BuildScriptDiagnostic::error("second"),

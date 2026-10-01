@@ -100,7 +100,7 @@ impl ScaffoldFile {
              # source-dirs = [\"src/main/java\"]\n\
              # classes-dir = \"target/classes\"\n\
              # release = 21\n\
-             # script = {{ type = \"rhai\", file = \"build.rhai\" }}\n\
+             # script = {{ type = \"java\", file = \"build.java\" }}\n\
              \n\
              [run]\n\
              main-class = \"{MAIN_CLASS}\"\n",
@@ -153,7 +153,7 @@ mod tests {
         assert!(
             manifest
                 .contents
-                .contains("# script = { type = \"rhai\", file = \"build.rhai\" }")
+                .contains("# script = { type = \"java\", file = \"build.java\" }")
         );
 
         let main = find(&files, "src/main/java/Main.java");

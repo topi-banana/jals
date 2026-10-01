@@ -60,6 +60,32 @@ fn validate(bytes: &[u8]) {
     );
 }
 
+/// Run `function` in `bytes` and return what it returned, or `None` when no engine is installed.
+///
+/// `wasm-tools` says the module is well-formed; only an engine says it computes what was meant.
+/// A data segment read is exactly the kind of thing that validates and is still wrong — a byte
+/// order or an offset off by one is a different integer, not a malformed module — so the tests
+/// that care what the bytes *mean* run rather than only validate.
+fn invoke(bytes: &[u8], function: &str) -> Option<String> {
+    if !tool("wasmtime") {
+        return None;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    let path = directory.path().join("module.wasm");
+    std::fs::write(&path, bytes).expect("write module");
+    let output = Command::new("wasmtime")
+        .args(["run", "--invoke", function])
+        .arg(&path)
+        .output()
+        .expect("run wasmtime");
+    assert!(
+        output.status.success(),
+        "wasmtime rejected the module:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 /// A module whose types form a two-level hierarchy, plus a function that allocates the subtype and
 /// reads a field *through the supertype's* accessor — which only validates because the subtyping is
 /// declared.
@@ -369,6 +395,56 @@ fn a_hand_built_array_module_validates() {
             .finish()
             .expect("a module whose lengths all fit"),
     );
+}
+
+/// The bytes of a string literal become a `char[]` in one instruction: `array.new_data` copies
+/// from a byte offset in the segment an element count's worth of elements, each in the element
+/// type's own little-endian representation.
+///
+/// The values are chosen so a byte-order mistake is a different *answer* rather than a
+/// differently-shaped module: `0x00010203` read little-endian is 66051, and big-endian 50462976.
+fn data_module() -> Module {
+    let mut module = Module::new();
+    let element = FieldType {
+        storage: StorageType::Val(ValType::I32),
+        mutable: true,
+    };
+    let array = module.add_type(SubType::plain(CompType::Array(element)));
+    let ty = signature(&mut module, Vec::new(), vec![ValType::I32]);
+
+    let mut bytes = Vec::new();
+    for value in [0x0001_0203_i32, 4] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let data = module.add_data(bytes);
+
+    let mut body = Insn::new();
+    body.i32_const(0)
+        .i32_const(2)
+        .array_new_data(array, data)
+        .local_set(0);
+    body.local_get(0).i32_const(0).array_get(array);
+    body.local_get(0).i32_const(1).array_get(array);
+    body.numeric(NumOp::Add, ValType::I32).expect("i32.add");
+
+    module.funcs.push(Func {
+        type_index: ty,
+        locals: vec![ValType::Ref(RefType::nullable(HeapType::Concrete(array)))],
+        body: body.into_body(),
+    });
+    export(&mut module, "read", 0);
+    module
+}
+
+#[test]
+fn a_hand_built_data_module_validates_and_reads_its_segment() {
+    let bytes = data_module()
+        .finish()
+        .expect("a module whose lengths all fit");
+    validate(&bytes);
+    if let Some(output) = invoke(&bytes, "read") {
+        assert_eq!(output, "66055");
+    }
 }
 
 /// The reference instructions, and the one place a *non-nullable* reference type is written out:

@@ -22,15 +22,10 @@ use crate::host::NativeHost;
 use crate::package::NativePackage;
 use crate::value::{Args, NativeError, Results};
 
-/// Where `jals.io`'s output goes.
-///
-/// `&self` rather than `&mut self`: a sink is shared by three bindings that each hold their own
-/// `Rc` of it, and a host that needs interior mutability already has `RefCell` — every runtime
-/// here is current-thread, so nothing about this needs to be `Sync`.
-pub trait ConsoleSink {
-    /// Write `text`, which is one flush's worth of buffered code units, decoded.
-    fn write(&self, text: &str);
-}
+// The sink is shared infrastructure rather than this package's own type — `java.base`'s
+// `System.out` prints through the same trait — so it lives in `crate::console`, and the path it
+// was reached by before it moved stays importable.
+pub use crate::console::{CapturedConsole, ConsoleSink};
 
 /// The `jals.io` package.
 pub struct JalsIo;
@@ -122,33 +117,5 @@ impl JalsIo {
         );
 
         package
-    }
-}
-
-/// A sink that keeps what was written, so a test can assert on it without a console.
-///
-/// Shipped rather than left to each consumer's test module because it is the only way to drive
-/// this package's bindings at all, and a consumer writing its own would be writing the same eight
-/// lines to check the same thing.
-#[derive(Debug, Default)]
-pub struct CapturedConsole {
-    written: RefCell<String>,
-}
-
-impl CapturedConsole {
-    /// A console that has been written to zero times.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Everything written so far, joined in order.
-    pub fn take(&self) -> String {
-        core::mem::take(&mut self.written.borrow_mut())
-    }
-}
-
-impl ConsoleSink for CapturedConsole {
-    fn write(&self, text: &str) {
-        self.written.borrow_mut().push_str(text);
     }
 }

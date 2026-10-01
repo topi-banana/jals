@@ -3,7 +3,7 @@ package com.example.mctest;
 // One file, 43 releases. Every attribute here names a *threshold* — `since-1.16`, never `1.16.5` —
 // so a release names one threshold in `jals.toml`, inherits the rest, and a 44th release is a row
 // in that file and no edit to this one. Nothing asks whether the harness is wanted: naming a
-// release is the whole of how it is selected, and `build.rhai` rejects a selection that names none.
+// release is the whole of how it is selected, and `build.java` rejects a selection that names none.
 //
 // The imports carry attributes too, and have to: a type that moved package between releases is two
 // imports of which exactly one may exist, and a disabled declaration is blanked before anything

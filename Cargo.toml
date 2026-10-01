@@ -18,6 +18,7 @@ members = [
   "jals-lint",
   "jals-lsp",
   "jals-native",
+  "jals-platform",
   "jals-playground",
   "jals-progress",
   "jals-project",
@@ -73,6 +74,10 @@ jals-lsp = { path = "jals-lsp" }
 # so a plain `cargo check` is this crate's portability check and a package author's crate needs
 # nothing else on its dependency line.
 jals-native = { path = "jals-native" }
+# `java.base` as a package: the compiled module (which carries the Java it publishes in its ABI
+# section) plus the name its imports are spelled with. Featureless like the package seam it uses,
+# and built by its own build script so a binary that ships it needs no JVM.
+jals-platform = { path = "jals-platform" }
 jals-progress = { path = "jals-progress" }
 jals-project = { path = "jals-project", default-features = false }
 jals-syntax = { path = "jals-syntax" }
@@ -104,11 +109,6 @@ rayon = { version = "1" }
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "stream",
-] }
-rhai = { version = "=1.26.1", default-features = false, features = [
-  "no_module",
-  "no_time",
-  "no_custom_syntax",
 ] }
 rowan = { version = "0.17.0" }
 serde = { version = "1.0.219", default-features = false, features = [

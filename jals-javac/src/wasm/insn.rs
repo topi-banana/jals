@@ -299,6 +299,15 @@ pub enum Instr {
     /// Allocate an array from the values already on the stack, first element deepest — Java's
     /// `{1, 2, 3}`, where the elements are written rather than defaulted.
     ArrayNewFixed(u32, u32),
+    /// `array.new_data` — allocate an array whose elements are copied from a passive data segment,
+    /// taking a byte offset into the segment and an element count, in that order, on the stack.
+    ///
+    /// The elements are read whole: one element per `size(t)` bytes in the element type's own
+    /// little-endian representation. This is how a Java string literal materialises — one
+    /// instruction for the whole `char[]` rather than an `i32.const` / `array.set` pair per
+    /// character — and `Module::finish` writes the data count section that makes the data index
+    /// nameable.
+    ArrayNewData(u32, u32),
     ArrayGet(u32),
     ArraySet(u32),
     ArrayLen,
@@ -540,6 +549,9 @@ impl Instr {
             }
             Self::ArrayNewFixed(ty, count) => {
                 Self::gc(out, 0x08).u32(*ty).u32(*count);
+            }
+            Self::ArrayNewData(ty, data) => {
+                Self::gc(out, 0x09).u32(*ty).u32(*data);
             }
             Self::ArrayGet(ty) => {
                 Self::gc(out, 0x0B).u32(*ty);
@@ -868,6 +880,15 @@ impl Insn {
     /// deepest — Java's `{1, 2, 3}`, where the elements are written rather than defaulted.
     pub fn array_new_fixed(&mut self, ty: u32, count: u32) -> &mut Self {
         self.push(Instr::ArrayNewFixed(ty, count))
+    }
+
+    /// Allocate an array of type `ty` with its elements copied from data segment `data`, taking a
+    /// byte offset into the segment and an element count on the stack, offset deepest. The offset
+    /// and the count are in different units — bytes in, elements out — and the validator checks
+    /// that `offset + count * size(t)` stays inside the segment, so a mismatch is refused before
+    /// anything runs it.
+    pub fn array_new_data(&mut self, ty: u32, data: u32) -> &mut Self {
+        self.push(Instr::ArrayNewData(ty, data))
     }
 
     pub fn array_get(&mut self, ty: u32) -> &mut Self {

@@ -9,12 +9,13 @@
 //! # There is no `main`
 //!
 //! wasm has no entry-point convention, and the one Java has cannot be lowered here: `main` takes a
-//! `String[]`, and a wasm host has no `java.base` to supply `String`. So the entry point is
-//! *named*: an exported function, called by the name the source spells it with. The
-//! [`jals_javac::wasm`] backend exports every `static` method that is not a constructor, which is
-//! wider than "public" and is why an export can turn out to take a parameter no command line can
-//! write — a reference to an object the embedder's collector owns. That is refused with the
-//! position that caused it rather than mis-parsed.
+//! `String[]`, and this runner has no way to build one — its elements are references the
+//! embedder's collector owns, so building the array is a platform's job and not a command line's.
+//! So the entry point is *named*: an exported function, called by the name the source spells it
+//! with. The [`jals_javac::wasm`] backend exports every `static` method that is not a constructor,
+//! which is wider than "public" and is why an export can turn out to take a parameter no command
+//! line can write — a reference to an object the embedder's collector owns. That is refused with
+//! the position that caused it rather than mis-parsed.
 //!
 //! Naming no export at all is still a run: instantiating a module executes its start function,
 //! which is where this backend lowers a class's `static` initialisers. A project with no static
@@ -29,16 +30,23 @@
 //! implementer and an unreachable branch. A second engine is when the seam is worth having.
 
 use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::Range;
 
+use jals_hir::FileId;
+use jals_javac::wasm::{POSITION_GLOBAL, Positions};
 use jals_native::{Args, NativeBindings, NativeError, NativeHost, NativeValue, RefSlot, Results};
 use jals_progress::{Activity, Outcome, Progress};
 use tinywasm::types::{ExportType, ImportType, WasmType};
-use tinywasm::{ExternItem, FuncContext, HostFunction, Imports, ModuleInstance, RefValue, Store};
+use tinywasm::{
+    ExecProgress, ExternItem, FuncContext, Function, HostFunction, Imports, ModuleInstance,
+    RefValue, Store,
+};
 
 /// A library module to instantiate and link before the project's own.
 ///
@@ -108,6 +116,24 @@ pub struct WasmRunRequest<'a> {
     /// earlier one sees that module's exports. Their exports are searched only for imports nothing
     /// else supplies — see [`WasmForeignModule`].
     pub foreign: &'a [WasmForeignModule<'a>],
+    /// How much the run may execute before it is stopped, or `None` to let it run to completion.
+    ///
+    /// In the engine's fuel units — one per instruction executed, as the engine counts them — so
+    /// this is an instruction budget, not the source-level operation count a host may expose to
+    /// its user. A run that exhausts it comes back as [`WasmRunError::OutOfFuel`], with the
+    /// statement it was in when the budget ran out when the module carries positions.
+    ///
+    /// `None` is what every host but the build-script engine passes: a script is someone else's
+    /// code and the cap is what keeps one from hanging the build, while `jals run` runs the user's
+    /// own project and stopping it early would be surprising. The module's own code is metered —
+    /// its start function, where the `static` initialisers are, as well as the export — while a
+    /// linked library's start runs untimed: a library is a package the host selected, not code
+    /// under the budget. Code a host binding calls back into does not consume fuel either, because
+    /// the engine runs a reentrant call to completion.
+    ///
+    /// There is no out-of-fuel *trap*: the engine reports a suspension, not an error, which is why
+    /// this has a variant of its own rather than arriving as a trap would.
+    pub fuel: Option<u32>,
     /// Where the run reports what it is doing.
     pub progress: &'a Progress,
 }
@@ -241,6 +267,12 @@ pub enum WasmRunError {
     /// store is gone by the time a caller sees this — so the message says that rather than
     /// pretending a trap occurred.
     Exception,
+    /// The run was still executing when its instruction budget ran out.
+    ///
+    /// Its own answer rather than a [`Trap`](Self::Trap), because nothing went wrong with the
+    /// code: it went on too long. The engine reports a budgeted call that exhausts its fuel as a
+    /// suspension rather than an error, so there is no engine error for this to be folded into.
+    OutOfFuel,
     /// The export was found, and the engine then refused the handle it had just produced.
     ///
     /// Its own answer rather than folded into [`Instantiate`](Self::Instantiate), which means
@@ -251,6 +283,23 @@ pub enum WasmRunError {
     /// either would be the wrong place. Kept rather than unwrapped because a panic in a library
     /// is worse than an answer nobody expects to read.
     Signature { name: String, message: String },
+    /// A failure inside the program, with where it happened when the module carries positions.
+    ///
+    /// Attached by the runner after the failure, from the module's exported `$jals$position`
+    /// global and the `jals.positions` table that came with it — see [`Positions`]. The wrapped
+    /// error is the engine's answer; this adds the one thing the engine cannot know, which is
+    /// which statement of which source the module was executing. The same shape as the
+    /// compile-time [`WasmError::Located`](jals_javac::wasm::WasmError::Located), and attached
+    /// where the module was compiled *with*
+    /// [`positions`](jals_javac::wasm::WasmOptions::positions): a module without them fails here
+    /// as the bare error.
+    Located {
+        error: Box<Self>,
+        /// The source file, numbered the way the compile numbered its inputs.
+        file: FileId,
+        /// The statement's byte range in that file.
+        range: Range<usize>,
+    },
 }
 
 impl WasmRunError {
@@ -271,7 +320,39 @@ impl WasmRunError {
     /// `native`-gated module has to carry that gate itself or it is dead code there.
     #[cfg(feature = "native")]
     pub(crate) const fn is_execution_failure(&self) -> bool {
-        matches!(self, Self::Trap(_) | Self::Exception)
+        match self {
+            Self::Trap(_) | Self::Exception | Self::OutOfFuel => true,
+            Self::Located { error, .. } => error.is_execution_failure(),
+            _ => false,
+        }
+    }
+
+    /// Where a failure inside the program happened, when the module carries positions.
+    ///
+    /// The file is the one the compile numbered its inputs with — the same numbering
+    /// [`WasmError::location`](jals_javac::wasm::WasmError::location) reports for a compile error
+    /// — and the range is a byte range into that file's text. `None` when the module was compiled
+    /// without positions, or when the failure came before any statement ran.
+    pub fn location(&self) -> Option<(FileId, Range<usize>)> {
+        match self {
+            Self::Located { file, range, .. } => Some((*file, range.clone())),
+            _ => None,
+        }
+    }
+
+    /// This failure, with where the module was executing when it happened.
+    ///
+    /// A failure with no position to add is itself: there is nothing to say, and a `Located`
+    /// wrapping nothing would only make a caller unwrap it to find the error it already had.
+    fn located(self, position: Option<(FileId, Range<usize>)>) -> Self {
+        match position {
+            Some((file, range)) => Self::Located {
+                error: Box::new(self),
+                file,
+                range,
+            },
+            None => self,
+        }
     }
 }
 
@@ -332,10 +413,17 @@ impl fmt::Display for WasmRunError {
             ),
             Self::Trap(message) => write!(f, "the call trapped: {message}"),
             Self::Exception => f.write_str("the code threw an exception and nothing caught it"),
+            Self::OutOfFuel => {
+                f.write_str("the run exhausted its instruction budget before it finished")
+            }
             Self::Signature { name, message } => write!(
                 f,
                 "the engine exports `{name}` but would not describe it: {message}"
             ),
+            // The position is a file number and a byte range, which mean nothing without the
+            // source they number; a host that has the source renders it with
+            // [`location`](Self::location), and one that does not has nothing better to print.
+            Self::Located { error, .. } => write!(f, "{error}"),
         }
     }
 }
@@ -489,6 +577,19 @@ impl NativeHost for EngineHost<'_> {
     }
 }
 
+/// What the module's own code runs under, and what it leaves behind if it stops.
+///
+/// The request's two fields that reach the code, carried as one value because they travel
+/// together: the budget is what stops a run early and the table is what says where it stopped.
+/// `Copy`, so the start function and the export are handed it in turn without a borrow dance.
+#[derive(Clone, Copy, Default)]
+struct Metering<'a> {
+    /// How much the run may execute before it is stopped — [`WasmRunRequest::fuel`].
+    fuel: Option<u32>,
+    /// The module's statement table, when it carries one.
+    positions: Option<&'a Positions>,
+}
+
 /// Runs a `jals-wasm` module with the embedded interpreter.
 ///
 /// A namespace rather than a value: the engine holds no configuration of its own, and a `Store` is
@@ -502,6 +603,9 @@ impl WasmRunner {
             let module = Self::parse(request.module)?;
             let libraries = Self::parse_libraries(request.libraries)?;
             let foreign = Self::parse_foreign(request.foreign)?;
+            // Read here rather than in `invoke`, because the parsed module no longer holds the
+            // bytes and the section is only ever looked at after something went wrong.
+            let positions = Positions::of_module(request.module);
             Self::invoke(
                 &module,
                 &libraries,
@@ -509,6 +613,10 @@ impl WasmRunner {
                 request.invoke,
                 request.args,
                 request.natives,
+                Metering {
+                    fuel: request.fuel,
+                    positions: positions.as_ref(),
+                },
             )
         })
     }
@@ -528,7 +636,19 @@ impl WasmRunner {
         progress: &Progress,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         Self::reporting(progress, invoke, || {
-            Self::invoke(module, libraries, foreign, invoke, args, natives)
+            // The test launcher's modules are compiled for tests: neither a budget nor a position
+            // table is part of that arrangement. The launcher keeps the parse — that is what it is
+            // for — and a hypothetical module with positions would still fail here without one,
+            // because the bytes are gone by this point.
+            Self::invoke(
+                module,
+                libraries,
+                foreign,
+                invoke,
+                args,
+                natives,
+                Metering::default(),
+            )
         })
     }
 
@@ -614,6 +734,11 @@ impl WasmRunner {
     }
 
     /// The run itself, minus the decode: instantiate, then call the named export when there is one.
+    ///
+    /// The metering is the request's, threaded down to the two calls that run the module's own
+    /// code — its start function and, when one was named, its export. Everything before those is
+    /// this crate's own work: decoding, instantiating, linking, and resolving the export, none of
+    /// which the budget is for.
     fn invoke(
         module: &ParsedModule,
         libraries: &[(String, ParsedModule)],
@@ -621,6 +746,7 @@ impl WasmRunner {
         invoke: Option<&str>,
         args: &[String],
         natives: &NativeBindings,
+        metering: Metering<'_>,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         let module = &module.0;
         let (mut imports, deferred) = Self::link(module, natives, libraries)?;
@@ -672,7 +798,7 @@ impl WasmRunner {
                     })?;
             instance
                 .start(&mut store)
-                .map_err(Self::execution_failure)?;
+                .map_err(|error| Self::execution_failure(error, None))?;
             imports
                 .link_module(name, instance)
                 .map_err(|error| WasmRunError::Library {
@@ -694,7 +820,7 @@ impl WasmRunner {
                     })?;
             instance
                 .start(&mut store)
-                .map_err(Self::execution_failure)?;
+                .map_err(|error| Self::execution_failure(error, None))?;
             // The clone is the handle the deferred bindings reach into; `link_module` takes its
             // own.
             imports
@@ -726,9 +852,7 @@ impl WasmRunner {
         // as "the module could not be instantiated", which sends the reader to the encoding.
         let instance = ModuleInstance::instantiate_no_start(&mut store, module, Some(&imports))
             .map_err(|error| WasmRunError::Instantiate(error.to_string()))?;
-        instance
-            .start(&mut store)
-            .map_err(Self::execution_failure)?;
+        Self::start(&instance, &mut store, metering)?;
 
         let Some(name) = invoke else {
             return Ok(WasmRunOutcome::Instantiated);
@@ -776,8 +900,14 @@ impl WasmRunner {
         // The engine writes into a buffer the caller sizes, and `tinywasm::WasmValue` has no
         // `Default` — the placeholder is overwritten by every result the call produces.
         let mut returned = vec![tinywasm::WasmValue::I32(0); results];
-        func.call(&mut store, &arguments, &mut returned)
-            .map_err(Self::execution_failure)?;
+        Self::call(
+            &func,
+            &instance,
+            &mut store,
+            &arguments,
+            &mut returned,
+            metering,
+        )?;
         Ok(WasmRunOutcome::Returned(
             returned.iter().map(Self::value).collect(),
         ))
@@ -933,16 +1063,118 @@ impl WasmRunner {
         Ok(())
     }
 
+    /// Run the module's start function, metering it when the request named a budget.
+    ///
+    /// The start function is where every `static` initialiser lives, so it is the module's own
+    /// code and inside the budget — for a run with no export named, it is *all* the code there
+    /// is. A linked library's start function is the opposite case and calls
+    /// [`execution_failure`](Self::execution_failure) directly: a library is a package the host
+    /// selected, not code the budget is for.
+    fn start(
+        instance: &ModuleInstance,
+        store: &mut Store,
+        metering: Metering<'_>,
+    ) -> Result<(), WasmRunError> {
+        let Some(func) = instance
+            .start_func(store)
+            .map_err(|error| Self::execution_failure(error, None))?
+        else {
+            return Ok(());
+        };
+        // A start function takes nothing and returns nothing, so both slices are empty and the
+        // engine has nothing to write.
+        let mut returned = [];
+        Self::call(&func, instance, store, &[], &mut returned, metering)
+    }
+
+    /// Call one function of the module, metering it when the request named a budget.
+    ///
+    /// The two paths differ only in whether the engine stops at a fuel checkpoint. Without a
+    /// budget, `call` runs the function to completion; with one, the whole budget is handed to a
+    /// single resumable round and a suspension means the budget is gone. One round rather than a
+    /// loop because the budget *is* the cap: a host binding can charge extra from inside the run
+    /// and what remains when it reaches zero is a run that has to stop, so there is nothing for a
+    /// second round to spend. The engine overshoots the requested fuel by at most its checkpoint
+    /// interval before reporting the suspension.
+    fn call(
+        func: &Function,
+        instance: &ModuleInstance,
+        store: &mut Store,
+        arguments: &[tinywasm::WasmValue],
+        returned: &mut [tinywasm::WasmValue],
+        metering: Metering<'_>,
+    ) -> Result<(), WasmRunError> {
+        let Some(fuel) = metering.fuel else {
+            return func.call(store, arguments, returned).map_err(|error| {
+                let position = Self::position(instance, store, metering.positions);
+                Self::execution_failure(error, position)
+            });
+        };
+        let mut execution = func
+            .call_resumable(store, arguments, returned)
+            .map_err(|error| Self::execution_failure(error, None))?;
+        let progress = execution.resume_with_fuel(fuel);
+        // The handle's borrow of the store ends at its last use, which was that resume — it has no
+        // destructor to run — and where the run stopped is read out of the same store. The global
+        // it reads survives: it belongs to the instance, not to the call.
+        match progress {
+            Ok(ExecProgress::Completed(())) => Ok(()),
+            Ok(ExecProgress::Suspended) => {
+                let position = Self::position(instance, store, metering.positions);
+                Err(WasmRunError::OutOfFuel.located(position))
+            }
+            Err(error) => {
+                let position = Self::position(instance, store, metering.positions);
+                Err(Self::execution_failure(error, position))
+            }
+        }
+    }
+
     /// One failure of the project's own code, as this crate's vocabulary.
     ///
     /// A `throw` and a trap leave the engine as different variants and are different things to
     /// tell a reader about, so they stay apart here. Everything else the engine can return at a
     /// call is a trap as far as a caller is concerned.
-    fn execution_failure(error: tinywasm::Error) -> WasmRunError {
-        match error {
+    ///
+    /// A package's refusal arrives as a host trap — see [`EngineHost::trap`] — and the engine's
+    /// rendering of one carries its own scaffolding (`host function trap: unknown error: …`),
+    /// which is not part of what the package said. The payload is this crate's own
+    /// [`tinywasm::Error::Other`], so unwrapping it back to the refusal is exact rather than a
+    /// guess at the engine's formatting.
+    fn execution_failure(
+        error: tinywasm::Error,
+        position: Option<(FileId, Range<usize>)>,
+    ) -> WasmRunError {
+        let error = match error {
             tinywasm::Error::Exception(_) => WasmRunError::Exception,
+            tinywasm::Error::Trap(tinywasm::Trap::HostFunction(payload)) => {
+                match payload.downcast_ref::<tinywasm::Error>() {
+                    Some(tinywasm::Error::Other(message)) => WasmRunError::Trap(message.clone()),
+                    _ => WasmRunError::Trap(payload.to_string()),
+                }
+            }
             error => WasmRunError::Trap(error.to_string()),
-        }
+        };
+        error.located(position)
+    }
+
+    /// Where the module was executing when a failure stopped it, when the module carries positions.
+    ///
+    /// The module's exported `$jals$position` global holds the index of the last statement entered
+    /// — `-1` until one has — and the `jals.positions` section that came with it says where that
+    /// statement was written. Nothing is read off a call stack: a stack is gone by the time a trap
+    /// reaches the host, and this is what the compile left behind to replace it.
+    fn position(
+        instance: &ModuleInstance,
+        store: &mut Store,
+        positions: Option<&Positions>,
+    ) -> Option<(FileId, Range<usize>)> {
+        let positions = positions?;
+        let Ok(tinywasm::WasmValue::I32(index)) = instance.global_get(store, POSITION_GLOBAL)
+        else {
+            return None;
+        };
+        positions.get(index)
     }
 
     /// The names of every function the module exports, in module order.
@@ -1124,6 +1356,7 @@ mod tests {
             invoke,
             args,
             natives,
+            fuel: None,
             progress: &Progress::SILENT,
         })
     }

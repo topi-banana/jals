@@ -12,7 +12,7 @@ indexing, and type inference/checking — including resolving types from a proje
 classpath and `[dependencies]` (explicit local/remote jars plus transitive `git`/`path` JALS source
 projects, with readable decompiled Java when a jar has no sources). Alongside them, a Cargo-style
 build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK's `javac` / `java` from a
-`jals.toml` manifest and can run sandboxed Rhai build scripts before compilation.
+`jals.toml` manifest and can run a sandboxed `build.java` before compilation.
 
 > 日本語版の README は [README_jp.md](README_jp.md) にあります。
 
@@ -43,8 +43,9 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   `examples/hello_world_native` print `Hello, world!` from a module that still has no `String`
   in it.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
-  drives `jals build` / `run` / `test` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
-  bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
+  drives `jals build` / `run` / `test` / `clean` / `init`. An optional `build.java` runs before
+  `javac`, using a bounded storage-only API to generate sources and augment flags, classpaths, and
+  environments.
 - **Transitive source-project graphs.** `git`/`path` dependencies can themselves be JALS projects.
   Stable node identities deduplicate diamonds; every unique node is preprocessed dependency-first,
   then projected into verified source/classpath artifacts without mutating dependency trees.
@@ -52,7 +53,7 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
   `jals-decompile`, `jals-javac`, `jals-native`, `jals-storage`, `jals-config`) are `no_std` and
   build for `wasm32-unknown-unknown`; `jals-classpath`'s resolution core, `jals-project`'s in-memory graph, and
-  `jals-build`'s Rhai runner do too (host I/O sits behind `native` features). The browser playground
+  `jals-build`'s build-script runner do too (host I/O sits behind `native` features). The browser playground
   therefore runs the same analysis, project-graph, and build-script stack client-side.
 
 ## Workspace layout
@@ -74,7 +75,7 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 | [`jals-exec`](jals-exec)             | The unified current-thread execution context for native, browser, and inline hosts, including deterministic worker fan-out and runtime-free cooperative yielding.                                                                                                                                                                                                                                                   |
 | [`jals-storage`](jals-storage)       | Deterministic, revisioned project storage. Portable code uses validated `FileKey`/`DirKey` values, immutable `CodeTree` snapshots, transactions, overlays, a SHA-256 verified artifact cache (whole-buffer `lookup` or streaming `open_verified` readers), and the portable `io` byte-stream traits the class-file codec parses through; memory and `std`-gated native adapters implement the same sealed contract. |
 | [`jals-project`](jals-project)       | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts.                                                                   |
-| [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
+| [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs a sandboxed Java pre-build script over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
 | [`jals-lsp`](jals-lsp)               | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only.                                                                                                                                                                                              |
 | [`jals-native`](jals-native)         | A Java package whose implementation is Rust: the Java it publishes and the host functions its `native` methods bind to, in one value. `[build] native-packages` selects one; the wasm backend turns each `native` method into an import and the runner links it. Ships `jals.io`.                                                                                                                                                                                                                       |
 | [`jals-progress`](jals-progress)     | What a run is doing, as data: the event vocabulary portable crates report through, plus the timing ledger `--timings` renders as a self-contained HTML page. Draws nothing — a host decides what a fact looks like.                                                                                                                            |
@@ -398,7 +399,7 @@ release = 21                        # javac --release N
 # source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
 # classes-dir = "target/classes"    # javac -d
 # classpath   = ["libs/guava.jar"]  # -classpath entries
-# script = { type = "rhai", file = "build.rhai" }
+# script = { type = "java", file = "build.java" }
 
 [run]
 main-class = "com.example.Main"     # entry point for `jals run` (used when no [[bin]] exists)
@@ -407,7 +408,7 @@ main-class = "com.example.Main"     # entry point for `jals run` (used when no [
 # Source projects are discovered transitively; `dir` selects a project inside a monorepo.
 shared = { path = "../shared" }
 core = { git = "https://github.com/example/mono", rev = "abc123", dir = "core" }
-# `features` enables build features in that dependency's own build.rhai (Cargo's per-dep features);
+# `features` enables build features in that dependency's own build.java (Cargo's per-dep features);
 # `default-features = false` skips that dependency's own `default` list.
 render = { path = "../render", features = ["vulkan"], default-features = false }
 
@@ -417,18 +418,18 @@ render = { path = "../render", features = ["vulkan"], default-features = false }
 # main-class = "com.example.Server"
 ```
 
-With `script` configured, `build.rhai` runs before source discovery and `javac`. It can read the
+With `script` configured, `build.java` runs before source discovery and `javac`. It can read the
 project snapshot and the selected `[features]`, publish ordinary files below
-`target/jals/build/rhai/out`, and add generated
-sources, classpath entries, `javac`/JVM flags, and compile/run environment entries. A typed `tasks`
-DAG can also declare bounded, digest-verified downloads, JSON projections, safe source-JAR
-extraction, jar remapping (Mojang/ProGuard or tiny v2), jar merge, compile-oriented decompilation, and explicit
-exclusive source-tree publication; Rhai never reads task results or invokes a process.
-`replace-root` replaces every file below its declared destination and is atomic with
-ordinary script output. The native CLI and LSP execute tasks; the LSP defers a root containing an
-open document, while the browser rejects physical publication before fetching. See the runnable
-[`examples/rhai_build_script`](examples/rhai_build_script) project and the
-[`jals-build` Rhai reference](jals-build/README.md#rhai-build-scripts) for the complete API,
+`target/jals/build/script/out`, and add generated sources, classpath entries, `javac`/JVM flags, and
+compile/run environment entries. A typed `Tasks` vocabulary can also declare bounded,
+digest-verified downloads, JSON projections, safe source-JAR extraction, jar remapping
+(Mojang/ProGuard or tiny v2), jar merge, compile-oriented decompilation, and explicit exclusive
+source-tree publication; a script never reads task results or invokes a process. Publication
+replaces every file below its declared destination and is atomic with ordinary script output. The
+native CLI and LSP execute tasks; the LSP defers a root containing an open document, while the
+browser rejects physical publication before fetching. See the runnable
+[`examples/build_script`](examples/build_script) project and the
+[`jals-build` Java reference](jals-build/README.md#java-build-scripts) for the complete API,
 fingerprinting/cache behavior, sandbox limits, and Rust `BuildScript` model.
 The source-archive task shape is shown in
 [`examples/task_source_archive`](examples/task_source_archive); a full remapped-Minecraft example is
@@ -444,7 +445,7 @@ test-only dependency that no build resolves and no jar carries. That harness pin
 ~60 runtime jars and carries a threshold chain of its own for the client API, so nothing the mod's
 tests write names a release.
 
-The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
+The root build-script phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
 and subprocess environment directives intentionally affect the later explicit `jals build`/`run`
 JDK process. Treat root build scripts as project code and review them before building an untrusted
 checkout.
@@ -465,8 +466,8 @@ malformed manifest or a dependency cycle is a hard `jals build`/`run` failure.
 Graph nodes have stable identities, so a diamond is visited once even when dependency names differ.
 Every unique node takes the preprocessing transition unconditionally and exactly once in
 dependency-first order; binary and legacy-source nodes are no-ops, while a manifest-backed node runs
-its optional Rhai script. A dependency script exports only sources registered with
-`build.add_source` and classpath entries registered with `build.add_classpath`. Its `javac`/JVM
+its optional build script. A dependency script exports only sources registered with
+`Build.addSource` and classpath entries registered with `Build.addClasspath`. Its `javac`/JVM
 arguments, compile/run environment, and metadata remain node-local and do not propagate. Outputs,
 classpath entries, and source snapshots are published under the node identity as digest-verified
 artifacts, and dependency source trees are never mutated. The root script retains the full semantics
@@ -600,7 +601,7 @@ public class Foo {
 
 `jals-playground` is a small browser app ([Yew](https://yew.rs), built and served with
 [Trunk](https://trunkrs.dev)) that runs the `wasm32`-compiled syntax, formatting, analysis, and
-sandboxed Rhai build-script layers client-side, with no server round-trip — including generated
+sandboxed Java build-script layer client-side, with no server round-trip — including generated
 Java sources, remote jars, and the portable in-memory path-project graph from a `jals.toml` so
 hover/completion/type-check see those inputs. The browser cannot clone Git dependencies; it reports
 each one as a warning rather than claiming Git support.
@@ -730,8 +731,8 @@ cargo build --release --target wasm32-unknown-unknown \
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
 # The portable in-memory project graph includes dependency-script preparation and artifact projection
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
-# The Rhai feature remains host-I/O-free and wasm-compatible; the browser builds the same engine
-cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+# The build-script feature remains host-I/O-free and wasm-compatible; the browser builds the same engine
+cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
@@ -764,7 +765,7 @@ for any change to the syntax or formatting layers:
   `jals-decompile`, `jals-javac`, `jals-storage`, and `jals-config` build for
   `wasm32-unknown-unknown` as `no_std` crates;
   `jals-classpath`'s resolution core builds for `wasm32` too (`--no-default-features`), as does
-  `jals-build` with its portable `rhai` feature and `jals-project`'s in-memory graph.
+  `jals-build` with its portable `build-script` feature and `jals-project`'s in-memory graph.
 
 ## Status
 

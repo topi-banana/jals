@@ -16,7 +16,7 @@ features = ["attributes"]
 default = []
 
 # The threshold chain. A release names exactly one of these and inherits the rest, so `#[cfg]` in
-# `GameClient.java` and the `--release` cascade in `build.rhai` never name a version — which is what
+# `GameClient.java` and the `--release` cascade in `build.java` never name a version — which is what
 # makes a 44th release an edit to this file alone.
 #
 # A threshold exists only where something here actually branches, and the set is *this project's*.
@@ -27,7 +27,7 @@ default = []
 # What each one buys, oldest first:
 #
 # - `since-1.14.4` — the bottom of the chain. Every release reaches it, so it is the one question
-#   the chain can answer that no single release can: was a release named at all? `build.rhai`
+#   the chain can answer that no single release can: was a release named at all? `build.java`
 #   errors when it is off, because the SDK falls back to its own newest release while every
 #   threshold here stays off — the oldest source against the newest game.
 # - `since-1.15` — the game window is behind `Minecraft.getWindow()`; on 1.14.4 it is the public
@@ -141,4 +141,4 @@ default = []
 minecraft = { path = "../minecraft", features = ["client"] }
 
 [build]
-script = { type = "rhai", file = "build.rhai" }
+script = { type = "java", file = "build.java" }

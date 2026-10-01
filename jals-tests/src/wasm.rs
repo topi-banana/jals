@@ -924,19 +924,25 @@ impl CaseResult {
             let typed = jals_exec::block_on_inline(semantics.typed());
             let module = match CompileWasm::module(&[typed], &[], &index, WasmOptions::default()) {
                 Ok(module) => module,
-                Err(WasmError::NoRepresentation(ty)) => {
-                    return Lowered::stopped(Outcome::OutOfSubset(ty));
-                }
-                Err(WasmError::TooLarge) => return Lowered::stopped(Outcome::TooLarge),
-                Err(WasmError::Unsupported(what)) => {
-                    return Lowered::stopped(Outcome::Unsupported(what));
-                }
-                Err(error @ WasmError::Unresolved(_)) => {
-                    return Lowered::stopped(Outcome::Unresolved(format!("{error}")));
-                }
-                Err(WasmError::NoImplementation(what)) => {
-                    return Lowered::stopped(Outcome::NoImplementation(what));
-                }
+                // A lowering boundary attaches the source it failed at; this classifier buckets by
+                // the *kind*, which reads the same with or without one.
+                Err(error) => match error.kind() {
+                    WasmError::NoRepresentation(ty) => {
+                        return Lowered::stopped(Outcome::OutOfSubset(ty.clone()));
+                    }
+                    WasmError::TooLarge => return Lowered::stopped(Outcome::TooLarge),
+                    WasmError::Unsupported(what) => {
+                        return Lowered::stopped(Outcome::Unsupported(what));
+                    }
+                    WasmError::NoImplementation(what) => {
+                        return Lowered::stopped(Outcome::NoImplementation(what.clone()));
+                    }
+                    // `Unresolved` reads through the whole error, which is what this arm always
+                    // did; `Located` is what `kind` unwraps and cannot answer.
+                    WasmError::Unresolved(_) | WasmError::Located { .. } => {
+                        return Lowered::stopped(Outcome::Unresolved(format!("{error}")));
+                    }
+                },
             };
             let exports: Vec<String> = module
                 .exports

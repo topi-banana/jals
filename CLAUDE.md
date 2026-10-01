@@ -715,11 +715,11 @@ Portable crates use `core + alloc`.
   any worker count), and `native` implies `archive` and introduces HTTP plus `jals-storage/std` and
   `jals-exec/tokio`.
 - `jals-project --no-default-features` is `no_std + alloc`; it includes the portable in-memory
-  graph, Rhai dependency preprocessing (via `jals-build/rhai`, which it always enables), and
-  archive projection. `native` adds host path/Git acquisition plus the native classpath, execution,
-  and storage adapters.
-- `jals-build --no-default-features` must remain a genuine portable core; its `rhai` feature stays
-  portable too, and CI builds it for `wasm32`. `native` is the host half (JDK discovery, `javac`
+  graph, Java build-script preprocessing (via `jals-build/build-script`, which it always enables),
+  and archive projection. `native` adds host path/Git acquisition plus the native classpath,
+  execution, and storage adapters.
+- `jals-build --no-default-features` must remain a genuine portable core; its `build-script`
+  feature stays portable too, and CI builds it for `wasm32`. `native` is the host half (JDK discovery, `javac`
   spawning, `native.rs`). `wasm-run` adds `WasmRunner` and is portable and independent of `native`
   — `jals-cli` and the browser enable the same feature and reach the same interpreter — but it is
   a feature rather than an unconditional dependency because it is the one thing here pinned to an
@@ -793,7 +793,7 @@ cargo check -p jals-frontend
 cargo check -p jals-progress
 cargo check -p jinja
 cargo check -p jals-project --all-features
-cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
 cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
@@ -864,11 +864,11 @@ the moment it has a tracked `.java`. Seven consequences for an example:
   `logs/` and `crash-reports/`. It is also the cell whose fmt/lint step depends on the *test* step
   having run: analysis is always offline, and the client's runtime jars are fetched by a
   `[dev-dependencies]` entry, which `jals build` does not resolve.
-- `examples/scripts/gen-client-runtime.py` is a **generator, not a build step**: it rewrites the
-  `const RUNTIME` table in `examples/minecraft_client_test/build.rhai` between two exact markers,
+- `examples/scripts/gen-client-runtime.py` is a **generator, not a build step**: it rewrites
+  `examples/minecraft_client_test/runtime.tsv`, the table `build.java` parses at script run time,
   and its output is committed. CI never runs it. It takes no arguments and writes **every** release
-  — the list and each release's metadata digest come from `examples/minecraft/build.rhai`'s own
-  `CATALOG`, so no release list is restated and no mutable version manifest is consulted — and it
+  — the list and each release's metadata digest come from `examples/minecraft/build.java`'s own
+  catalog, so no release list is restated and no mutable version manifest is consulted — and it
   refuses to write at all when it cannot read one library of one release, because a table that is
   partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
 - The client harness supports the same 43 releases the SDK does, and **one feature selects it** — a
@@ -881,7 +881,7 @@ the moment it has a tracked `.java`. Seven consequences for an example:
   jar and the ~60 runtime libraries even without the consumer's own `client-test`, so a consumer
   whose defaults route `minecraft/server` compiles its tests against the SDK's **merged** jar where
   its build used the server one — a second fetch and a second whole-game remap, which is why all
-  three `minecraft_mod` cells now run `jals test` before their offline lint. `build.rhai` rejects a selection naming no release,
+  three `minecraft_mod` cells now run `jals test` before their offline lint. `build.java` rejects a selection naming no release,
   because the SDK falls back to its newest while every threshold stays off. The `#[cfg]` in
   `GameClient.java` names a *threshold*, never a release, and the fourteen thresholds are that
   project's own: `examples/minecraft_mod` reads the same catalog through five of its own, because it

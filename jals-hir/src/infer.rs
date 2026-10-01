@@ -2149,16 +2149,18 @@ impl ProjectIndex {
     }
 
     /// The type arguments in effect at `declaring`, seen from a use of `receiver` with
-    /// `receiver_args`. `None` when `declaring` is not on `receiver`'s indexed supertype chain.
+    /// `receiver_args` — what binds `Iterable`'s `E` to an `Integer` for a `List<Integer>`, and to
+    /// the same `Integer` for a non-generic `class Evens implements Iterable<Integer>`.
     ///
-    /// The shared half of [`selected_member_ty`](Self::selected_member_ty) and
-    /// [`param_tys_as_seen_from`](Self::param_tys_as_seen_from): both walk to the type that declares
-    /// a member and differ only in what they project out of the frame the walk stops on. It is
-    /// written once because the walk is the part carrying the rule — the composition down the chain
-    /// (`class A<T> implements B<List<T>>` carries `T` through `B`'s own parameter) and the
-    /// [`walk_supertypes_stateful`](ProjectIndex::walk_supertypes_stateful) visited set that
-    /// terminates it on a malformed index.
-    fn substitution_to(
+    /// `None` when `declaring` is not on `receiver`'s indexed supertype chain. The walk carries
+    /// the rule: the composition down the chain (`class A<T> implements B<List<T>>` carries `T`
+    /// through `B`'s own parameter) and a visited set that terminates it on a malformed index. A
+    /// raw receiver (no arguments) leaves the variables un-substituted, so they survive by name.
+    ///
+    /// Public because it is the only way to ask what a supertype's parameter became: a member's
+    /// own resolved type keeps the *declaring* type's variables, which is the wrong answer for a
+    /// `for`-each that has to name the wrapper of a primitive element.
+    pub fn substitution_to(
         &self,
         receiver: ItemId,
         receiver_args: &[Ty],
