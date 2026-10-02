@@ -156,7 +156,8 @@ mod tests {
     #[test]
     fn single_line_block_has_no_fold() {
         // Everything on one line -> nothing spans >= 2 lines.
-        assert!(folds("class C { void m() {} }").is_empty());
+        let f = folds("class C { void m() {} }");
+        assert!(f.is_empty(), "{f:?}");
     }
 
     #[test]
@@ -214,7 +215,8 @@ mod tests {
 
     #[test]
     fn one_line_comment_has_no_fold() {
-        assert!(folds("/* one line */\nclass C {}").is_empty());
+        let f = folds("/* one line */\nclass C {}");
+        assert!(f.is_empty(), "{f:?}");
     }
 
     #[test]
@@ -233,7 +235,8 @@ mod tests {
 
     #[test]
     fn single_import_has_no_fold() {
-        assert!(folds("import java.util.List;\nclass C {}").is_empty());
+        let f = folds("import java.util.List;\nclass C {}");
+        assert!(f.is_empty(), "{f:?}");
     }
 
     #[test]

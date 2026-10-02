@@ -1581,11 +1581,8 @@ fn unused_variables_honours_the_configured_prefix() {
 fn dead_code_can_be_told_that_annotations_do_not_inject() {
     let src = "class C { @Deprecated private int f; }";
     let mut config = Config::default();
-    assert!(
-        jals_exec::block_on_inline(LintOutput::lint_source(src, &config))
-            .diagnostics
-            .is_empty()
-    );
+    let allowed = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    assert!(allowed.diagnostics.is_empty(), "{:?}", allowed.diagnostics);
     config.unused.dead_code.options.annotated = AnnotatedMembers::Report;
     let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
     assert!(

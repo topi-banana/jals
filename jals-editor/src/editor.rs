@@ -407,12 +407,8 @@ mod tests {
                     .await
                     .is_none()
             );
-            assert!(
-                editor
-                    .references(&key("src/Main.java"), &at, true)
-                    .await
-                    .is_empty()
-            );
+            let refs = editor.references(&key("src/Main.java"), &at, true).await;
+            assert!(refs.is_empty(), "{refs:?}");
             assert_eq!(
                 editor
                     .rename_targets(&key("src/Main.java"), &at)
@@ -471,7 +467,8 @@ mod tests {
             assert!(refs.iter().any(|(p, _)| p == "src/Greeter.java"));
 
             // An unknown path answers empty, never panicking.
-            assert!(editor.outline(&key("nowhere.java")).is_empty());
+            let unknown = editor.outline(&key("nowhere.java"));
+            assert!(unknown.is_empty(), "{unknown:?}");
             assert!(
                 editor
                     .definition(&key("nowhere.java"), &(0, 0))

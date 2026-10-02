@@ -3597,7 +3597,7 @@ mod tests {
             CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Build)
                 .expect("the build scope resolves no wasm dependency");
         assert!(resolved.libraries.is_empty());
-        assert!(resolved.foreign.is_empty());
+        assert!(resolved.foreign.is_empty(), "{:?}", resolved.foreign);
         let error = CompilePlan::wasm_libraries(root, &manifest, &features, DependencyScope::Test)
             .err()
             .expect("the test scope reads the development dependency");

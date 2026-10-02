@@ -214,7 +214,11 @@ fn assigning_a_list_to_a_differently_parameterized_list_is_flagged() {
 fn assigning_a_list_to_the_same_parameterization_is_ok() {
     let src = "import java.util.List; \
                class C { void m() { List<String> a = null; List<String> b = a; } }";
-    assert!(mismatches_with_stdlib(src).is_empty());
+    assert!(
+        mismatches_with_stdlib(src).is_empty(),
+        "{:?}",
+        mismatches_with_stdlib(src)
+    );
 }
 
 #[test]
@@ -223,14 +227,22 @@ fn assigning_to_a_supertype_with_arguments_stays_lenient() {
     // lenient on its arguments, so nothing is flagged.
     let src = "import java.util.List; import java.util.Collection; \
                class C { void m() { List<String> a = null; Collection<String> c = a; } }";
-    assert!(mismatches_with_stdlib(src).is_empty());
+    assert!(
+        mismatches_with_stdlib(src).is_empty(),
+        "{:?}",
+        mismatches_with_stdlib(src)
+    );
 }
 
 #[test]
 fn a_raw_target_is_lenient_about_arguments() {
     let src = "import java.util.List; \
                class C { void m() { List<String> a = null; List r = a; } }";
-    assert!(mismatches_with_stdlib(src).is_empty());
+    assert!(
+        mismatches_with_stdlib(src).is_empty(),
+        "{:?}",
+        mismatches_with_stdlib(src)
+    );
 }
 
 #[test]
@@ -260,13 +272,21 @@ fn nested_type_arguments_are_compared_invariantly() {
 fn autoboxing_to_a_wrapper_is_not_flagged() {
     // `int` → `Integer` is boxing, legal in Java; with `Integer` a stub project type, the demotion
     // keeps the primitive/external boxing rule lenient instead of reporting a mismatch.
-    assert!(mismatches_with_stdlib("class C { void m() { Integer n = 1; } }").is_empty());
+    assert!(
+        mismatches_with_stdlib("class C { void m() { Integer n = 1; } }").is_empty(),
+        "{:?}",
+        mismatches_with_stdlib("class C { void m() { Integer n = 1; } }")
+    );
 }
 
 #[test]
 fn unboxing_to_a_primitive_is_not_flagged() {
     let src = "class C { void m() { Integer i = null; int n = i; } }";
-    assert!(mismatches_with_stdlib(src).is_empty());
+    assert!(
+        mismatches_with_stdlib(src).is_empty(),
+        "{:?}",
+        mismatches_with_stdlib(src)
+    );
 }
 
 #[test]
@@ -274,7 +294,11 @@ fn assigning_to_a_stub_supertype_is_not_flagged() {
     // `Integer` really is `Comparable`, but the stub `Integer` does not list it, so a precise
     // subtype check would be a false positive. The stub demotion makes it lenient.
     let src = "class C { void m() { Integer i = null; Comparable c = i; } }";
-    assert!(mismatches_with_stdlib(src).is_empty());
+    assert!(
+        mismatches_with_stdlib(src).is_empty(),
+        "{:?}",
+        mismatches_with_stdlib(src)
+    );
 }
 
 #[test]
@@ -282,7 +306,11 @@ fn calling_a_stub_method_with_an_odd_argument_is_not_flagged() {
     // `String.charAt(int)` called with a `String`: a stub parameter type is external (lenient), so
     // no spurious argument / no-overload diagnostic. (Inference of `charAt` still works; see above.)
     let src = "class C { void m() { String s = null; s.charAt(s); } }";
-    assert!(mismatches_with_stdlib(src).is_empty());
+    assert!(
+        mismatches_with_stdlib(src).is_empty(),
+        "{:?}",
+        mismatches_with_stdlib(src)
+    );
 }
 
 #[test]

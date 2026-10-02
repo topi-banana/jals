@@ -73,7 +73,7 @@ fn typed_source_dependency_roots_collect_only_java_in_stable_order() {
         })
         .collect();
     assert_eq!(files, ["dep/src/A.java", "dep/src/Z.java"]);
-    assert!(inputs.warnings.is_empty());
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
 }
 
 #[test]
@@ -90,6 +90,10 @@ fn missing_source_root_is_diagnostic_not_missing_data() {
         ProjectInputOptions::Compile,
         &jals_progress::Progress::SILENT,
     ));
-    assert!(inputs.source_dep_sources.is_empty());
+    assert!(
+        inputs.source_dep_sources.is_empty(),
+        "{:?}",
+        inputs.source_dep_sources
+    );
     assert_eq!(inputs.warnings.len(), 1);
 }

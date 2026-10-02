@@ -281,17 +281,41 @@ mod tests {
         // An empty array, a non-string element value, and a constant reference: each is either not
         // a name or not one this pass may read, and none of them may become an entry that covers a
         // span and matches nothing.
-        assert!(map("class C { @SuppressWarnings({}) int f; }").is_empty());
-        assert!(map("class C { @SuppressWarnings(1) int f; }").is_empty());
-        assert!(map("class C { @SuppressWarnings(NAMES) int f; }").is_empty());
+        assert!(
+            map("class C { @SuppressWarnings({}) int f; }").is_empty(),
+            "{:?}",
+            map("class C { @SuppressWarnings({}) int f; }")
+        );
+        assert!(
+            map("class C { @SuppressWarnings(1) int f; }").is_empty(),
+            "{:?}",
+            map("class C { @SuppressWarnings(1) int f; }")
+        );
+        assert!(
+            map("class C { @SuppressWarnings(NAMES) int f; }").is_empty(),
+            "{:?}",
+            map("class C { @SuppressWarnings(NAMES) int f; }")
+        );
         // An element that is not `value`. `@SuppressWarnings` declares no other, so this does not
         // compile — and reading it anyway would make a typo suppress silently.
-        assert!(map("class C { @SuppressWarnings(other = \"a\") int f; }").is_empty());
+        assert!(
+            map("class C { @SuppressWarnings(other = \"a\") int f; }").is_empty(),
+            "{:?}",
+            map("class C { @SuppressWarnings(other = \"a\") int f; }")
+        );
         // No argument list at all, which is a different path: `args()` is `None` rather than a list
         // holding nothing nameable.
-        assert!(map("class C { @SuppressWarnings int f; }").is_empty());
+        assert!(
+            map("class C { @SuppressWarnings int f; }").is_empty(),
+            "{:?}",
+            map("class C { @SuppressWarnings int f; }")
+        );
         // An escape is not read: the name would need interpreting, which this pass does not do.
-        assert!(map("class C { @SuppressWarnings(\"a\\u0062\") int f; }").is_empty());
+        assert!(
+            map("class C { @SuppressWarnings(\"a\\u0062\") int f; }").is_empty(),
+            "{:?}",
+            map("class C { @SuppressWarnings(\"a\\u0062\") int f; }")
+        );
     }
 
     #[test]

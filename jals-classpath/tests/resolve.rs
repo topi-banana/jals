@@ -187,7 +187,7 @@ fn project_dependency_is_read_from_the_captured_revision() {
         )
         .await;
         assert_eq!(resolved.jars.len(), 1);
-        assert!(resolved.warnings.is_empty());
+        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
         assert_eq!(
             storage
                 .artifacts()
@@ -326,7 +326,7 @@ fn digest_less_external_dependency_resolves_from_cache_offline() {
         )
         .await;
         assert_eq!(fetcher.calls(), 1);
-        assert!(first.warnings.is_empty());
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
 
         // The second resolution has no network at all; the locator index recovers the cached jar.
         let second = DependencyResolver::resolve(
@@ -373,7 +373,7 @@ fn digest_mismatch_is_a_warning_and_is_not_published() {
             &jals_progress::Progress::SILENT,
         )
         .await;
-        assert!(resolved.jars.is_empty());
+        assert!(resolved.jars.is_empty(), "{:?}", resolved.jars);
         assert_eq!(resolved.warnings.len(), 1);
         assert!(resolved.warnings[0].message.contains("digest mismatch"));
     });

@@ -125,13 +125,13 @@ fn an_override_and_overloads_collapse_to_one_entry() {
 fn external_receiver_yields_nothing() {
     // `String` is not an indexed project type, so its members are not known here.
     let src = "class C { void m(String s) { s.$0 } }";
-    assert!(complete(&[src], 0).is_empty());
+    assert!(complete(&[src], 0).is_empty(), "{:?}", complete(&[src], 0));
 }
 
 #[test]
 fn not_a_member_access_yields_nothing() {
     let src = "class C { int x = 0$0; }";
-    assert!(complete(&[src], 0).is_empty());
+    assert!(complete(&[src], 0).is_empty(), "{:?}", complete(&[src], 0));
 }
 
 #[test]

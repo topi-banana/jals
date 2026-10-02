@@ -221,7 +221,11 @@ fn sibling_path_dependency_is_scanned_and_published() {
             &project,
             &storage.view(),
         );
-        assert!(plan.plan.source_dependency_roots.is_empty());
+        assert!(
+            plan.plan.source_dependency_roots.is_empty(),
+            "{:?}",
+            plan.plan.source_dependency_roots
+        );
         plan.materialize_path_sources(&project, &mut storage).await;
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
 
@@ -276,7 +280,11 @@ fn missing_path_dependency_is_a_warning_not_a_panic() {
         plan.materialize_path_sources(project.path(), &mut storage)
             .await;
         assert_eq!(plan.warnings.len(), 1);
-        assert!(plan.plan.source_dependency_artifacts.is_empty());
+        assert!(
+            plan.plan.source_dependency_artifacts.is_empty(),
+            "{:?}",
+            plan.plan.source_dependency_artifacts
+        );
     })
     .expect("test runtime bootstraps");
 }

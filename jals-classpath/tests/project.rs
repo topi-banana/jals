@@ -99,7 +99,11 @@ fn compile_resolves_without_parsing_classfiles() {
         &jals_progress::Progress::SILENT,
     ));
     assert_eq!(inputs.dependency_jars.len(), 1);
-    assert!(inputs.classpath_classes.is_empty());
+    assert!(
+        inputs.classpath_classes.is_empty(),
+        "{:?}",
+        inputs.classpath_classes
+    );
 }
 
 #[test]
@@ -161,6 +165,14 @@ fn navigation_sources_never_reach_a_compile() {
         ProjectInputOptions::Compile,
         &jals_progress::Progress::SILENT,
     ));
-    assert!(inputs.library_sources.is_empty());
-    assert!(inputs.source_dep_sources.is_empty());
+    assert!(
+        inputs.library_sources.is_empty(),
+        "{:?}",
+        inputs.library_sources
+    );
+    assert!(
+        inputs.source_dep_sources.is_empty(),
+        "{:?}",
+        inputs.source_dep_sources
+    );
 }

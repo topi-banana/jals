@@ -3699,7 +3699,11 @@ mod tests {
         let root = parse_root("class Foo {}");
         let index = block_on_inline(ProjectIndex::builder(&[(FileId(0), root)]).build());
         let foo = index.item_by_fqn("Foo").expect("Foo is indexed");
-        assert!(index.item(foo).supertypes.is_empty());
+        assert!(
+            index.item(foo).supertypes.is_empty(),
+            "{:?}",
+            index.item(foo).supertypes
+        );
         assert!(
             index.method_set_complete(foo, "anything"),
             "an unindexed Object is not an external supertype"

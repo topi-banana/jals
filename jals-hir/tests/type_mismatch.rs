@@ -177,14 +177,22 @@ fn constant_narrowing_to_small_integer_is_not_flagged() {
 #[test]
 fn fields_are_checked_too() {
     assert_eq!(free("class C { int x = 1.0; }").len(), 1);
-    assert!(free("class C { long x = 1; }").is_empty());
+    assert!(
+        free("class C { long x = 1; }").is_empty(),
+        "{:?}",
+        free("class C { long x = 1; }")
+    );
 }
 
 #[test]
 fn simple_assignment_is_checked_but_compound_is_not() {
     assert_eq!(free(&in_method("int x = 0; x = 1.0;")).len(), 1);
     // Compound assignment carries an implicit narrowing cast and is legal.
-    assert!(free(&in_method("int x = 0; x += 1.0;")).is_empty());
+    assert!(
+        free(&in_method("int x = 0; x += 1.0;")).is_empty(),
+        "{:?}",
+        free(&in_method("int x = 0; x += 1.0;"))
+    );
 }
 
 #[test]
@@ -194,35 +202,59 @@ fn multi_declarator_each_initializer_is_checked() {
     assert_eq!(free(&in_method("int a = 1.0, b = 2;")).len(), 1); // only `a`
     assert_eq!(free(&in_method("int a = 1.0, b = 2.0;")).len(), 2); // both
     assert_eq!(free(&in_method("int a, b = 2.0;")).len(), 1); // `a` has no initializer
-    assert!(free(&in_method("int a = 1, b = 2;")).is_empty()); // both fine
+    assert!(
+        free(&in_method("int a = 1, b = 2;")).is_empty(),
+        "{:?}",
+        free(&in_method("int a = 1, b = 2;"))
+    ); // both fine
 }
 
 #[test]
 fn return_mismatch_is_flagged() {
     assert_eq!(free("class C { int m() { return 1.0; } }").len(), 1);
-    assert!(free("class C { int m() { return 1; } }").is_empty());
+    assert!(
+        free("class C { int m() { return 1; } }").is_empty(),
+        "{:?}",
+        free("class C { int m() { return 1; } }")
+    );
     // Constant narrowing applies to a `return` too (JLS §5.2).
-    assert!(free("class C { byte m() { return 1; } }").is_empty());
+    assert!(
+        free("class C { byte m() { return 1; } }").is_empty(),
+        "{:?}",
+        free("class C { byte m() { return 1; } }")
+    );
     // A bare `return;` has no value to check.
-    assert!(free("class C { void m() { return; } }").is_empty());
+    assert!(
+        free("class C { void m() { return; } }").is_empty(),
+        "{:?}",
+        free("class C { void m() { return; } }")
+    );
 }
 
 #[test]
 fn return_inside_a_lambda_is_not_attributed_to_the_method() {
     // The `return 1.0` belongs to the lambda (target-typed), not to the `void` method.
-    assert!(free("class C { void m() { run(() -> { return 1.0; }); } }").is_empty());
+    assert!(
+        free("class C { void m() { run(() -> { return 1.0; }); } }").is_empty(),
+        "{:?}",
+        free("class C { void m() { run(() -> { return 1.0; }); } }")
+    );
 }
 
 #[test]
 fn return_subtyping_needs_the_index() {
     let mismatch = "class Base {} class Sub extends Base {} \
                     class C { Sub make() { return new Base(); } }";
-    assert!(free(mismatch).is_empty()); // index-free: external & lenient
+    assert!(free(mismatch).is_empty(), "{:?}", free(mismatch)); // index-free: external & lenient
     assert_eq!(indexed(&[mismatch], 0).len(), 1); // returning a `Base` where `Sub` is required
 
     let upcast = "class Base {} class Sub extends Base {} \
                   class C { Base make() { return new Sub(); } }";
-    assert!(indexed(&[upcast], 0).is_empty());
+    assert!(
+        indexed(&[upcast], 0).is_empty(),
+        "{:?}",
+        indexed(&[upcast], 0)
+    );
 }
 
 #[test]
@@ -230,7 +262,7 @@ fn project_subtyping_mismatch_needs_the_index() {
     let src = "class Base {} class Sub extends Base {} \
                class C { void m() { Sub s = new Base(); } }";
     // Index-free: `Base`/`Sub` are both external and lenient, so nothing is reported.
-    assert!(free(src).is_empty());
+    assert!(free(src).is_empty(), "{:?}", free(src));
     // Index-aware: assigning a `Base` value to a `Sub` slot is a real mismatch.
     assert_eq!(indexed(&[src], 0).len(), 1);
 }
@@ -240,7 +272,7 @@ fn upcast_and_unrelated_project_types() {
     // Upcast `Base b = new Sub()` is fine.
     let ok = "class Base {} class Sub extends Base {} \
               class C { void m() { Base b = new Sub(); } }";
-    assert!(indexed(&[ok], 0).is_empty());
+    assert!(indexed(&[ok], 0).is_empty(), "{:?}", indexed(&[ok], 0));
 
     // Unrelated project types do not assign.
     let bad = "class Foo {} class Bar {} \
@@ -271,7 +303,11 @@ fn an_external_target_is_lenient_about_hierarchy_not_about_boxing() {
     }
     // An unindexed type's *hierarchy* is still unknown, so a reference-to-reference assignment stays
     // lenient.
-    assert!(indexed(&["class C { void m() { Runnable r = \"s\"; } }"], 0).is_empty());
+    assert!(
+        indexed(&["class C { void m() { Runnable r = \"s\"; } }"], 0).is_empty(),
+        "{:?}",
+        indexed(&["class C { void m() { Runnable r = \"s\"; } }"], 0)
+    );
 }
 
 // ===== method argument checking (index-only) =====
@@ -281,15 +317,23 @@ fn argument_type_is_checked_against_the_parameter() {
     let bad = "class C { void f(int x) {} void g() { f(1.0); } }";
     assert_eq!(indexed(&[bad], 0).len(), 1); // double argument to an int parameter
     // A widening / exact argument is fine.
-    assert!(indexed(&["class C { void f(long x) {} void g() { f(1); } }"], 0).is_empty());
-    assert!(indexed(&["class C { void f(int x) {} void g() { f(1); } }"], 0).is_empty());
+    assert!(
+        indexed(&["class C { void f(long x) {} void g() { f(1); } }"], 0).is_empty(),
+        "{:?}",
+        indexed(&["class C { void f(long x) {} void g() { f(1); } }"], 0)
+    );
+    assert!(
+        indexed(&["class C { void f(int x) {} void g() { f(1); } }"], 0).is_empty(),
+        "{:?}",
+        indexed(&["class C { void f(int x) {} void g() { f(1); } }"], 0)
+    );
 }
 
 #[test]
 fn argument_checking_needs_the_index() {
     // The parameter types live in the project member model; the index-free path cannot see them.
     let src = "class C { void f(int x) {} void g() { f(1.0); } }";
-    assert!(free(src).is_empty());
+    assert!(free(src).is_empty(), "{:?}", free(src));
 }
 
 #[test]
@@ -307,17 +351,21 @@ fn argument_project_subtyping() {
     assert_eq!(indexed(&[bad], 0).len(), 1);
     let ok = "class Base {} class Sub extends Base {} \
               class C { void f(Base b) {} void g() { f(new Sub()); } }";
-    assert!(indexed(&[ok], 0).is_empty());
+    assert!(indexed(&[ok], 0).is_empty(), "{:?}", indexed(&[ok], 0));
 }
 
 #[test]
 fn an_applicable_overload_silences_the_call() {
     // An exactly-applicable overload silences the call even where a sibling rejects the argument.
     let ok = "class C { void f(int x) {} void f(boolean b) {} void g() { f(1); f(true); } }";
-    assert!(indexed(&[ok], 0).is_empty());
+    assert!(indexed(&[ok], 0).is_empty(), "{:?}", indexed(&[ok], 0));
     // A widening one does too.
     let widened = "class C { void f(long x) {} void f(String s) {} void g() { f(1); } }";
-    assert!(indexed(&[widened], 0).is_empty());
+    assert!(
+        indexed(&[widened], 0).is_empty(),
+        "{:?}",
+        indexed(&[widened], 0)
+    );
     // But a `double` fits neither an `int` nor a `String`, so the call is flagged. `f(String)` used
     // to accept it — every primitive was assignable to every external name — which silenced a call
     // no JVM would ever link.
@@ -341,14 +389,14 @@ fn a_varargs_method_checks_its_trailing_arguments() {
     assert_eq!(indexed(&[bad], 0).len(), 1);
     // Any number of applicable trailing arguments is fine, including none, and so is the array itself.
     let ok = "class C { void v(int... xs) {} void g() { v(); v(1); v(1, 2); v(new int[] {3}); } }";
-    assert!(indexed(&[ok], 0).is_empty());
+    assert!(indexed(&[ok], 0).is_empty(), "{:?}", indexed(&[ok], 0));
 }
 
 #[test]
 fn arity_mismatch_is_not_a_type_error() {
     // Wrong number of arguments is a separate error class; this rule reports only type mismatches.
     let src = "class C { void f(int x) {} void g() { f(); f(1, 2); } }";
-    assert!(indexed(&[src], 0).is_empty());
+    assert!(indexed(&[src], 0).is_empty(), "{:?}", indexed(&[src], 0));
 }
 
 // ===== type-based overload resolution (B4) =====
@@ -373,7 +421,7 @@ fn no_applicable_overload_with_project_parameter_types() {
     // An exactly-matching project argument binds one overload — nothing flagged.
     let ok = "class A {} class B {} \
               class C { void f(A a) {} void f(B b) {} void g() { f(new A()); } }";
-    assert!(indexed(&[ok], 0).is_empty());
+    assert!(indexed(&[ok], 0).is_empty(), "{:?}", indexed(&[ok], 0));
 }
 
 #[test]
@@ -382,7 +430,11 @@ fn overload_reporting_is_guarded_by_method_set_completeness() {
     // conclusion is unsafe and suppressed.
     let external =
         "class C extends Foo { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
-    assert!(indexed(&[external], 0).is_empty());
+    assert!(
+        indexed(&[external], 0).is_empty(),
+        "{:?}",
+        indexed(&[external], 0)
+    );
     // The same source with `Foo` defined in the project makes the set complete, so it is reported.
     let complete = "class Foo {} \
                     class C extends Foo { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
@@ -393,7 +445,7 @@ fn overload_reporting_is_guarded_by_method_set_completeness() {
 fn object_method_names_are_not_reported() {
     // `equals` is an `Object` method, so the call may bind to `Object.equals(Object)` — not flagged.
     let src = "class C { void equals(int x) {} void g() { equals(1.0); } }";
-    assert!(indexed(&[src], 0).is_empty());
+    assert!(indexed(&[src], 0).is_empty(), "{:?}", indexed(&[src], 0));
 }
 
 /// The guard on [`ProjectIndex::method_set_complete`] surviving an indexed `java.lang.Object`.
@@ -414,7 +466,11 @@ fn no_overload_is_still_reported_with_stdlib_indexed() {
     // And the external-supertype suppression is not collateral damage of the exemption.
     let external =
         "class C extends Foo { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
-    assert!(indexed_with_stdlib(&[external], 0).is_empty());
+    assert!(
+        indexed_with_stdlib(&[external], 0).is_empty(),
+        "{:?}",
+        indexed_with_stdlib(&[external], 0)
+    );
 }
 
 /// A project type is assignable to `java.lang.Object` however `Object` reached the index.
@@ -427,8 +483,16 @@ fn no_overload_is_still_reported_with_stdlib_indexed() {
 #[test]
 fn assigning_a_project_type_to_object_is_not_a_mismatch() {
     let src = "class Foo {} class C { void m() { Object o = new Foo(); } }";
-    assert!(indexed_with_stdlib(&[src], 0).is_empty());
-    assert!(indexed_with_classpath(&[src], 0, &java_lang_fixtures()).is_empty());
+    assert!(
+        indexed_with_stdlib(&[src], 0).is_empty(),
+        "{:?}",
+        indexed_with_stdlib(&[src], 0)
+    );
+    assert!(
+        indexed_with_classpath(&[src], 0, &java_lang_fixtures()).is_empty(),
+        "{:?}",
+        indexed_with_classpath(&[src], 0, &java_lang_fixtures())
+    );
 }
 
 /// Autoboxing survives a wrapper that reached the index as a real class rather than as a stub.
@@ -442,11 +506,27 @@ fn assigning_a_project_type_to_object_is_not_a_mismatch() {
 fn boxing_survives_a_classpath_wrapper() {
     let fixtures = java_lang_fixtures();
     let src = "class C { void m() { Integer n = 1; } }";
-    assert!(indexed_with_stdlib(&[src], 0).is_empty());
-    assert!(indexed_with_classpath(&[src], 0, &fixtures).is_empty());
+    assert!(
+        indexed_with_stdlib(&[src], 0).is_empty(),
+        "{:?}",
+        indexed_with_stdlib(&[src], 0)
+    );
+    assert!(
+        indexed_with_classpath(&[src], 0, &fixtures).is_empty(),
+        "{:?}",
+        indexed_with_classpath(&[src], 0, &fixtures)
+    );
     let unboxing = "class C { void m(Integer boxed) { int n = boxed; } }";
-    assert!(indexed_with_stdlib(&[unboxing], 0).is_empty());
-    assert!(indexed_with_classpath(&[unboxing], 0, &fixtures).is_empty());
+    assert!(
+        indexed_with_stdlib(&[unboxing], 0).is_empty(),
+        "{:?}",
+        indexed_with_stdlib(&[unboxing], 0)
+    );
+    assert!(
+        indexed_with_classpath(&[unboxing], 0, &fixtures).is_empty(),
+        "{:?}",
+        indexed_with_classpath(&[unboxing], 0, &fixtures)
+    );
 }
 
 /// An array is assignable to `java.lang.Object` however `Object` reached the index.
@@ -461,10 +541,22 @@ fn boxing_survives_a_classpath_wrapper() {
 fn assigning_an_array_to_object_is_not_a_mismatch() {
     let fixtures = java_lang_fixtures();
     let src = "class C { void m() { int[] a = new int[3]; Object o = a; } }";
-    assert!(indexed_with_stdlib(&[src], 0).is_empty());
-    assert!(indexed_with_classpath(&[src], 0, &fixtures).is_empty());
+    assert!(
+        indexed_with_stdlib(&[src], 0).is_empty(),
+        "{:?}",
+        indexed_with_stdlib(&[src], 0)
+    );
+    assert!(
+        indexed_with_classpath(&[src], 0, &fixtures).is_empty(),
+        "{:?}",
+        indexed_with_classpath(&[src], 0, &fixtures)
+    );
     let overload = "class C { void f(Object o) {} void f(int n) {} void m(int[] a) { f(a); } }";
-    assert!(indexed_with_classpath(&[overload], 0, &fixtures).is_empty());
+    assert!(
+        indexed_with_classpath(&[overload], 0, &fixtures).is_empty(),
+        "{:?}",
+        indexed_with_classpath(&[overload], 0, &fixtures)
+    );
 }
 
 /// A project type merely *named* like a wrapper class is not one.

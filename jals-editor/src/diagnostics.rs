@@ -186,16 +186,17 @@ mod tests {
 
     #[test]
     fn clean_source_has_no_diagnostics() {
-        assert!(assemble_local("class A {}\n").is_empty());
+        let diags = assemble_local("class A {}\n");
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]
     fn syntax_error_becomes_an_uncoded_error() {
         let diags = assemble_local("class A { void m( {}");
-        assert!(!diags.is_empty());
+        assert!(!diags.is_empty(), "{diags:?}");
         assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
         assert_eq!(diags[0].code, None);
-        assert!(!diags[0].message.is_empty());
+        assert!(!diags[0].message.is_empty(), "{:?}", diags[0].message);
     }
 
     #[test]
@@ -224,7 +225,8 @@ mod tests {
             // A `java25` set (or no features at all) allows the syntax: nothing is reported.
             config.features = jals_config::FeatureSet::resolve(&[jals_config::Feature::Java25]);
             let diags = FileDiagnostics::assemble(&parse, None, &config, None).await;
-            assert!(with_code(&diags, "compact-source-file").is_empty());
+            let gated = with_code(&diags, "compact-source-file");
+            assert!(gated.is_empty(), "{gated:?}");
         });
     }
 
@@ -304,8 +306,10 @@ mod tests {
         let text = "package a; class Bar { Nope n; int x = \"s\"; ";
         let diags = assemble_indexed(text, &Config::default());
         assert!(diags.iter().any(|d| d.code.is_none()), "syntax errors kept");
-        assert!(with_code(&diags, "cannot-resolve").is_empty());
-        assert!(with_code(&diags, "type-mismatch").is_empty());
+        let unresolved = with_code(&diags, "cannot-resolve");
+        assert!(unresolved.is_empty(), "{unresolved:?}");
+        let mismatches = with_code(&diags, "type-mismatch");
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 
     /// A single-file project with `Base`, `Sub extends Base`, and a `Sub s = new Base();` slot.
@@ -325,7 +329,9 @@ mod tests {
     fn type_mismatch_respects_allow_config() {
         let mut config = Config::default();
         config.correctness.type_mismatch.level = jals_config::LintLevel::Allow;
-        assert!(with_code(&assemble_indexed(SUBTYPING_SRC, &config), "type-mismatch").is_empty());
+        let diags = assemble_indexed(SUBTYPING_SRC, &config);
+        let mismatches = with_code(&diags, "type-mismatch");
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 
     #[test]

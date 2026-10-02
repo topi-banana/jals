@@ -184,7 +184,7 @@ fn an_offline_refusal_is_never_attempted() {
 
         // The gate is outside the loop, so the refusal is not a failure the loop can classify.
         assert_eq!(fetcher.calls(), 0);
-        assert!(fetcher.waits().is_empty());
+        assert!(fetcher.waits().is_empty(), "{:?}", fetcher.waits());
         assert!(
             NetworkPolicy::refused_offline(&error) || error.contains("while offline"),
             "{error}"
@@ -230,7 +230,7 @@ fn a_schedule_without_retries_attempts_once_however_transient_the_failure() {
         .unwrap_err();
 
         assert_eq!(fetcher.calls(), 1);
-        assert!(fetcher.waits().is_empty());
+        assert!(fetcher.waits().is_empty(), "{:?}", fetcher.waits());
         assert!(!error.contains("attempts"), "{error}");
     });
 }

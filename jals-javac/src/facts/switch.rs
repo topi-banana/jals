@@ -135,8 +135,8 @@ mod tests {
 
         let fallback = &read[2];
         assert!(fallback.is_default);
-        assert!(fallback.patterns.is_empty());
-        assert!(fallback.keys.is_empty());
+        assert!(fallback.patterns.is_empty(), "{:?}", fallback.patterns);
+        assert!(fallback.keys.is_empty(), "{:?}", fallback.keys);
     }
 
     /// Several `case` labels on one arm are that arm's keys, in written order, and a `default`

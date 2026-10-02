@@ -531,7 +531,7 @@ mod tests {
             Some(PathBuf::from("/ci/javac")),
         );
         // Used verbatim: nothing to probe, nothing to fall past.
-        assert!(out.preferred.is_empty());
+        assert!(out.preferred.is_empty(), "{:?}", out.preferred);
         assert_eq!(out.fallback, PathBuf::from("/ci/javac"));
     }
 
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn none_spec_matches_system() {
         let out = resolver(&[], None).resolve(Tool::Java, None, None);
-        assert!(out.preferred.is_empty());
+        assert!(out.preferred.is_empty(), "{:?}", out.preferred);
         assert_eq!(out.fallback, PathBuf::from("java"));
     }
 
@@ -580,7 +580,7 @@ mod tests {
             Some(ToolSpec::Path(binary.to_str().unwrap())),
             None,
         );
-        assert!(out.preferred.is_empty());
+        assert!(out.preferred.is_empty(), "{:?}", out.preferred);
         assert_eq!(out.fallback, binary);
     }
 
@@ -589,7 +589,7 @@ mod tests {
         // "jdk/bin/javac" ends in the tool name → the binary itself, resolved against the root.
         let out =
             resolver(&[], None).resolve(Tool::Javac, Some(ToolSpec::Path("jdk/bin/javac")), None);
-        assert!(out.preferred.is_empty());
+        assert!(out.preferred.is_empty(), "{:?}", out.preferred);
         assert_eq!(out.fallback, PathBuf::from("/proj/jdk/bin/javac"));
     }
 

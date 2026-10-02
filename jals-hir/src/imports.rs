@@ -231,22 +231,28 @@ mod tests {
 
     #[test]
     fn a_wildcard_or_module_import_is_never_reported() {
-        assert!(unused("import java.util.*;\nimport module java.base;\nclass C {}").is_empty());
+        assert!(
+            unused("import java.util.*;\nimport module java.base;\nclass C {}").is_empty(),
+            "{:?}",
+            unused("import java.util.*;\nimport module java.base;\nclass C {}")
+        );
     }
 
     #[test]
     fn an_annotation_uses_its_import() {
         // The resolver records no reference for `@Retention` — an annotation name is a
         // `QUALIFIED_NAME`, not a `TYPE` — so this passes only through the mention set.
-        assert!(
-            unused("import java.lang.annotation.Retention;\n@Retention(null) class C {}")
-                .is_empty()
-        );
+        let imports = unused("import java.lang.annotation.Retention;\n@Retention(null) class C {}");
+        assert!(imports.is_empty(), "{imports:?}");
     }
 
     #[test]
     fn a_javadoc_link_uses_its_import() {
-        assert!(unused("import java.util.Set;\n/** See {@link Set}. */\nclass C {}").is_empty());
+        assert!(
+            unused("import java.util.Set;\n/** See {@link Set}. */\nclass C {}").is_empty(),
+            "{:?}",
+            unused("import java.util.Set;\n/** See {@link Set}. */\nclass C {}")
+        );
     }
 
     #[test]
@@ -271,7 +277,11 @@ mod tests {
     #[test]
     fn a_qualified_prefix_uses_its_import() {
         // `Outer.Inner` records a reference named `Inner` only; the prefix survives as a mention.
-        assert!(unused("import a.Outer;\nclass C { Outer.Inner field; }").is_empty());
+        assert!(
+            unused("import a.Outer;\nclass C { Outer.Inner field; }").is_empty(),
+            "{:?}",
+            unused("import a.Outer;\nclass C { Outer.Inner field; }")
+        );
     }
 
     #[test]

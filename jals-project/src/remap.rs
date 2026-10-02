@@ -378,7 +378,11 @@ mod tests {
         let RemapSelection::Requested(plan) = selection(none, &[]) else {
             panic!("declared and active");
         };
-        assert!(plan.resources.dirs().is_empty());
+        assert!(
+            plan.resources.dirs().is_empty(),
+            "{:?}",
+            plan.resources.dirs()
+        );
     }
 
     #[test]

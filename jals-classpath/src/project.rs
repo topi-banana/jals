@@ -579,7 +579,11 @@ mod tests {
 
         let lowered = MemoryProjectPlan::from_manifest(&manifest, &storage.view());
 
-        assert!(lowered.plan.classpath.is_empty());
+        assert!(
+            lowered.plan.classpath.is_empty(),
+            "{:?}",
+            lowered.plan.classpath
+        );
         let messages: Vec<_> = lowered
             .warnings
             .iter()
@@ -671,9 +675,21 @@ mod tests {
 
         let lowered = MemoryProjectPlan::from_manifest(&manifest, &storage.view());
 
-        assert!(lowered.plan.dependencies.is_empty());
-        assert!(lowered.plan.source_archives.is_empty());
-        assert!(lowered.plan.source_dependency_roots.is_empty());
+        assert!(
+            lowered.plan.dependencies.is_empty(),
+            "{:?}",
+            lowered.plan.dependencies
+        );
+        assert!(
+            lowered.plan.source_archives.is_empty(),
+            "{:?}",
+            lowered.plan.source_archives
+        );
+        assert!(
+            lowered.plan.source_dependency_roots.is_empty(),
+            "{:?}",
+            lowered.plan.source_dependency_roots
+        );
         assert!(lowered.warnings.is_empty(), "{:?}", lowered.warnings);
     }
 }

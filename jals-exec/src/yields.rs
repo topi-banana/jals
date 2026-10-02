@@ -205,6 +205,6 @@ mod tests {
     #[test]
     fn join_ordered_of_nothing_is_empty() {
         let outputs: Vec<()> = block_on_inline(join_ordered(Vec::<YieldNow>::new()));
-        assert!(outputs.is_empty());
+        assert!(outputs.is_empty(), "{outputs:?}");
     }
 }

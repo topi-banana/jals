@@ -1012,7 +1012,7 @@ mod tests {
     fn enabled_attribute_contributes_its_span_only() {
         let src = "#[cfg(feature = \"x\")]\nclass C {}";
         let map = compute(src, &["x"]);
-        assert!(map.errors().is_empty());
+        assert!(map.errors().is_empty(), "{:?}", map.errors());
         assert!(map.disabled_hosts().is_empty());
         assert_eq!(map.attr_spans().len(), 1);
         let span = map.attr_spans()[0];
@@ -1027,7 +1027,7 @@ mod tests {
     fn false_cfg_disables_the_whole_host() {
         let src = "class C {\n    #[cfg(feature = \"x\")]\n    void gone() { f(); }\n    void kept() {}\n}";
         let map = compute(src, &[]);
-        assert!(map.errors().is_empty());
+        assert!(map.errors().is_empty(), "{:?}", map.errors());
         assert_eq!(map.disabled_hosts().len(), 1);
         let range = map.disabled_hosts()[0].range;
         assert!(
@@ -1052,7 +1052,7 @@ mod tests {
             "class C { #[cfg(feature = \"y\")] void m() { #[bogus] f(); } }",
             &[],
         );
-        assert!(map.errors().is_empty());
+        assert!(map.errors().is_empty(), "{:?}", map.errors());
         assert_eq!(map.disabled_hosts().len(), 1);
     }
 
@@ -1166,7 +1166,7 @@ mod tests {
             &[],
         );
         assert!(map.disabled_hosts().is_empty());
-        assert!(!map.errors().is_empty());
+        assert!(!map.errors().is_empty(), "{:?}", map.errors());
     }
 
     #[test]
@@ -1176,7 +1176,7 @@ mod tests {
             "class C { void m() { #[cfg(feature = \"y\")] { f(); } } }",
             &[],
         );
-        assert!(map.errors().is_empty());
+        assert!(map.errors().is_empty(), "{:?}", map.errors());
         assert_eq!(map.disabled_hosts().len(), 1);
 
         // A control-structure body slot (`;`-rescuable).
@@ -1184,12 +1184,12 @@ mod tests {
             "class C { void m() { if (a()) #[cfg(feature = \"y\")] { f(); } } }",
             &[],
         );
-        assert!(map.errors().is_empty());
+        assert!(map.errors().is_empty(), "{:?}", map.errors());
         assert_eq!(map.disabled_hosts().len(), 1);
 
         // A class initializer, including one after a legitimate body-less abstract method.
         let map = compute("class C { #[cfg(feature = \"y\")] { } }", &[]);
-        assert!(map.errors().is_empty());
+        assert!(map.errors().is_empty(), "{:?}", map.errors());
         assert_eq!(map.disabled_hosts().len(), 1);
         let map = compute(
             "abstract class C { abstract void m(); #[cfg(feature = \"y\")] { } }",
@@ -1203,7 +1203,7 @@ mod tests {
             "class C { void m() { synchronized (this) { } #[cfg(feature = \"y\")] { } } }",
             &[],
         );
-        assert!(map.errors().is_empty());
+        assert!(map.errors().is_empty(), "{:?}", map.errors());
         assert_eq!(map.disabled_hosts().len(), 1);
     }
 

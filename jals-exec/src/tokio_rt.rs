@@ -259,6 +259,6 @@ mod tests {
     fn empty_fan_out_returns_immediately() {
         let outputs = run(|exec| async move { exec.fan_out(0..0u32, |n| async move { n }).await })
             .expect("runtime bootstraps");
-        assert!(outputs.is_empty());
+        assert!(outputs.is_empty(), "{outputs:?}");
     }
 }

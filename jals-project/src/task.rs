@@ -1766,19 +1766,17 @@ mod tests {
             transaction.commit().await.unwrap();
 
             let view = storage.view();
-            assert!(
-                BuildTaskExecutor::publication_changes(
-                    &view,
-                    storage.artifacts(),
-                    &script,
-                    &plan,
-                    &execution,
-                    &roots,
-                )
-                .await
-                .unwrap()
-                .is_empty()
-            );
+            let published = BuildTaskExecutor::publication_changes(
+                &view,
+                storage.artifacts(),
+                &script,
+                &plan,
+                &execution,
+                &roots,
+            )
+            .await
+            .unwrap();
+            assert!(published.is_empty(), "{published:?}");
 
             let generated = FileKey::parse("src/main/java/net/example/A.java").unwrap();
             let manual = FileKey::parse("src/main/java/net/example/Manual.txt").unwrap();

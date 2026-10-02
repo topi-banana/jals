@@ -3476,12 +3476,12 @@ mod tests {
         assert_eq!(m.build.source_dirs, alloc::vec!["src/main/java".to_owned()]);
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.build.release, None);
-        assert!(m.build.classpath.is_empty());
-        assert!(m.build.javac_flags.is_empty());
+        assert!(m.build.classpath.is_empty(), "{:?}", m.build.classpath);
+        assert!(m.build.javac_flags.is_empty(), "{:?}", m.build.javac_flags);
         assert_eq!(m.package.name, None);
         assert_eq!(m.package.default_run, None);
         assert_eq!(m.run.main_class, None);
-        assert!(m.bin.is_empty());
+        assert!(m.bin.is_empty(), "{:?}", m.bin);
         assert!(m.dependencies.is_empty());
     }
 
@@ -3678,7 +3678,11 @@ mod tests {
         // Absent entirely: a project needs nothing here, and the defaults keep a test run's
         // output clear of an ordinary build's.
         let manifest: Manifest = toml::from_str("[package]\nname = \"x\"\n").unwrap();
-        assert!(manifest.test.source_dirs.is_empty());
+        assert!(
+            manifest.test.source_dirs.is_empty(),
+            "{:?}",
+            manifest.test.source_dirs
+        );
         assert_eq!(manifest.test.classes_dir, "target/test-classes");
         assert!(manifest.validate().is_ok());
 
@@ -3760,10 +3764,10 @@ mod tests {
         assert_eq!(m.build.javac_flags, alloc::vec!["-Xlint:all".to_owned()]);
         assert_eq!(m.run.main_class.as_deref(), Some("com.example.Main"));
         // No `[[bin]]`: the bin list is empty and selection falls back to `[run] main-class`.
-        assert!(m.bin.is_empty());
+        assert!(m.bin.is_empty(), "{:?}", m.bin);
         assert_eq!(m.package.default_run, None);
         // No `[package] features`: every feature gate stays off.
-        assert!(m.package.features.is_empty());
+        assert!(m.package.features.is_empty(), "{:?}", m.package.features);
         assert!(m.feature_set().is_empty());
     }
 
@@ -4315,7 +4319,7 @@ mod tests {
         assert_eq!(m.build.source_dirs, alloc::vec!["src/main/java".to_owned()]);
         assert_eq!(m.build.classes_dir, "target/classes");
         assert_eq!(m.run.main_class, None);
-        assert!(m.bin.is_empty());
+        assert!(m.bin.is_empty(), "{:?}", m.bin);
     }
 
     #[test]
@@ -4578,7 +4582,11 @@ mod tests {
             manifest.build.native_packages,
             alloc::vec!["jals.io".to_owned()]
         );
-        assert!(Manifest::default().build.native_packages.is_empty());
+        assert!(
+            Manifest::default().build.native_packages.is_empty(),
+            "{:?}",
+            Manifest::default().build.native_packages
+        );
     }
 
     /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.
@@ -4981,7 +4989,11 @@ mod tests {
         assert_eq!(m.validate(), Ok(()));
         assert_eq!(m.dependencies["g"].features(), ["hello"]);
         assert_eq!(m.dependencies["p"].features(), ["hello", "world"]);
-        assert!(m.dependencies["j"].features().is_empty());
+        assert!(
+            m.dependencies["j"].features().is_empty(),
+            "{:?}",
+            m.dependencies["j"].features()
+        );
     }
 
     #[test]
@@ -5422,7 +5434,11 @@ mod tests {
         assert!(matches!(local, MappingSource::File(_)));
         // Both forms default the format, so an entry that says nothing still names one grammar.
         assert_eq!(local.format(), &MappingFormatKind::Proguard {});
-        assert!(local.required_features().is_empty());
+        assert!(
+            local.required_features().is_empty(),
+            "{:?}",
+            local.required_features()
+        );
 
         let [MappingSource::Url(mojmap)] = manifest.mappings["mojmap"].alternatives() else {
             panic!("the `url` form should classify as `Url`");
@@ -5780,7 +5796,11 @@ mod tests {
     fn a_resource_template_declaration_is_off_by_default_and_round_trips() {
         // Off by default is the whole compatibility story: a project that says nothing keeps the
         // byte-for-byte copy it always had.
-        assert!(Build::default().resources.template.is_empty());
+        assert!(
+            Build::default().resources.template.is_empty(),
+            "{:?}",
+            Build::default().resources.template
+        );
 
         let declared: Manifest =
             toml::from_str("[build.resources]\ntemplate = [\"fabric.mod.json\"]\n").unwrap();

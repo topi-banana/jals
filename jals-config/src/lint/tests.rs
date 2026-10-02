@@ -17,7 +17,7 @@ fn defaults_are_the_built_in_levels() {
         Nullness::NonNull
     );
     assert_eq!(c.restriction.print_to_console.level, LintLevel::Allow);
-    assert!(c.unknown_keys().is_empty());
+    assert!(c.unknown_keys().is_empty(), "{:?}", c.unknown_keys());
 }
 
 #[test]

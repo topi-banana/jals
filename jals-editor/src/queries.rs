@@ -998,7 +998,8 @@ mod tests {
             let queries = fixture.queries(0);
             assert_eq!(queries.highlights(text.find("Missing").unwrap()).len(), 2);
             assert!(queries.definition(usize::MAX).await.is_none());
-            assert!(queries.highlights(usize::MAX).is_empty());
+            let highlights = queries.highlights(usize::MAX);
+            assert!(highlights.is_empty(), "{highlights:?}");
         });
     }
 }

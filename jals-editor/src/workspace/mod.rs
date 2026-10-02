@@ -1492,13 +1492,13 @@ mod tests {
             assert!(ws.document(bogus).is_none());
             assert!(ws.path_of(bogus).is_none());
             assert!(ws.definition(bogus, 0).await.is_none());
-            assert!(ws.references(bogus, 0, true).await.is_empty());
-            assert!(
-                ws.diagnostics_of(bogus, &jals_config::lint::Config::default())
-                    .await
-                    .is_empty()
-            );
-            assert!(ws.outline(bogus).is_empty());
+            let references = ws.references(bogus, 0, true).await;
+            assert!(references.is_empty(), "{references:?}");
+            let diagnostics = ws
+                .diagnostics_of(bogus, &jals_config::lint::Config::default())
+                .await;
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            assert!(ws.outline(bogus).is_empty(), "{:?}", ws.outline(bogus));
         });
     }
 

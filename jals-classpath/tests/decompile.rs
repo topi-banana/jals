@@ -115,7 +115,7 @@ fn generates_and_reuses_verified_skeleton_artifacts() {
         let first = SkeletonGroup::synthesize(&mut cache, &classes).await;
         let second = SkeletonGroup::synthesize(&mut cache, &classes).await;
         assert_eq!(first.sources, second.sources);
-        assert!(first.warnings.is_empty());
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
         let text =
             String::from_utf8(cache.lookup(&first.sources[0].key).await.unwrap().unwrap()).unwrap();
         assert!(text.contains("public class Box<T> {"), "{text}");

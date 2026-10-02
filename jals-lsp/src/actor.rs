@@ -3014,7 +3014,11 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(publications.len(), 1);
-        assert!(publications[0].diagnostics.is_empty());
+        assert!(
+            publications[0].diagnostics.is_empty(),
+            "{:?}",
+            publications[0].diagnostics
+        );
 
         // A script removed from the manifest clears the file it used to be at.
         let publications = Actor::build_script_diagnostic_publications(
@@ -3024,7 +3028,11 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(publications.len(), 1);
-        assert!(publications[0].diagnostics.is_empty());
+        assert!(
+            publications[0].diagnostics.is_empty(),
+            "{:?}",
+            publications[0].diagnostics
+        );
     }
 
     #[test]

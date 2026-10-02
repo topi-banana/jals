@@ -73,7 +73,11 @@ fn a_local_used_before_its_declaration_is_reported() {
 #[test]
 fn a_field_used_before_its_declaration_is_not() {
     // A field's scope is the whole class body, so the forward reference is legal.
-    assert!(reported_one("class C { void m() { int a = later; } int later = 1; }").is_empty());
+    assert!(
+        reported_one("class C { void m() { int a = later; } int later = 1; }").is_empty(),
+        "{:?}",
+        reported_one("class C { void m() { int a = later; } int later = 1; }")
+    );
 }
 
 #[test]

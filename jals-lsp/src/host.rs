@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn syntax_errors_map_to_uncoded_errors() {
         let diags = diagnostics("class A { void m( {}");
-        assert!(!diags.is_empty());
+        assert!(!diags.is_empty(), "{diags:?}");
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(diags[0].code, None);
         assert_eq!(diags[0].source.as_deref(), Some("jals"));
@@ -891,7 +891,11 @@ mod tests {
     #[test]
     fn tokens_delta_identical_is_empty() {
         let a = vec![tok(0, 0, 3, 1), tok(0, 4, 2, 2)];
-        assert!(LspHost::tokens_delta(&a, &a).is_empty());
+        assert!(
+            LspHost::tokens_delta(&a, &a).is_empty(),
+            "{:?}",
+            LspHost::tokens_delta(&a, &a)
+        );
     }
 
     #[test]

@@ -724,7 +724,8 @@ mod tests {
     fn a_run_that_did_neither_phase_reports_nothing() {
         // `jals lint` opens a folder without executing an unreviewed script. Declining to run one
         // is not a diagnostic, and neither is a graph phase that was never asked for.
-        assert!(assemble(ScriptOutcome::Skipped, GraphOutcome::NotReached).is_empty());
+        let reported = assemble(ScriptOutcome::Skipped, GraphOutcome::NotReached);
+        assert!(reported.is_empty(), "{reported:?}");
     }
 
     #[test]

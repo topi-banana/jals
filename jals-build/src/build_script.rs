@@ -2121,7 +2121,7 @@ mod tests {
             let (_, bytes) = current_state(&storage).await;
             let state: BuildScriptStateWire = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(state.fingerprint_inputs.features, ["server"]);
-            assert!(state.rerun_env.is_empty());
+            assert!(state.rerun_env.is_empty(), "{:?}", state.rerun_env);
 
             // A different (additive) selection fingerprints differently.
             let merged = BuildScriptEnvironment::new()

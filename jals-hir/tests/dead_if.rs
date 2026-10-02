@@ -169,9 +169,9 @@ fn non_constant_names_do_not_fold() {
     none("final boolean debug; if (debug) {}"); // no initializer
     none("if (undefined) {}"); // unresolved
     let found = dead("class C { void m(boolean flag) { if (flag) {} } }");
-    assert!(found.is_empty()); // parameter
+    assert!(found.is_empty(), "{found:?}"); // parameter
     let found = dead("class C { boolean debug = false; void m() { if (this.debug) {} } }");
-    assert!(found.is_empty()); // member access never folds
+    assert!(found.is_empty(), "{found:?}"); // member access never folds
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn shadowing_resolves_to_the_inner_binding() {
     let found = dead(
         "class C { static final boolean X = true; void m(boolean p) { boolean X = p; if (X) {} } }",
     );
-    assert!(found.is_empty());
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn cyclic_initializers_terminate_without_reports() {
     let found = dead(
         "class C { static final boolean A = B; static final boolean B = A; void m() { if (A) {} } }",
     );
-    assert!(found.is_empty());
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]

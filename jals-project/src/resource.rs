@@ -525,11 +525,9 @@ mod tests {
     fn a_missing_resource_directory_is_skipped_in_silence() {
         // The existing behaviour, unchanged: the default lands on every project, and a project with
         // no resources is not a project with a mistake.
-        assert!(
-            plan("[package]\nname = \"x\"\n")
-                .entries(&view(&[("src/main/java/A.java", b"class A {}")]))
-                .expect("nothing declared, nothing to fail")
-                .is_empty()
-        );
+        let entries = plan("[package]\nname = \"x\"\n")
+            .entries(&view(&[("src/main/java/A.java", b"class A {}")]))
+            .expect("nothing declared, nothing to fail");
+        assert!(entries.is_empty(), "{entries:?}");
     }
 }

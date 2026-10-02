@@ -38,34 +38,34 @@ fn throwing_an_undeclared_checked_exception_is_reported() {
 fn declaring_the_exception_silences_it() {
     let src =
         "class MyEx extends Exception {} class C { void f() throws MyEx { throw new MyEx(); } }";
-    assert!(reported(src).is_empty());
+    assert!(reported(src).is_empty(), "{:?}", reported(src));
 }
 
 #[test]
 fn a_supertype_in_the_throws_clause_covers_it() {
     let src = "class MyEx extends Exception {} class C { void f() throws Exception { throw new MyEx(); } }";
-    assert!(reported(src).is_empty());
+    assert!(reported(src).is_empty(), "{:?}", reported(src));
 }
 
 #[test]
 fn catching_it_exactly_silences_it() {
-    assert!(reported(&with_checked("try { throw new MyEx(); } catch (MyEx e) {}")).is_empty());
+    assert!(
+        reported(&with_checked("try { throw new MyEx(); } catch (MyEx e) {}")).is_empty(),
+        "{:?}",
+        reported(&with_checked("try { throw new MyEx(); } catch (MyEx e) {}"))
+    );
 }
 
 #[test]
 fn catching_a_supertype_silences_it() {
-    assert!(
-        reported(&with_checked(
-            "try { throw new MyEx(); } catch (Exception e) {}"
-        ))
-        .is_empty()
-    );
-    assert!(
-        reported(&with_checked(
-            "try { throw new MyEx(); } catch (Throwable t) {}"
-        ))
-        .is_empty()
-    );
+    let exceptions = reported(&with_checked(
+        "try { throw new MyEx(); } catch (Exception e) {}",
+    ));
+    assert!(exceptions.is_empty(), "{exceptions:?}");
+    let exceptions = reported(&with_checked(
+        "try { throw new MyEx(); } catch (Throwable t) {}",
+    ));
+    assert!(exceptions.is_empty(), "{exceptions:?}");
 }
 
 #[test]
@@ -81,22 +81,18 @@ fn a_non_covering_catch_still_reports() {
 
 #[test]
 fn a_multi_catch_arm_that_covers_it_silences_it() {
-    assert!(
-        reported(&with_checked(
-            "try { throw new MyEx(); } catch (RuntimeException | MyEx e) {}"
-        ))
-        .is_empty()
-    );
+    let exceptions = reported(&with_checked(
+        "try { throw new MyEx(); } catch (RuntimeException | MyEx e) {}",
+    ));
+    assert!(exceptions.is_empty(), "{exceptions:?}");
 }
 
 #[test]
 fn an_outer_try_catches_a_nested_throw() {
-    assert!(
-        reported(&with_checked(
-            "try { try { throw new MyEx(); } finally {} } catch (MyEx e) {}"
-        ))
-        .is_empty()
-    );
+    let exceptions = reported(&with_checked(
+        "try { try { throw new MyEx(); } finally {} } catch (MyEx e) {}",
+    ));
+    assert!(exceptions.is_empty(), "{exceptions:?}");
 }
 
 #[test]
@@ -123,9 +119,21 @@ fn rethrowing_from_a_catch_is_reported() {
 
 #[test]
 fn an_unchecked_throw_is_never_reported() {
-    assert!(reported(&with_checked("throw new IllegalStateException();")).is_empty());
-    assert!(reported(&with_checked("throw new NullPointerException();")).is_empty());
-    assert!(reported(&with_checked("throw new RuntimeException();")).is_empty());
+    assert!(
+        reported(&with_checked("throw new IllegalStateException();")).is_empty(),
+        "{:?}",
+        reported(&with_checked("throw new IllegalStateException();"))
+    );
+    assert!(
+        reported(&with_checked("throw new NullPointerException();")).is_empty(),
+        "{:?}",
+        reported(&with_checked("throw new NullPointerException();"))
+    );
+    assert!(
+        reported(&with_checked("throw new RuntimeException();")).is_empty(),
+        "{:?}",
+        reported(&with_checked("throw new RuntimeException();"))
+    );
 }
 
 #[test]
@@ -145,7 +153,7 @@ fn calling_a_method_that_throws_propagates_the_exception() {
 fn a_declaring_caller_of_a_throwing_method_is_silent() {
     let src = "class MyEx extends Exception {} \
                class C { void a() throws MyEx {} void b() throws MyEx { a(); } }";
-    assert!(reported(src).is_empty());
+    assert!(reported(src).is_empty(), "{:?}", reported(src));
 }
 
 #[test]
@@ -160,7 +168,7 @@ fn a_constructor_that_throws_propagates_when_used() {
 fn an_exception_with_an_unindexed_supertype_is_not_classified() {
     // `MyEx`'s chain reaches an un-indexed `Unknown` type, so it cannot be proven checked → skipped.
     let src = "class MyEx extends Unknown {} class C { void f() { throw new MyEx(); } }";
-    assert!(reported(src).is_empty());
+    assert!(reported(src).is_empty(), "{:?}", reported(src));
 }
 
 #[test]
@@ -169,7 +177,7 @@ fn a_throw_inside_a_lambda_is_not_attributed_to_the_method() {
     let src = "class MyEx extends Exception {} \
                interface Task { void run(); } \
                class C { void f() { Task t = () -> { throw new MyEx(); }; } }";
-    assert!(reported(src).is_empty());
+    assert!(reported(src).is_empty(), "{:?}", reported(src));
 }
 
 #[test]
@@ -184,14 +192,12 @@ fn without_the_stdlib_stubs_nothing_is_reported() {
     let index =
         jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), root.clone())]).build());
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
-    assert!(
-        jals_exec::block_on_inline(
-            analysis
-                .in_project(&index, FileId(0))
-                .unreported_exceptions()
-        )
-        .is_empty()
+    let unreported = jals_exec::block_on_inline(
+        analysis
+            .in_project(&index, FileId(0))
+            .unreported_exceptions(),
     );
+    assert!(unreported.is_empty(), "{unreported:?}");
 }
 
 #[test]

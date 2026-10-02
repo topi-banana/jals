@@ -814,7 +814,7 @@ fn mandatory_body_positions_fail_instead_of_blanking() {
         "class C { void m() { try #[cfg(feature = \"x\")] { f(); } catch (Exception e) {} } }\n",
         &[],
     );
-    assert!(!messages.is_empty());
+    assert!(!messages.is_empty(), "{messages:?}");
     assert!(bytes.starts_with(b"class C"));
 }
 

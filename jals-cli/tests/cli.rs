@@ -2691,7 +2691,7 @@ fn running_a_wasm_backed_project_without_an_export_instantiates_it() {
         "run failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
 }
 
 /// An export that is not there reports the ones that are.

@@ -136,7 +136,11 @@ fn type_parameters_are_recorded_with_their_bounds() {
         }]
     );
     assert_eq!(holder.type_params[1].name, "V");
-    assert!(holder.type_params[1].bounds.is_empty());
+    assert!(
+        holder.type_params[1].bounds.is_empty(),
+        "{:?}",
+        holder.type_params[1].bounds
+    );
 }
 
 #[test]
@@ -266,7 +270,11 @@ fn a_methods_own_type_parameters_are_recorded() {
     assert_eq!(declared[0].name, "E");
     assert_eq!(declared[0].bounds.len(), 1, "`extends Number` is captured");
     // And the class itself declares none — that is the whole distinction.
-    assert!(index.item(c).type_params.is_empty());
+    assert!(
+        index.item(c).type_params.is_empty(),
+        "{:?}",
+        index.item(c).type_params
+    );
 }
 
 /// A method's `<T>` shadows its class's, so the two must be told apart by more than the name.

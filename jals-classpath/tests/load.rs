@@ -303,7 +303,7 @@ fn native_cached_jar_tampered_on_disk_is_a_warning() {
         .await
     })
     .expect("test runtime bootstraps");
-    assert!(load.classes.is_empty());
+    assert!(load.classes.is_empty(), "{:?}", load.classes);
     assert_eq!(load.warnings.len(), 1);
     assert!(
         load.warnings[0].message.contains("Corrupt"),

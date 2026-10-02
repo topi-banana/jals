@@ -2205,7 +2205,11 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
             &jals_progress::Progress::SILENT,
         )
         .await;
-        assert!(compile.library_sources.is_empty());
+        assert!(
+            compile.library_sources.is_empty(),
+            "{:?}",
+            compile.library_sources
+        );
         assert!(
             compile
                 .source_dep_sources
@@ -2487,7 +2491,8 @@ fn a_publication_the_task_classpath_backs_is_silent() {
             &[("dep/vendor/lib.jar", &classes)],
         );
 
-        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+        let diagnoses = publication_diagnoses(&root, &storage).await;
+        assert!(diagnoses.is_empty(), "{diagnoses:?}");
     });
 }
 
@@ -2509,7 +2514,8 @@ fn a_build_classpath_jar_backs_a_publication() {
             ],
         );
 
-        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+        let diagnoses = publication_diagnoses(&root, &storage).await;
+        assert!(diagnoses.is_empty(), "{diagnoses:?}");
     });
 }
 
@@ -2529,7 +2535,8 @@ fn a_build_classpath_directory_backs_a_publication() {
             ],
         );
 
-        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+        let diagnoses = publication_diagnoses(&root, &storage).await;
+        assert!(diagnoses.is_empty(), "{diagnoses:?}");
     });
 }
 
@@ -2607,7 +2614,8 @@ fn two_publications_sharing_a_package_tree_are_covered_together() {
                 ("dep/vendor/lib.jar", &classes),
             ],
         );
-        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+        let diagnoses = publication_diagnoses(&root, &storage).await;
+        assert!(diagnoses.is_empty(), "{diagnoses:?}");
     });
 }
 
@@ -2826,7 +2834,8 @@ fn the_root_project_is_never_diagnosed() {
         // The same publication a dependency would be diagnosed for, declared by the root itself.
         let root = manifest("[build]\nscript = { type = \"java\", file = \"build.java\" }\n");
 
-        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+        let diagnoses = publication_diagnoses(&root, &storage).await;
+        assert!(diagnoses.is_empty(), "{diagnoses:?}");
     });
 }
 
@@ -2859,11 +2868,8 @@ fn a_recorded_coverage_answer_is_reused_and_a_classpath_edit_invalidates_it() {
                 ("dep/vendor/lib.jar", &classes),
             ],
         );
-        assert!(
-            publication_diagnoses_in(&root, &backed, &mut cache)
-                .await
-                .is_empty()
-        );
+        let backed_diagnoses = publication_diagnoses_in(&root, &backed, &mut cache).await;
+        assert!(backed_diagnoses.is_empty(), "{backed_diagnoses:?}");
     });
 }
 

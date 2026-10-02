@@ -537,7 +537,11 @@ class build {
             let graph = MemoryProjectGraph::discover(&escaped, DependencyScope::Build, &root_view)
                 .await
                 .unwrap();
-            assert!(graph.metadata().nodes().is_empty());
+            assert!(
+                graph.metadata().nodes().is_empty(),
+                "{:?}",
+                graph.metadata().nodes()
+            );
             assert_eq!(graph.warnings().len(), 1);
         });
     }
@@ -698,7 +702,7 @@ class build {
                 .await
                 .unwrap();
             let assembly = graph.assemble(storage.artifacts_mut()).await;
-            assert!(assembly.errors.is_empty());
+            assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
             assert!(
                 assembly
                     .plan
@@ -724,7 +728,11 @@ class build {
             let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &view(&[]))
                 .await
                 .unwrap();
-            assert!(graph.metadata().nodes().is_empty());
+            assert!(
+                graph.metadata().nodes().is_empty(),
+                "{:?}",
+                graph.metadata().nodes()
+            );
             assert_eq!(
                 graph
                     .warnings()
@@ -1008,7 +1016,11 @@ class build {
             assert_eq!(generated(&selected), ["vulkan.java"]);
             let unselected =
                 preprocess_with(&root, &root_view, &BuildScriptEnvironment::new()).await;
-            assert!(generated(&unselected).is_empty());
+            assert!(
+                generated(&unselected).is_empty(),
+                "{:?}",
+                generated(&unselected)
+            );
         });
     }
 

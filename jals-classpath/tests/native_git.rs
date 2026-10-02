@@ -173,7 +173,11 @@ fixture = { git = "https://example.invalid/fixture.git" }
             rendered.contains("example.invalid"),
             "the warning names the locator through its origin: {rendered}"
         );
-        assert!(plan.plan.source_dependency_artifacts.is_empty());
+        assert!(
+            plan.plan.source_dependency_artifacts.is_empty(),
+            "{:?}",
+            plan.plan.source_dependency_artifacts
+        );
     })
     .unwrap();
 }

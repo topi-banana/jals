@@ -87,7 +87,7 @@ mod tests {
             let doc = Document::new("class C {\n    int x = 1;\n}\n".to_owned()).await;
             let out =
                 Formatting::formatting_edits(&doc, &Config::default(), FeatureSet::default()).await;
-            assert!(out.edits.is_empty());
+            assert!(out.edits.is_empty(), "{:?}", out.edits);
             // The distinction the actor turns into a `window/showMessage`: nothing to do is not the
             // same answer as a refusal, even though both produce no edits.
             assert!(!out.fell_back);

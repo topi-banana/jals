@@ -440,7 +440,11 @@ mod tests {
         let filter = TestFilter::new()
             .with_patterns(vec!["MathTest".to_owned()])
             .exact(true);
-        assert!(filter.select(&cases()).selected().is_empty());
+        assert!(
+            filter.select(&cases()).selected().is_empty(),
+            "{:?}",
+            filter.select(&cases()).selected()
+        );
 
         // `--skip` applies after the positional patterns, and stays a substring under `--exact`
         // so that it can name a class.
@@ -462,7 +466,11 @@ mod tests {
         );
         let all = TestFilter::new().with_ignored(RunIgnored::All);
         assert_eq!(all.select(&cases()).selected().len(), 4);
-        assert!(all.select(&cases()).skipped().is_empty());
+        assert!(
+            all.select(&cases()).skipped().is_empty(),
+            "{:?}",
+            all.select(&cases()).skipped()
+        );
     }
 
     #[test]

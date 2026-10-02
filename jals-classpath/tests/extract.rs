@@ -74,7 +74,7 @@ fn extraction_is_idempotent_and_corruption_is_advisory() {
 
         let bogus = publish(&mut cache, b"not a zip").await;
         let corrupt = JarExtraction::<LibrarySource>::sources(&exec, &mut cache, &[bogus]).await;
-        assert!(corrupt.artifacts.is_empty());
+        assert!(corrupt.artifacts.is_empty(), "{:?}", corrupt.artifacts);
         assert_eq!(corrupt.warnings.len(), 1);
     });
 }
