@@ -203,6 +203,7 @@ impl Page {
             Activity::Fetch => "#3f9dd4",
             Activity::Extract => "#3fb0a5",
             Activity::Remap => "#4fae63",
+            Activity::Compose => "#4fae8f",
             Activity::Merge => "#7cae4f",
             Activity::Decompile => "#c9a227",
             Activity::Publish => "#c98127",

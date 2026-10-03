@@ -192,6 +192,14 @@ pub enum TaskNodeKind {
         jar: TaskId,
         member: String,
     },
+    /// The UTF-8 text of one member of a jar.
+    ///
+    /// The text counterpart of [`NestedJar`](Self::NestedJar): a mapping file a publisher ships
+    /// inside a jar is a value a later node reads, not an archive anything opens again.
+    JarText {
+        jar: TaskId,
+        member: String,
+    },
     RemapJar {
         jar: TaskId,
         mappings: TaskId,
@@ -203,6 +211,49 @@ pub enum TaskNodeKind {
         /// an inherited member resolves against a supertype nobody declared, misses, and keeps its
         /// source name in an otherwise remapped archive.
         hierarchy: Vec<TaskId>,
+    },
+    /// Two published mapping sets joined into one tiny v2 table.
+    ///
+    /// `official` is ProGuard-style text mapping project-side names onto obfuscated ones;
+    /// `intermediary` is tiny v2 whose first namespace holds the obfuscated names. The join is on
+    /// the obfuscated member, and the output is tiny v2 text through `format`'s namespace pair —
+    /// one table both a deobfuscating and a reobfuscating remap can read. The host half is
+    /// `jals-classpath`'s `MappingText::compose`.
+    ComposeMappings {
+        official: TaskId,
+        intermediary: TaskId,
+        format: TaskMappingFormat,
+    },
+    /// A tiny v2 text extended with entries re-filed under additional owners.
+    ///
+    /// `copies` is one `new-owner<tab>existing-owner<tab>member-name` request per line, in the
+    /// text's first namespace; each appends an identity section for `new-owner` carrying every
+    /// entry of `existing-owner` under that member name. It is how a class that *declares* a
+    /// member it does not *extend* — a mixin-style shadow, a relocated class — becomes visible to
+    /// a remap's hierarchy walk. The host half is `jals-classpath`'s `MappingText::append_copies`.
+    CopyMappings {
+        mappings: TaskId,
+        copies: String,
+    },
+    /// Textual member references resolved through a mapping set.
+    ///
+    /// `requests` is one `passthrough<tab>context<tab>reference` line per reference, where a
+    /// reference is `[Lowner;]name[(method-descriptor)|:field-descriptor]` and `context` is the
+    /// owner an unqualified name resolves against. The answer is one `passthrough<tab>rewritten`
+    /// line per request, and a reference the table cannot settle fails the node listing every
+    /// line that failed. The host half is `jals-classpath`'s `MappingText::resolve_references`.
+    ResolveReferences {
+        requests: String,
+        mappings: TaskId,
+        format: TaskMappingFormat,
+    },
+    /// A JSON document assembled from path/value records.
+    ///
+    /// `records` is one `segment<0x01>segment…<tab>value` line per leaf; the segments are object
+    /// keys from the root and the value is the string leaf under them. Keys sort, values are
+    /// escaped, a path declared twice must carry one value, and the empty record set is `{}`.
+    JsonFromLines {
+        records: TaskId,
     },
     MergeJars {
         base: TaskId,
@@ -230,7 +281,12 @@ impl TaskNodeKind {
                 kind: TaskFetchKind::Text,
                 ..
             }
-            | Self::ProjectText { .. } => TaskValueKind::Text,
+            | Self::ProjectText { .. }
+            | Self::JarText { .. }
+            | Self::ComposeMappings { .. }
+            | Self::CopyMappings { .. }
+            | Self::ResolveReferences { .. }
+            | Self::JsonFromLines { .. } => TaskValueKind::Text,
             Self::Fetch {
                 kind: TaskFetchKind::Jar,
                 ..
@@ -265,10 +321,21 @@ impl TaskNodeKind {
             | Self::JsonUrl { json, .. }
             | Self::JsonDigest { json, .. }
             | Self::JsonU64 { json, .. } => vec![(*json, TaskValueKind::Json)],
-            Self::ExtractJava { jar, .. } | Self::DecompileJava { jar, .. } => {
-                vec![(*jar, TaskValueKind::Jar)]
-            }
-            Self::NestedJar { jar, .. } => vec![(*jar, TaskValueKind::Jar)],
+            Self::ExtractJava { jar, .. }
+            | Self::DecompileJava { jar, .. }
+            | Self::NestedJar { jar, .. }
+            | Self::JarText { jar, .. } => vec![(*jar, TaskValueKind::Jar)],
+            Self::ComposeMappings {
+                official,
+                intermediary,
+                ..
+            } => vec![
+                (*official, TaskValueKind::Text),
+                (*intermediary, TaskValueKind::Text),
+            ],
+            Self::CopyMappings { mappings, .. }
+            | Self::ResolveReferences { mappings, .. }
+            | Self::JsonFromLines { records: mappings } => vec![(*mappings, TaskValueKind::Text)],
             Self::RemapJar {
                 jar,
                 mappings,
@@ -299,12 +366,24 @@ impl TaskNodeKind {
             Self::ByteCount { .. }
             | Self::Fetch { .. }
             | Self::JsonU64 { .. }
+            | Self::JsonFromLines { .. }
             | Self::MergeJars { .. } => 0,
-            // A remap's only literals are the namespace names a tiny v2 format selects.
-            Self::RemapJar { format, .. } => match format {
+            // A remap's or a composition's only literals are the namespace names a tiny v2 format
+            // selects; a resolution's are those plus the request lines.
+            Self::RemapJar { format, .. } | Self::ComposeMappings { format, .. } => match format {
                 TaskMappingFormat::Proguard => 0,
                 TaskMappingFormat::TinyV2 { from, to } => from.len() + to.len(),
             },
+            Self::ResolveReferences {
+                requests, format, ..
+            } => {
+                requests.len()
+                    + match format {
+                        TaskMappingFormat::Proguard => 0,
+                        TaskMappingFormat::TinyV2 { from, to } => from.len() + to.len(),
+                    }
+            }
+            Self::CopyMappings { copies, .. } => copies.len(),
             Self::JsonAt { path, .. }
             | Self::JsonUrl { path, .. }
             | Self::JsonDigest { path, .. } => path.iter().map(String::len).sum(),
@@ -312,7 +391,7 @@ impl TaskNodeKind {
                 path, field, value, ..
             } => path.iter().map(String::len).sum::<usize>() + field.len() + value.len(),
             Self::ExtractJava { prefix, .. } | Self::DecompileJava { prefix, .. } => prefix.len(),
-            Self::NestedJar { member, .. } => member.len(),
+            Self::NestedJar { member, .. } | Self::JarText { member, .. } => member.len(),
         }
     }
 }
@@ -371,6 +450,17 @@ pub enum TaskTerminal {
         mode: TaskPublishMode,
         intent: TaskPublishIntent,
     },
+    /// Write one text value below the script's output root (`target/jals/build/script/out`).
+    ///
+    /// The task-side counterpart of the script's own `Output.writeText`, for text the *host*
+    /// produced — a composed mapping table, an assembled document — which never crosses the
+    /// script boundary and so is bounded by the task byte budget rather than by the script's
+    /// per-file output limit. It needs a host that owns the project: a snapshot host has no tree
+    /// to write into and refuses the plan.
+    PublishText {
+        path: String,
+        text: TaskId,
+    },
 }
 
 impl TaskTerminal {
@@ -380,6 +470,7 @@ impl TaskTerminal {
                 (*jar, TaskValueKind::Jar)
             }
             Self::PublishTree { tree, .. } => (*tree, TaskValueKind::SourceTree),
+            Self::PublishText { text, .. } => (*text, TaskValueKind::Text),
         }
     }
 
@@ -394,6 +485,7 @@ impl TaskTerminal {
             Self::PublishTree {
                 owner, destination, ..
             } => owner.len() + destination.len(),
+            Self::PublishText { path, .. } => path.len(),
         }
     }
 }
@@ -508,6 +600,9 @@ impl TaskPlan {
             }
             Self::validate_path(destination, limits, false)?;
         }
+        if let TaskTerminal::PublishText { path, .. } = terminal {
+            Self::validate_path(path, limits, false)?;
+        }
         Ok(PlanCost {
             edges: 1,
             literal_bytes: terminal.literal_bytes(),
@@ -543,8 +638,17 @@ impl TaskPlan {
             | TaskNodeKind::DecompileJava { prefix, .. } => {
                 Self::validate_path(prefix, limits, true)?;
             }
-            TaskNodeKind::NestedJar { member, .. } => {
+            TaskNodeKind::NestedJar { member, .. } | TaskNodeKind::JarText { member, .. } => {
                 Self::validate_path(member, limits, false)?;
+            }
+            // A composition writes a tiny v2 table, and a resolution reads one through a pair:
+            // both need the namespace names the ProGuard-style grammar does not carry, so the
+            // format that states no pair is refused where the node is declared.
+            TaskNodeKind::ComposeMappings { format, .. }
+            | TaskNodeKind::ResolveReferences { format, .. } => {
+                if matches!(format, TaskMappingFormat::Proguard) {
+                    return Err(TaskPlanError::NamespacesRequired);
+                }
             }
             TaskNodeKind::JsonAt { path, .. }
             | TaskNodeKind::JsonFindString { path, .. }
@@ -558,6 +662,8 @@ impl TaskPlan {
             TaskNodeKind::ByteCount { .. }
             | TaskNodeKind::Fetch { .. }
             | TaskNodeKind::RemapJar { .. }
+            | TaskNodeKind::CopyMappings { .. }
+            | TaskNodeKind::JsonFromLines { .. }
             | TaskNodeKind::MergeJars { .. } => {}
         }
         Ok(())
@@ -611,6 +717,8 @@ pub enum TaskPlanError {
     InvalidJsonPath,
     InvalidPath,
     InvalidOwner,
+    /// A mapping-text node was declared with a grammar that names no namespace pair.
+    NamespacesRequired,
     Reentrant(&'static str),
 }
 
@@ -644,6 +752,10 @@ impl fmt::Display for TaskPlanError {
             Self::InvalidJsonPath => f.write_str("build-task JSON path contains an empty segment"),
             Self::InvalidPath => f.write_str("build task contains an invalid portable path"),
             Self::InvalidOwner => f.write_str("build-task publication owner must not be empty"),
+            Self::NamespacesRequired => f.write_str(
+                "a mapping-text build task needs the tiny v2 namespace pair: the ProGuard-style \
+                 grammar names no namespaces to write or read one through",
+            ),
             Self::Reentrant(what) => write!(f, "reentrant build-task {what}"),
         }
     }
@@ -1127,5 +1239,146 @@ mod tests {
         let plan = api.finish().unwrap();
         assert_eq!(plan.nodes.len(), 3);
         assert_eq!(plan.validate(tight), Ok(()));
+    }
+
+    /// A mapping-text chain — compose, copy, resolve, assemble, publish — records in dependency
+    /// order, gates the nodes that need a namespace pair on one, refuses an escaping publication
+    /// path where it is declared, and survives the wire unchanged.
+    #[test]
+    fn mapping_text_nodes_round_trip_and_gate_on_the_pair() {
+        let tiny = || TaskMappingFormat::TinyV2 {
+            from: "intermediary".to_owned(),
+            to: "mojang".to_owned(),
+        };
+        let api = TasksApi::new(limits());
+        let official = push(
+            &api,
+            TaskNodeKind::ProjectText {
+                path: "mappings/official.txt".to_owned(),
+            },
+        );
+        let intermediary = push(
+            &api,
+            TaskNodeKind::ProjectText {
+                path: "mappings/intermediary.tiny".to_owned(),
+            },
+        );
+        // A composition writes a tiny v2 table, so a grammar that names no pair is refused here
+        // rather than at the host that would have to guess one.
+        assert_eq!(
+            api.push(TaskNodeKind::ComposeMappings {
+                official,
+                intermediary,
+                format: TaskMappingFormat::Proguard,
+            })
+            .unwrap_err(),
+            TaskPlanError::NamespacesRequired
+        );
+        assert_eq!(
+            api.push(TaskNodeKind::ResolveReferences {
+                requests: "k\tctx\ttick".to_owned(),
+                mappings: official,
+                format: TaskMappingFormat::Proguard,
+            })
+            .unwrap_err(),
+            TaskPlanError::NamespacesRequired
+        );
+        let composed = push(
+            &api,
+            TaskNodeKind::ComposeMappings {
+                official,
+                intermediary,
+                format: tiny(),
+            },
+        );
+        let extended = push(
+            &api,
+            TaskNodeKind::CopyMappings {
+                mappings: composed,
+                copies: "me/M\tnet/minecraft/world/level/Level\ttick".to_owned(),
+            },
+        );
+        let resolved = push(
+            &api,
+            TaskNodeKind::ResolveReferences {
+                requests: "k\tctx\ttick".to_owned(),
+                mappings: extended,
+                format: tiny(),
+            },
+        );
+        let document = push(&api, TaskNodeKind::JsonFromLines { records: resolved });
+        assert_eq!(
+            api.terminal(TaskTerminal::PublishText {
+                path: "../escape.txt".to_owned(),
+                text: document,
+            })
+            .unwrap_err(),
+            TaskPlanError::InvalidPath
+        );
+        api.terminal(TaskTerminal::PublishText {
+            path: "resources/refmap.json".to_owned(),
+            text: document,
+        })
+        .unwrap();
+
+        let plan = api.finish().unwrap();
+        let bytes = serde_json::to_vec(&plan).unwrap();
+        let decoded: TaskPlan = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, plan);
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+    }
+
+    /// The new vocabulary's wire names, pinned the moment they are written: a plan is
+    /// fingerprinted as canonical JSON and cache records name these tags, so a later rename is a
+    /// silent miss at best and a misread at worst.
+    #[test]
+    fn the_mapping_text_wire_names_are_stated() {
+        let node = |kind| {
+            serde_json::to_string(&TaskNode {
+                id: TaskId(0),
+                kind,
+            })
+            .unwrap()
+        };
+        assert!(
+            node(TaskNodeKind::JarText {
+                jar: TaskId(0),
+                member: "mappings/mappings.tiny".to_owned(),
+            })
+            .contains(r#""type":"jar-text""#)
+        );
+        assert!(
+            node(TaskNodeKind::ComposeMappings {
+                official: TaskId(0),
+                intermediary: TaskId(0),
+                format: TaskMappingFormat::Proguard,
+            })
+            .contains(r#""type":"compose-mappings""#)
+        );
+        assert!(
+            node(TaskNodeKind::CopyMappings {
+                mappings: TaskId(0),
+                copies: String::new(),
+            })
+            .contains(r#""type":"copy-mappings""#)
+        );
+        assert!(
+            node(TaskNodeKind::ResolveReferences {
+                requests: String::new(),
+                mappings: TaskId(0),
+                format: TaskMappingFormat::Proguard,
+            })
+            .contains(r#""type":"resolve-references""#)
+        );
+        assert!(
+            node(TaskNodeKind::JsonFromLines { records: TaskId(0) })
+                .contains(r#""type":"json-from-lines""#)
+        );
+        let terminal = serde_json::to_string(&TaskTerminal::PublishText {
+            path: "notes.txt".to_owned(),
+            text: TaskId(0),
+        })
+        .unwrap();
+        assert!(terminal.contains(r#""type":"publish-text""#), "{terminal}");
     }
 }

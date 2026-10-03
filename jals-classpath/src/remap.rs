@@ -84,7 +84,7 @@ const REMAP_OUTPUT_VERSION: u32 = 4;
 /// manifest's own bytes rather than a re-rendering of them.
 const MERGE_OUTPUT_VERSION: u32 = 5;
 
-/// The output versions of every jar transform this crate performs.
+/// The output versions of every jar and mapping-text transform this crate performs.
 ///
 /// Published because the versions above are not the whole rule. A consumer that memoizes *around*
 /// one of these transforms — `jals-project` records what a build task produced and replays it
@@ -106,6 +106,18 @@ impl JarTransforms {
     const VERSIONS: &'static [(&'static str, u32)] = &[
         ("remap", REMAP_OUTPUT_VERSION),
         ("merge", MERGE_OUTPUT_VERSION),
+        (
+            "compose-mappings",
+            crate::mapping_text::COMPOSE_MAPPINGS_OUTPUT_VERSION,
+        ),
+        (
+            "copy-mappings",
+            crate::mapping_text::COPY_MAPPINGS_OUTPUT_VERSION,
+        ),
+        (
+            "resolve-references",
+            crate::mapping_text::RESOLVE_REFERENCES_OUTPUT_VERSION,
+        ),
     ];
 
     /// Fold every transform's output version into `fold`.
@@ -196,6 +208,38 @@ impl NestedJar {
             .1
             .map_err(|error| format!("failed to read nested jar `{member}`: {error}"))?;
         Self::publish_nested(cache, parent, member, &bytes).await
+    }
+
+    /// The UTF-8 text of one member of `jar`.
+    ///
+    /// The text counterpart of [`extract`](Self::extract): a mapping file a publisher ships inside
+    /// a jar — Fabric's intermediary is one — is a *value* the plan carries onward, not an
+    /// artifact it publishes, so nothing is written to the cache here and the member's identity
+    /// reaches it through the digest of whatever consumes the text.
+    ///
+    /// # Errors
+    /// A message naming a jar that cannot be read, a member that is missing, or bytes that are
+    /// not UTF-8.
+    pub async fn member_text<C: CacheBackend>(
+        exec: &Exec,
+        cache: &ArtifactCache<C>,
+        parent: &CacheKey,
+        member: &str,
+    ) -> Result<String, String> {
+        let reader = cache
+            .open_verified(parent)
+            .await
+            .map_err(|error| format!("parent jar is invalid: {error:?}"))?
+            .ok_or_else(|| "parent jar is not cached".to_owned())?;
+        let members = Archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
+        let bytes = members
+            .into_iter()
+            .find(|(name, _)| name == member)
+            .ok_or_else(|| format!("jar member `{member}` is missing"))?
+            .1
+            .map_err(|error| format!("failed to read jar member `{member}`: {error}"))?;
+        String::from_utf8(bytes)
+            .map_err(|error| format!("jar member `{member}` is not UTF-8: {error}"))
     }
 
     /// Extract every nested `-jar` member of `parent` (in archive order) and publish each as a

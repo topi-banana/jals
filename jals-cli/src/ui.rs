@@ -83,6 +83,7 @@ impl Display {
             Activity::Fetch => Verb::Downloading,
             Activity::Extract => Verb::Extracting,
             Activity::Remap => Verb::Remapping,
+            Activity::Compose => Verb::Composing,
             Activity::Merge => Verb::Merging,
             Activity::Decompile => Verb::Decompiling,
             Activity::Publish => Verb::Publishing,
