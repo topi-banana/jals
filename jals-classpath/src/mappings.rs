@@ -51,7 +51,7 @@ pub struct Mappings {
 
 /// The renamed members of one class, keyed by their source identities.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ClassMembers {
+pub(crate) struct ClassMembers {
     /// `(source name, source descriptor)` → target name.
     methods: BTreeMap<(String, String), String>,
     /// `(source name, source descriptor)` → target name.
@@ -60,6 +60,18 @@ struct ClassMembers {
     methods_by_name: BTreeMap<String, Option<String>>,
     /// Source name → target name, only while exactly one field carries the source name.
     fields_by_name: BTreeMap<String, Option<String>>,
+}
+
+impl ClassMembers {
+    /// Every method entry: `(source name, source descriptor)` → target name.
+    pub(crate) const fn methods(&self) -> &BTreeMap<(String, String), String> {
+        &self.methods
+    }
+
+    /// Every field entry: `(source name, source descriptor)` → target name.
+    pub(crate) const fn fields(&self) -> &BTreeMap<(String, String), String> {
+        &self.fields
+    }
 }
 
 impl Mappings {
@@ -376,7 +388,7 @@ impl Mappings {
     }
 
     /// Parse the `tiny<tab>2<tab><minor><tab><ns>…` header into its namespace list.
-    fn tiny_header(line: &str, number: usize) -> Result<Vec<&str>, String> {
+    pub(crate) fn tiny_header(line: &str, number: usize) -> Result<Vec<&str>, String> {
         let mut columns = line.split('\t');
         if columns.next() != Some("tiny") {
             return Err(format!("mapping line {number} is not a tiny header"));
@@ -431,7 +443,7 @@ impl Mappings {
     /// mandatory for a reason this parser depends on: descriptors are written in that namespace, so
     /// a first column that named nothing would be a class the descriptor translation below could
     /// key on nothing at all.
-    fn tiny_names<'a>(
+    pub(crate) fn tiny_names<'a>(
         columns: impl Iterator<Item = &'a str>,
         count: usize,
         number: usize,
@@ -460,7 +472,7 @@ impl Mappings {
     /// Validated rather than carried through verbatim because a descriptor is what a member lookup
     /// is keyed by: an unparsable one would silently key an entry nothing can ever match, which is
     /// a member that quietly keeps its obfuscated name in an otherwise remapped jar.
-    fn tiny_descriptor(
+    pub(crate) fn tiny_descriptor(
         raw: &str,
         is_method: bool,
         number: usize,
@@ -481,7 +493,7 @@ impl Mappings {
     }
 
     /// A javadoc section: exactly one column, which this crate does not keep.
-    fn tiny_comment<'a>(
+    pub(crate) fn tiny_comment<'a>(
         mut columns: impl Iterator<Item = &'a str>,
         number: usize,
     ) -> Result<(), String> {
@@ -497,7 +509,7 @@ impl Mappings {
     /// A parameter (`p`) or local-variable (`v`) section. Neither is renamed by this crate — a jar
     /// carries parameter names only as debug attributes — but a malformed one still fails the file,
     /// because a line this parser cannot account for is a line it may be misreading the shape of.
-    fn tiny_variable<'a>(
+    pub(crate) fn tiny_variable<'a>(
         mut columns: impl Iterator<Item = &'a str>,
         is_local: bool,
         number: usize,
@@ -552,7 +564,7 @@ impl Mappings {
     }
 
     /// Split `left -> right` exactly once; the Mojang format never contains a second arrow.
-    fn split_arrow(line: &str, number: usize) -> Result<(&str, &str), String> {
+    pub(crate) fn split_arrow(line: &str, number: usize) -> Result<(&str, &str), String> {
         let (left, right) = line
             .split_once(" -> ")
             .ok_or_else(|| format!("mapping line {number} is missing ` -> `"))?;
@@ -563,13 +575,13 @@ impl Mappings {
     }
 
     /// Convert a dotted Java binary name (`com.foo.Outer$Inner`) to internal form.
-    fn internalize(dotted: &str) -> String {
+    pub(crate) fn internalize(dotted: &str) -> String {
         dotted.replace('.', "/")
     }
 
     /// Parse a method member line's left side: `[start:end:]return name(params)`. The obfuscated
     /// descriptor is recomputed from the official signature through the class map.
-    fn method_entry(
+    pub(crate) fn method_entry(
         class_map: &BTreeMap<String, String>,
         left: &str,
         number: usize,
@@ -627,7 +639,7 @@ impl Mappings {
     }
 
     /// Parse a field member line's left side: `type name`.
-    fn field_entry(
+    pub(crate) fn field_entry(
         class_map: &BTreeMap<String, String>,
         left: &str,
         number: usize,
@@ -689,6 +701,11 @@ impl Mappings {
     /// The target internal name for a source internal name, when the class map covers it.
     pub(crate) fn remap_class(&self, source_internal: &str) -> Option<&str> {
         self.classes.get(source_internal).map(String::as_str)
+    }
+
+    /// The whole member table, keyed by **target** owner name.
+    pub(crate) const fn member_table(&self) -> &BTreeMap<String, ClassMembers> {
+        &self.members
     }
 
     /// The target name of a method declared by `owner_target` (internal form), looked up by its

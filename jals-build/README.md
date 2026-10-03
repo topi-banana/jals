@@ -431,14 +431,20 @@ asynchronously after the run and capability preflight succeed. Every method answ
 | `Tasks.jsonUrl(...)` / `jsonSha1(...)` / `jsonSha256(...)` / `jsonU64(...)`      | Values for a dependent fetch, resolved by the host DAG executor.              |
 | `Tasks.extractJava(jar, prefix)`                                                 | Safe `.java` source tree below `prefix`, with the prefix stripped.            |
 | `Tasks.nestedJar(jar, member)`                                                   | Extract one nested `.jar` member and treat it as a JAR.                       |
+| `Tasks.jarText(jar, member)`                                                     | The UTF-8 text of one JAR member, as a value a later node reads.              |
 | `Tasks.remapJar(jar, mappings)`                                                  | Deobfuscate a JAR with Mojang/ProGuard mappings text (hierarchy-aware).       |
 | `Tasks.remapJarAs(jar, mappings, format)`                                        | The same, over a stated mapping grammar.                                      |
+| `Tasks.composeMappings(official, intermediary, format)`                          | Join a ProGuard-style text and a tiny v2 text into one whole-game tiny v2 table through `format`'s namespace pair. |
+| `Tasks.copyMappings(mappings, copies)`                                           | Extend a tiny v2 text with entries re-filed under additional owners (`new<tab>existing<tab>member` lines). |
+| `Tasks.resolveReferences(requests, mappings, format)`                            | Rewrite `[Lowner;]name[(desc)\|:desc]` member references, one `passthrough<tab>context<tab>reference` line per request. |
+| `Tasks.jsonFromLines(records)`                                                   | Assemble a JSON document from `key<US>key…<tab>value` records.                |
 | `Tasks.proguard()` / `Tasks.tinyV2(from, to)`                                    | The grammar `remapJarAs` reads. Tiny v2 names the namespace pair to read.      |
 | `Tasks.mergeJars(base, overlay)`                                                 | Deterministic JAR union; overlay wins path conflicts.                         |
 | `Tasks.decompileJava(jar, prefix)`                                               | Compile-oriented skeleton source tree below `prefix`.                         |
 | `Tasks.addClasspath(jar)`                                                        | Add a task-produced JAR to the root classpath.                                |
 | `Tasks.addNestedClasspath(jar)`                                                  | Expand every nested `.jar` member onto the root classpath (library bundlers). |
 | `Tasks.publishTree(owner, tree, destination, intent)`                            | Atomically replace an exclusive physical source subtree.                      |
+| `Tasks.publishText(path, text)`                                                  | Write one text value below the script's output root (`target/jals/build/script/out`). |
 
 A declaration is refused where it is written when it cannot run: a handle from nowhere, a node of
 the wrong kind — a JSON value where a JAR belongs — or a plan that would exceed a limit names the
@@ -451,6 +457,43 @@ refuses either archive with `SecurityException: signer information does not matc
 kept them would compile against but never run. A Minecraft client jar carries about 3.7 MB of them.
 The two agree because a release that ships deobfuscated reaches `Tasks.mergeJars` without passing
 through a remap at all.
+
+The mapping-text nodes — `composeMappings`, `copyMappings`, `resolveReferences` — are the text side
+of the same domain `remapJar` is the jar side of, and they exist because a renaming nobody publishes
+as a pair still has one table underneath it: Mojang publishes `named → obfuscated` and Fabric
+publishes `obfuscated → intermediary`, so the table a Fabric mod's two remap steps read is a
+composition of the two, joined on the obfuscated member. `composeMappings` performs that join over
+the *whole* game rather than any project's slice of it; `copyMappings` re-files entries under
+additional owners, which is how a class that declares a member it does not extend becomes visible
+to a remap's hierarchy walk; `resolveReferences` answers member references written as *strings* —
+the shape a Mixin-style reference map or an access-transformer list carries them — one
+`passthrough<tab>context<tab>reference` line per request, failing on every line the table cannot
+settle and listing them all. All three are memoized in the artifact cache on their inputs' digests,
+because a whole-game composition parses megabytes and a plan that re-runs must not pay it twice.
+
+`Tasks.publishText` writes one text value below the script's output root, in the same commit as the
+script's own `Output.writeText` files, and it is how host-produced text reaches a project: a
+composed mapping table a `[mappings] file` entry then names, or an assembled document a
+`[build] resource-dirs` directory packages. The bytes never cross the script boundary — which is
+the point, since a script's own writes are bounded by its sandbox and a whole-game mapping table is
+megabytes — so its ceiling is the task byte budget, and a path the script *also* wrote is refused
+rather than resolved by commit order. It needs a host that owns the project: a dependency's plan
+runs against an immutable snapshot and is refused if it declares one.
+
+For example, the chain a Fabric-style mod declares for one obfuscated release:
+
+```java
+int official = Tasks.fetchText(mojangUrl, mojangSha, mojangBytes);
+int tiny = Tasks.jarText(Tasks.fetchJar(fabricUrl, fabricSha, fabricBytes), "mappings/mappings.tiny");
+MappingFormat pair = Tasks.tinyV2("intermediary", "mojang");
+int table = Tasks.copyMappings(Tasks.composeMappings(official, tiny, pair), shadowCopies);
+Tasks.publishText("mappings/intermediary-1.21.1.tiny", table);
+int resolved = Tasks.resolveReferences(selectors, table, pair);
+Tasks.publishText("resources/refmap.json", Tasks.jsonFromLines(resolved));
+```
+
+Which selectors to ask about, what the shadow copies are, and what the assembled document means
+are the script's domain knowledge; the nodes only join, re-file, translate and assemble.
 
 For example:
 

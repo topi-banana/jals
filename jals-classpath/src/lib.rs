@@ -20,6 +20,8 @@ mod load;
 #[cfg(feature = "archive")]
 mod manifest;
 #[cfg(feature = "archive")]
+mod mapping_text;
+#[cfg(feature = "archive")]
 mod mappings;
 #[cfg(feature = "native")]
 mod native;
@@ -45,6 +47,8 @@ pub use load::{
     CachedJar, ClasspathCoverage, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree,
     SourceTreeExtraction, SourceTreeLimits,
 };
+#[cfg(feature = "archive")]
+pub use mapping_text::MappingText;
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};
 #[cfg(feature = "archive")]

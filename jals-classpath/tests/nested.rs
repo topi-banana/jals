@@ -73,3 +73,33 @@ fn corrupt_nested_jar_is_published_but_diagnosed_on_recursion() {
         assert_eq!(extraction.warnings.len(), 1);
     });
 }
+
+/// `member_text` is the value-side sibling of `extract`: what a publisher ships as one text
+/// member of a jar — Fabric's tiny file inside its intermediary jar — comes back as a string,
+/// and nothing is published to the cache on the way.
+#[test]
+fn jar_text_reads_one_member_as_utf8() {
+    block_on_inline(async {
+        let exec = Exec::inline();
+        let tiny = "tiny\t2\t0\tofficial\tintermediary\nc\ta\tclass_1\n";
+        let fat = jar(&[
+            ("mappings/mappings.tiny", tiny.as_bytes()),
+            ("data/bad.bin", b"\xff\xfe"),
+        ]);
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let root = publish(&mut cache, &fat).await;
+        let text =
+            jals_classpath::NestedJar::member_text(&exec, &cache, &root, "mappings/mappings.tiny")
+                .await
+                .expect("the member reads");
+        assert_eq!(text, tiny);
+        let missing = jals_classpath::NestedJar::member_text(&exec, &cache, &root, "nope.tiny")
+            .await
+            .unwrap_err();
+        assert!(missing.contains("missing"), "{missing}");
+        let binary = jals_classpath::NestedJar::member_text(&exec, &cache, &root, "data/bad.bin")
+            .await
+            .unwrap_err();
+        assert!(binary.contains("not UTF-8"), "{binary}");
+    });
+}

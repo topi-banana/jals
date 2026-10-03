@@ -29,25 +29,26 @@ use crate::task::{TaskPlan, TaskPlanLimits};
 // fields — a state written before them cannot decode at all. The plan format is unchanged, so only
 // the state version moves.
 //
-// Bumped for the Java task surface: `build.java` scripts gained `jals.build.Tasks` — the whole
-// declarative vocabulary, down to the mapping grammars — and the builder now hands the finished
-// plan over rather than unwrapping it. The plan's own format is unchanged, so only the API version
-// moves.
+// Bumped for the mapping-text task surface: `build.java` scripts gained `Tasks.jarText`,
+// `Tasks.composeMappings`, `Tasks.copyMappings`, `Tasks.resolveReferences`, `Tasks.jsonFromLines`
+// and the `Tasks.publishText` terminal — new node and terminal variants, which old plans never
+// contain and new plans old records never named. The plan's own encoding of everything that
+// existed is unchanged, so only the API version moves.
 //
-// Both bumped for declarative remap: `TaskNodeKind` gained `ProjectText`, and `RemapJar` gained
-// required `format` / `direction` / `hierarchy` fields. The plan is `deny_unknown_fields` and is
-// fingerprinted as canonical JSON, so a pre-remap state decodes to a different plan than it was
-// written from — the API bump reseeds the cache key so one is never fetched and decoded at all.
+// Bumped before that for the Java task surface: `build.java` scripts gained `jals.build.Tasks` —
+// the whole declarative vocabulary, down to the mapping grammars — and the builder now hands the
+// finished plan over rather than unwrapping it. The plan's own format is unchanged, so only the
+// API version moves.
 //
-// Bumped before that for publication intent: `Tasks.publishTree` gained a required intent argument
+// Both bumped before that for declarative remap: `TaskNodeKind` gained `ProjectText`, and
+// `RemapJar` gained required `format` / `direction` / `hierarchy` fields. The plan is
+// `deny_unknown_fields` and is fingerprinted as canonical JSON, so a pre-remap state decodes to a
+// different plan than it was written from — the API bump reseeds the cache key so one is never
+// fetched and decoded at all.
+//
+// And before that for publication intent: `Tasks.publishTree` gained a required intent argument
 // (API), and `TaskTerminal::PublishTree` gained a required `intent` field (state).
-//
-// And before that for build features: scripts gained `Build.feature`/`Build.features`, and
-// `FingerprintInputsWire` gained a required `features` field.
-// And before that for the Java engine: a script's engine is selected by the manifest tag, and a
-// `java` script's host surface is the `jals.build` package. The API version is what reseeds a
-// cache written by the engine's predecessor.
-const BUILD_SCRIPT_API_VERSION: u32 = 9;
+const BUILD_SCRIPT_API_VERSION: u32 = 10;
 const BUILD_SCRIPT_STATE_VERSION: u32 = 8;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
@@ -912,6 +913,16 @@ impl PreparedBuildScript {
             return Ok(bytes);
         }
         view.file(key).map(jals_storage::CodeFile::bytes)
+    }
+
+    /// Whether the script itself buffered a generated file at `key`.
+    ///
+    /// The question a host asks before committing bytes a *task terminal* produced below the
+    /// output root: a script write and a task publication of one path are two writers with no
+    /// order between them, and the host refuses the pair rather than letting whichever commits
+    /// last win.
+    pub fn generates_file(&self, key: &FileKey) -> bool {
+        self.pending.generated.contains_key(key)
     }
 
     /// Verified content-addressed cache key for a generated output.
