@@ -793,12 +793,14 @@ impl MappingText {
         global: &BTreeMap<&'table str, Vec<(&'table str, &'table str)>>,
     ) -> Result<String, String> {
         // `[Lowner;]` — the owner part. Mimicked from the selector grammar rather than a regex:
-        // the group is present exactly when what follows the `L` contains a `;`, so a bare name
-        // that happens to start with `L` stays a name.
+        // the group is present only when `L` opens a class name, and a class name can contain
+        // neither `(` nor `:` — so a `;` reachable only through one of those terminates a
+        // descriptor, not an owner, and `LOGGER:L…;` or `Lookup(L…)V` stays a bare name.
         let mut rest = reference;
         let mut owner: Option<&str> = None;
         if let Some(tail) = reference.strip_prefix('L')
             && let Some(end) = tail.find(';')
+            && !tail[..end].contains(['(', ':'])
         {
             owner = Some(&tail[..end]);
             rest = &tail[end + 1..];
@@ -1243,5 +1245,33 @@ c\tb/B\tclass_2
         let resolved = MappingText::resolve_references_text("x\ta/A\tshared", text, &format)
             .expect("the context settles it");
         assert_eq!(resolved, "x\tmethod_1\n");
+    }
+
+    #[test]
+    fn a_bare_name_that_starts_with_l_is_not_an_owner() {
+        // A `;` behind a `(` or `:` belongs to a descriptor, not to an owner, so these two
+        // references keep their names even though the names open with `L`. A qualified reference
+        // to the same member still reads its owner, which is the shape the check must not break.
+        let text = "\
+tiny\t2\t0\tmojang\tintermediary
+c\tme/A\tclass_1
+\tf\tLjava/lang/String;\tLOGGER\tfield_1
+\tm\t(Ljava/lang/String;)V\tLookup\tmethod_1
+";
+        let format = pair("intermediary", "mojang");
+        let resolved = MappingText::resolve_references_text(
+            "logger\t\tLOGGER:Ljava/lang/String;\n\
+             qualified\t\tLme/A;LOGGER:Ljava/lang/String;\n\
+             lookup\t\tLookup(Ljava/lang/String;)V",
+            text,
+            &format,
+        )
+        .expect("names starting with `L` stay names");
+        assert_eq!(
+            resolved,
+            "logger\tfield_1:Ljava/lang/String;\n\
+             qualified\tLclass_1;field_1:Ljava/lang/String;\n\
+             lookup\tmethod_1(Ljava/lang/String;)V\n"
+        );
     }
 }
