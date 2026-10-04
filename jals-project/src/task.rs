@@ -496,7 +496,10 @@ impl BuildTaskExecutor {
     /// output path is: the root is the host's constant, and a plan carries only the relative path
     /// below it. A path the *script* also wrote is refused rather than resolved by commit order —
     /// one path has one writer — while a file a previous run published at the same path with the
-    /// same bytes is nothing to change.
+    /// same bytes is nothing to change. A path a previous preparation generated and the current
+    /// script no longer writes is the middle case: it is not a conflict, because the terminal is
+    /// now the writer, so its bytes are (re)staged even when they match and reconciliation drops
+    /// the stale output's removal.
     fn published_text_changes(
         view: &ProjectView,
         prepared: &jals_build::build_script::PreparedBuildScript,
@@ -532,7 +535,13 @@ impl BuildTaskExecutor {
                 )));
             }
             match view.file(&key) {
-                Ok(existing) if existing.bytes() == published.bytes.as_slice() => {}
+                // Equal bytes are normally nothing to change. The exception is a stale script
+                // output reconciliation would remove: the terminal supersedes it, so a change
+                // has to be staged even though the bytes match, or the removal would delete the
+                // file the terminal just claimed.
+                Ok(existing)
+                    if existing.bytes() == published.bytes.as_slice()
+                        && !prepared.retires_file(&key) => {}
                 Ok(_) => changes.push(Change::ReplaceFile(key, published.bytes.clone().into())),
                 Err(jals_storage::Error::NotFoundFile(_)) => {
                     changes.push(Change::CreateFile(key, published.bytes.clone().into()));
@@ -2325,5 +2334,123 @@ c\tme/mod/LevelMixin\tme/mod/LevelMixin
         // never sees one that needs it — both are serde's answer, not this function's.
         let escaped = BuildTaskExecutor::json_from_lines("k\ta\"b\\c").expect("assembles");
         assert!(escaped.contains("\"a\\\"b\\\\c\""), "{escaped}");
+    }
+
+    /// One `execute_root` against the default project manifest, for the migration tests below.
+    async fn run_migration_root(
+        storage: &mut MemoryStorage,
+        fetcher: &MockFetcher,
+    ) -> Result<RootBuildScriptOutput, RootBuildScriptError> {
+        BuildTaskExecutor::execute_root(
+            &Exec::inline(),
+            fetcher,
+            storage,
+            &mut BuildScriptSession::new(),
+            RootBuildScriptOptions {
+                progress: &Progress::SILENT,
+                manifest: &manifest(),
+                environment: &BuildScriptEnvironment::new(),
+                limits: &BuildScriptLimits::default(),
+                host: BuildTaskHost::Project,
+                blocked_files: &[],
+                publications: SourcePublication::Apply,
+            },
+        )
+        .await
+    }
+
+    /// A project whose script generates `target/jals/build/script/out/notes.txt` through
+    /// `Output.writeText`, run once so a later script edit recovers that output for reconciliation.
+    async fn storage_with_a_script_generated_note() -> MemoryStorage {
+        let script = r#"
+            import jals.build.Output;
+
+            class build {
+                public static void main() {
+                    Output.writeText("notes.txt", "hello");
+                }
+            }
+        "#;
+        let mut storage = storage(script);
+        let fetcher = MockFetcher::online(StdBTreeMap::new());
+        run_migration_root(&mut storage, &fetcher).await.unwrap();
+        storage
+    }
+
+    /// Swap `build.java` for one that publishes `content` through `Tasks.publishText` at the same
+    /// path, and run it.
+    async fn migrate_note_to_publish_text(
+        storage: &mut MemoryStorage,
+        content: &str,
+    ) -> Result<RootBuildScriptOutput, RootBuildScriptError> {
+        let script = format!(
+            r#"
+                import jals.build.Tasks;
+
+                class build {{
+                    public static void main() {{
+                        int text = Tasks.fetchText(
+                            Tasks.httpsUrl("https://example.invalid/notes.txt"),
+                            Tasks.sha256("{}"),
+                            Tasks.bytes(1024));
+                        Tasks.publishText("notes.txt", text);
+                    }}
+                }}
+            "#,
+            ContentDigest::of(content.as_bytes()).to_hex(),
+        );
+        let mut transaction = storage.transaction(storage.revision()).unwrap();
+        transaction
+            .replace_file(FileKey::parse("build.java").unwrap(), script.into_bytes())
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let fetcher = MockFetcher::online(
+            std::iter::once((
+                "https://example.invalid/notes.txt".to_owned(),
+                content.as_bytes().to_vec(),
+            ))
+            .collect(),
+        );
+        run_migration_root(storage, &fetcher).await
+    }
+
+    /// A path moved from `Output.writeText` to `Tasks.publishText` between runs must not fail
+    /// with `NotFoundFile` after reconciliation removes the recovered output the terminal's
+    /// replacement names: the terminal supersedes the stale output.
+    #[test]
+    fn publish_text_supersedes_a_stale_script_output() {
+        block_on_inline(async {
+            let mut storage = storage_with_a_script_generated_note().await;
+            migrate_note_to_publish_text(&mut storage, "world")
+                .await
+                .expect("the terminal takes the stale output's path over");
+            assert_eq!(
+                storage
+                    .view()
+                    .file_text(&FileKey::parse("target/jals/build/script/out/notes.txt").unwrap())
+                    .expect("the migrated path is published"),
+                "world"
+            );
+        });
+    }
+
+    /// The same migration with byte-identical content must keep the file: reconciliation's
+    /// removal may not delete a path a terminal also publishes, even though equal bytes are
+    /// normally nothing to change.
+    #[test]
+    fn publish_text_keeps_a_stale_script_output_with_identical_bytes() {
+        block_on_inline(async {
+            let mut storage = storage_with_a_script_generated_note().await;
+            migrate_note_to_publish_text(&mut storage, "hello")
+                .await
+                .expect("the migrated path survives the rerun");
+            assert_eq!(
+                storage
+                    .view()
+                    .file_text(&FileKey::parse("target/jals/build/script/out/notes.txt").unwrap())
+                    .expect("the migrated path is published"),
+                "hello"
+            );
+        });
     }
 }
