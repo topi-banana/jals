@@ -59,6 +59,9 @@ pub enum Activity {
     Extract,
     /// Rewriting a jar's names through a mapping set.
     Remap,
+    /// Deriving one mapping text from others: joining two published sets, extending one with
+    /// copied entries, or resolving references through one.
+    Compose,
     /// Folding two jars into one.
     Merge,
     /// Reconstructing Java from class files.
@@ -92,6 +95,7 @@ impl Activity {
             Self::Fetch => "fetch",
             Self::Extract => "extract",
             Self::Remap => "remap",
+            Self::Compose => "compose",
             Self::Merge => "merge",
             Self::Decompile => "decompile",
             Self::Publish => "publish",

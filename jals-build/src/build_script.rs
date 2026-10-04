@@ -29,25 +29,26 @@ use crate::task::{TaskPlan, TaskPlanLimits};
 // fields — a state written before them cannot decode at all. The plan format is unchanged, so only
 // the state version moves.
 //
-// Bumped for the Java task surface: `build.java` scripts gained `jals.build.Tasks` — the whole
-// declarative vocabulary, down to the mapping grammars — and the builder now hands the finished
-// plan over rather than unwrapping it. The plan's own format is unchanged, so only the API version
-// moves.
+// Bumped for the mapping-text task surface: `build.java` scripts gained `Tasks.jarText`,
+// `Tasks.composeMappings`, `Tasks.copyMappings`, `Tasks.resolveReferences`, `Tasks.jsonFromLines`
+// and the `Tasks.publishText` terminal — new node and terminal variants, which old plans never
+// contain and new plans old records never named. The plan's own encoding of everything that
+// existed is unchanged, so only the API version moves.
 //
-// Both bumped for declarative remap: `TaskNodeKind` gained `ProjectText`, and `RemapJar` gained
-// required `format` / `direction` / `hierarchy` fields. The plan is `deny_unknown_fields` and is
-// fingerprinted as canonical JSON, so a pre-remap state decodes to a different plan than it was
-// written from — the API bump reseeds the cache key so one is never fetched and decoded at all.
+// Bumped before that for the Java task surface: `build.java` scripts gained `jals.build.Tasks` —
+// the whole declarative vocabulary, down to the mapping grammars — and the builder now hands the
+// finished plan over rather than unwrapping it. The plan's own format is unchanged, so only the
+// API version moves.
 //
-// Bumped before that for publication intent: `Tasks.publishTree` gained a required intent argument
+// Both bumped before that for declarative remap: `TaskNodeKind` gained `ProjectText`, and
+// `RemapJar` gained required `format` / `direction` / `hierarchy` fields. The plan is
+// `deny_unknown_fields` and is fingerprinted as canonical JSON, so a pre-remap state decodes to a
+// different plan than it was written from — the API bump reseeds the cache key so one is never
+// fetched and decoded at all.
+//
+// And before that for publication intent: `Tasks.publishTree` gained a required intent argument
 // (API), and `TaskTerminal::PublishTree` gained a required `intent` field (state).
-//
-// And before that for build features: scripts gained `Build.feature`/`Build.features`, and
-// `FingerprintInputsWire` gained a required `features` field.
-// And before that for the Java engine: a script's engine is selected by the manifest tag, and a
-// `java` script's host surface is the `jals.build` package. The API version is what reseeds a
-// cache written by the engine's predecessor.
-const BUILD_SCRIPT_API_VERSION: u32 = 9;
+const BUILD_SCRIPT_API_VERSION: u32 = 10;
 const BUILD_SCRIPT_STATE_VERSION: u32 = 8;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
@@ -912,6 +913,27 @@ impl PreparedBuildScript {
             return Ok(bytes);
         }
         view.file(key).map(jals_storage::CodeFile::bytes)
+    }
+
+    /// Whether the script itself buffered a generated file at `key`.
+    ///
+    /// The question a host asks before committing bytes a *task terminal* produced below the
+    /// output root: a script write and a task publication of one path are two writers with no
+    /// order between them, and the host refuses the pair rather than letting whichever commits
+    /// last win.
+    pub fn generates_file(&self, key: &FileKey) -> bool {
+        self.pending.generated.contains_key(key)
+    }
+
+    /// Whether a *previous* preparation generated the output at `key` and this one does not.
+    ///
+    /// The stale half of [`generates_file`](Self::generates_file): reconciliation stages a removal
+    /// for a recovered output the current script no longer writes, because the path has lost its
+    /// writer. A task terminal publishing the same path is a writer again — its change has to
+    /// supersede the removal rather than race it — so the host asks this before letting the
+    /// removal stand.
+    pub fn retires_file(&self, key: &FileKey) -> bool {
+        self.recovered_outputs.contains_key(key) && !self.pending.generated.contains_key(key)
     }
 
     /// Verified content-addressed cache key for a generated output.
@@ -1909,6 +1931,25 @@ mod api {
         }
         let mut changes =
             reconcile_output_changes(view, &prepared.pending.generated, &known_outputs)?;
+        // A host-planned change claims its path. The removal reconciliation stages for a stale
+        // script output is the one case where both name a key: the path still has a writer, just
+        // no longer the script, so the removal has to yield rather than be applied before the
+        // change that refills the path.
+        if !additional_changes.is_empty() {
+            let claimed: BTreeSet<&FileKey> = additional_changes
+                .iter()
+                .filter_map(|change| match change {
+                    Change::CreateFile(key, _)
+                    | Change::ReplaceFile(key, _)
+                    | Change::RemoveFile(key) => Some(key),
+                    Change::CreateDirectory(_) | Change::RemoveDirectory(_) => None,
+                })
+                .collect();
+            changes.retain(|change| match change {
+                Change::RemoveFile(key) => !claimed.contains(key),
+                _ => true,
+            });
+        }
         changes.extend(additional_changes);
         let mut transaction =
             storage

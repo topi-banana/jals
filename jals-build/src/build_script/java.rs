@@ -63,7 +63,10 @@ const PACKAGE: &str = "jals.build";
 /// The package author's version. Bumping it is part of changing the API's *behavior*: the
 /// build-script fingerprint carries the API version, not this one, so a Java-text change that
 /// changes what a script observes has to bump [`super::BUILD_SCRIPT_API_VERSION`].
-const VERSION: u32 = 1;
+///
+/// 2: the mapping-text task surface — `jarText`, `composeMappings`, `copyMappings`,
+/// `resolveReferences`, `jsonFromLines` and the `publishText` terminal.
+const VERSION: u32 = 2;
 
 /// The exported method a script's entry point is.
 const MAIN: &str = "main";
@@ -523,6 +526,24 @@ impl Api {
             }
         }
 
+        /// A format that names the namespace pair a mapping-text node writes or reads through.
+        ///
+        /// The ProGuard-style grammar names none, and a node handed one would be guessing which
+        /// two namespaces its answer lives in — the same refusal `TaskPlan::validate` states for a
+        /// plan that arrives as data, phrased here the way the rest of `jals.build` phrases one.
+        fn namespaces_required(
+            format: TaskMappingFormat,
+            operation: &str,
+        ) -> Result<TaskMappingFormat, NativeError> {
+            match format {
+                TaskMappingFormat::TinyV2 { .. } => Ok(format),
+                TaskMappingFormat::Proguard => Err(Api::refused(format!(
+                    "{operation} needs the tiny v2 namespace pair, which the ProGuard-style \
+                     grammar does not name: pass a format `Tasks.tinyV2(from, to)` built"
+                ))),
+            }
+        }
+
         let mut package = NativePackage::new(PACKAGE, VERSION);
         for &(path, text) in SOURCES {
             package.source(path, text);
@@ -950,6 +971,18 @@ impl Api {
                     Ok(())
                 },
             );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "jarText0(I[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let jar = task_id(&args, 0)?;
+                    let member = text(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::JarText { jar, member })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
             package.bind(
                 "jals/build/Tasks",
                 "tinyV2Check([C[C)V",
@@ -990,6 +1023,73 @@ impl Api {
                     let base = task_id(&args, 0)?;
                     let overlay = task_id(&args, 1)?;
                     let handle = push(&tasks, TaskNodeKind::MergeJars { base, overlay })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "composeMappings0(III[C[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let official = task_id(&args, 0)?;
+                    let intermediary = task_id(&args, 1)?;
+                    let format =
+                        mapping_format(args.i32(2)?, text(host, &args, 3)?, text(host, &args, 4)?)?;
+                    let format = namespaces_required(format, "Tasks.composeMappings")?;
+                    let handle = push(
+                        &tasks,
+                        TaskNodeKind::ComposeMappings {
+                            official,
+                            intermediary,
+                            format,
+                        },
+                    )?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "copyMappings0(I[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let mappings = task_id(&args, 0)?;
+                    let copies = text(host, &args, 1)?;
+                    let handle = push(&tasks, TaskNodeKind::CopyMappings { mappings, copies })?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "resolveReferences0([CII[C[C)I",
+                move |host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let requests = text(host, &args, 0)?;
+                    let mappings = task_id(&args, 1)?;
+                    let format =
+                        mapping_format(args.i32(2)?, text(host, &args, 3)?, text(host, &args, 4)?)?;
+                    let format = namespaces_required(format, "Tasks.resolveReferences")?;
+                    let handle = push(
+                        &tasks,
+                        TaskNodeKind::ResolveReferences {
+                            requests,
+                            mappings,
+                            format,
+                        },
+                    )?;
+                    results.set(0, NativeValue::I32(handle));
+                    Ok(())
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "jsonFromLines0(I)I",
+                move |_host: &mut dyn NativeHost, args: Args<'_>, mut results: Results<'_>| {
+                    let records = task_id(&args, 0)?;
+                    let handle = push(&tasks, TaskNodeKind::JsonFromLines { records })?;
                     results.set(0, NativeValue::I32(handle));
                     Ok(())
                 },
@@ -1051,6 +1151,16 @@ impl Api {
                             intent,
                         },
                     )
+                },
+            );
+            let tasks = self.tasks.clone();
+            package.bind(
+                "jals/build/Tasks",
+                "publishText0([CI)V",
+                move |host: &mut dyn NativeHost, args: Args<'_>, _results: Results<'_>| {
+                    let path = text(host, &args, 0)?;
+                    let text = task_id(&args, 1)?;
+                    terminal(&tasks, TaskTerminal::PublishText { path, text })
                 },
             );
         }
@@ -2309,10 +2419,17 @@ class build {
         int guarded = Tasks.remapJarAs(local, text, plain);
         int merged = Tasks.mergeJars(remapped, named);
         int decompiled = Tasks.decompileJava(merged, "src");
+        int member = Tasks.jarText(local, "mappings/mappings.tiny");
+        MappingFormat pair = Tasks.tinyV2("intermediary", "mojang");
+        int composed = Tasks.composeMappings(text, member, pair);
+        int extended = Tasks.copyMappings(composed, "me/M\ta/B\ttick");
+        int resolved = Tasks.resolveReferences("k\tctx\ttick", extended, pair);
+        int document = Tasks.jsonFromLines(resolved);
         Tasks.addClasspath(guarded);
         Tasks.addNestedClasspath(nested);
         Tasks.publishTree("example", sources, "src/main/java/net/example", "navigation");
         Tasks.publishTree("example", decompiled, "src/main/java", "compile");
+        Tasks.publishText("resources/refmap.json", document);
     }
 }
 "#;
@@ -2504,6 +2621,48 @@ class build {
                             prefix: "src".to_owned(),
                         },
                     ),
+                    node(
+                        21,
+                        TaskNodeKind::JarText {
+                            jar: TaskId::new(1),
+                            member: "mappings/mappings.tiny".to_owned(),
+                        },
+                    ),
+                    node(
+                        22,
+                        TaskNodeKind::ComposeMappings {
+                            official: TaskId::new(7),
+                            intermediary: TaskId::new(21),
+                            format: TaskMappingFormat::TinyV2 {
+                                from: "intermediary".to_owned(),
+                                to: "mojang".to_owned(),
+                            },
+                        },
+                    ),
+                    node(
+                        23,
+                        TaskNodeKind::CopyMappings {
+                            mappings: TaskId::new(22),
+                            copies: "me/M\ta/B\ttick".to_owned(),
+                        },
+                    ),
+                    node(
+                        24,
+                        TaskNodeKind::ResolveReferences {
+                            requests: "k\tctx\ttick".to_owned(),
+                            mappings: TaskId::new(23),
+                            format: TaskMappingFormat::TinyV2 {
+                                from: "intermediary".to_owned(),
+                                to: "mojang".to_owned(),
+                            },
+                        },
+                    ),
+                    node(
+                        25,
+                        TaskNodeKind::JsonFromLines {
+                            records: TaskId::new(24),
+                        },
+                    ),
                 ],
                 terminals: vec![
                     TaskTerminal::AddClasspath {
@@ -2525,6 +2684,10 @@ class build {
                         destination: "src/main/java".to_owned(),
                         mode: TaskPublishMode::ReplaceRoot,
                         intent: TaskPublishIntent::Compile,
+                    },
+                    TaskTerminal::PublishText {
+                        path: "resources/refmap.json".to_owned(),
+                        text: TaskId::new(25),
                     },
                 ],
             };
@@ -2583,6 +2746,14 @@ class build {
                 (
                     "class build {\n    public static void main() {\n        int local = jals.build.Tasks.projectJar(\"lib/local.jar\");\n        jals.build.Tasks.publishTree(\"example\", local, \"dest\", \"watch\");\n    }\n}\n",
                     "Tasks.publishTree needs an intent of `compile`",
+                ),
+                (
+                    "class build {\n    public static void main() {\n        int url = jals.build.Tasks.httpsUrl(\"https://example.invalid/m.txt\");\n        int digest = jals.build.Tasks.sha256(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\");\n        int capped = jals.build.Tasks.bytes(4096);\n        int text = jals.build.Tasks.fetchText(url, digest, capped);\n        int composed = jals.build.Tasks.composeMappings(text, text, jals.build.Tasks.proguard());\n    }\n}\n",
+                    "Tasks.composeMappings needs the tiny v2 namespace pair",
+                ),
+                (
+                    "class build {\n    public static void main() {\n        int url = jals.build.Tasks.httpsUrl(\"https://example.invalid/m.txt\");\n        int digest = jals.build.Tasks.sha256(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\");\n        int capped = jals.build.Tasks.bytes(4096);\n        int text = jals.build.Tasks.fetchText(url, digest, capped);\n        int resolved = jals.build.Tasks.resolveReferences(\"k\\tctx\\ttick\", text, jals.build.Tasks.proguard());\n    }\n}\n",
+                    "Tasks.resolveReferences needs the tiny v2 namespace pair",
                 ),
             ];
             for (script, needle) in cases {

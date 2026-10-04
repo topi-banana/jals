@@ -130,6 +130,16 @@ public final class Tasks {
     }
 
     /**
+     * The UTF-8 text stored as entry {@code member} of {@code jar}.
+     *
+     * <p>The text counterpart of {@link #nestedJar}: a mapping file a publisher ships inside a jar
+     * is a value a later node reads, not an archive anything opens again.
+     */
+    public static int jarText(int jar, String member) {
+        return jarText0(jar, Text.of(member));
+    }
+
+    /**
      * Deobfuscate {@code jar} with {@code mappings}, read as ProGuard-style text.
      *
      * <p>The shorthand for what {@link #remapJarAs} spells with an explicit {@link #proguard()}: a
@@ -152,6 +162,73 @@ public final class Tasks {
     /** {@code overlay} merged over {@code base}: entries both name come from {@code overlay}. */
     public static int mergeJars(int base, int overlay) {
         return mergeJars0(base, overlay);
+    }
+
+    /**
+     * Two published mapping sets joined into one tiny v2 table.
+     *
+     * <p>{@code official} is ProGuard-style text mapping the names a project is written in onto
+     * obfuscated ones; {@code intermediary} is tiny v2 whose <em>first</em> namespace holds the
+     * obfuscated names and whose second is the alternative set to join onto. The join is on the
+     * obfuscated member — name and descriptor both — and the answer is tiny v2 text through
+     * {@code format}'s namespace pair, with {@code to} as the project-side namespace the
+     * descriptors are written in. One table then serves both directions: a {@code
+     * [dependencies] remap} reads it {@code from → to} and a {@code [build] remap} reads the same
+     * file {@code to → from}.
+     *
+     * <p>The result covers every name the two inputs cover, not a project's slice of them: which
+     * names a caller cares about is not a question a composition can answer.
+     */
+    public static int composeMappings(int official, int intermediary, MappingFormat format) {
+        return composeMappings0(
+            official, intermediary, format.kind, Text.of(format.from), Text.of(format.to));
+    }
+
+    /**
+     * {@code mappings}, a tiny v2 text, extended with entries re-filed under additional owners.
+     *
+     * <p>{@code copies} is one request per line, {@code new-owner<tab>existing-owner<tab>name},
+     * all three in the text's first namespace. Each request appends an identity section for
+     * {@code new-owner} carrying every entry of {@code existing-owner} under that member name, so
+     * a remap's member lookup — which walks the class hierarchy — finds the entries from a class
+     * that <em>declares</em> a member it does not <em>extend</em>: a mixin-style shadow, a
+     * relocated class. The request is strict: an owner the text does not name, or a member with no
+     * entry under it, fails the node rather than appending nothing.
+     */
+    public static int copyMappings(int mappings, String copies) {
+        return copyMappings0(mappings, Text.of(copies));
+    }
+
+    /**
+     * Textual member references resolved through a mapping set.
+     *
+     * <p>{@code requests} is one reference per line, {@code passthrough<tab>context<tab>
+     * reference}: the reference is {@code [Lowner;]name[(method-descriptor)|:field-descriptor]},
+     * {@code context} is the owner an unqualified name resolves against (empty when the reference
+     * qualifies itself), and {@code passthrough} travels to the answer untouched. The answer is
+     * one {@code passthrough<tab>rewritten} line per request, every part of the reference
+     * rewritten in place — a reference that names no owner keeps naming none — in the direction
+     * {@code format} reads its pair for a reobfuscation.
+     *
+     * <p>Every line the table cannot settle fails the node, and the failure lists them all: send
+     * only references the table should answer, and a miss is a mistake worth stopping on.
+     */
+    public static int resolveReferences(String requests, int mappings, MappingFormat format) {
+        return resolveReferences0(
+            Text.of(requests), mappings, format.kind, Text.of(format.from), Text.of(format.to));
+    }
+
+    /**
+     * A JSON document assembled from path/value records.
+     *
+     * <p>{@code records} is one line per leaf, {@code key<US>key…<tab>value}, where {@code <US>}
+     * is the unit separator {@code \u0001} and the keys are object levels from the document root.
+     * The value is the string leaf under them, JSON-escaped; keys sort; a path declared twice has
+     * to carry one value; and no records at all assemble {@code {}}. What the document
+     * <em>means</em> is the assembler's business — this only builds it.
+     */
+    public static int jsonFromLines(int records) {
+        return jsonFromLines0(records);
     }
 
     /** Java sources decompiled from {@code jar}, under {@code prefix}. */
@@ -198,6 +275,25 @@ public final class Tasks {
      */
     public static void publishTree(String owner, int tree, String destination, String intent) {
         publishTree0(Text.of(owner), tree, Text.of(destination), Text.of(intent));
+    }
+
+    /**
+     * Write the text value {@code text} to {@code path}, below the script's output root ({@code
+     * target/jals/build/script/out}).
+     *
+     * <p>The task-side counterpart of {@link Output#writeText}, for text the <em>host</em>
+     * produced — a composed mapping table, an assembled document. A script cannot carry megabytes
+     * through its own memory to write them itself, and this is the door around that: the value
+     * stays host-side from the node that produced it to the file this writes, and the script only
+     * names both. The file lands in the same commit as the script's own generated files, and a
+     * later phase reads it like any other project file — a {@code [mappings] file} entry, a
+     * {@code [build] resource-dirs} directory.
+     *
+     * <p>Needs a host that owns the project: a dependency's script runs against an immutable
+     * snapshot with no tree to write into, and its plan is refused if it declares one.
+     */
+    public static void publishText(String path, int text) {
+        publishText0(Text.of(path), text);
     }
 
     /**
@@ -258,9 +354,21 @@ public final class Tasks {
 
     private static native int nestedJar0(int jar, char[] member);
 
+    private static native int jarText0(int jar, char[] member);
+
     private static native void tinyV2Check(char[] from, char[] to);
 
     private static native int remapJar0(int jar, int mappings, int kind, char[] from, char[] to);
+
+    private static native int composeMappings0(
+        int official, int intermediary, int kind, char[] from, char[] to);
+
+    private static native int copyMappings0(int mappings, char[] copies);
+
+    private static native int resolveReferences0(
+        char[] requests, int mappings, int kind, char[] from, char[] to);
+
+    private static native int jsonFromLines0(int records);
 
     private static native int mergeJars0(int base, int overlay);
 
@@ -272,4 +380,6 @@ public final class Tasks {
 
     private static native void publishTree0(
         char[] owner, int tree, char[] destination, char[] intent);
+
+    private static native void publishText0(char[] path, int text);
 }

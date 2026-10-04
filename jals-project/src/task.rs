@@ -17,7 +17,7 @@ use jals_build::task::{
 };
 use jals_classpath::{
     ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher,
-    JarTransforms, LibrarySource, SourceTree, SourceTreeExtraction, SourceTreeLimits,
+    JarTransforms, LibrarySource, MappingText, SourceTree, SourceTreeExtraction, SourceTreeLimits,
 };
 use jals_config::Manifest;
 use jals_exec::Exec;
@@ -59,11 +59,21 @@ pub struct BuildTaskPublication {
     pub(crate) intent: TaskPublishIntent,
 }
 
+/// One text file a `publishText` terminal wrote, named by its output-root-relative path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishedText {
+    path: String,
+    bytes: Vec<u8>,
+}
+
 /// Successfully evaluated terminal values. This type performs no project mutation itself.
 #[derive(Debug, Default)]
 pub struct BuildTaskExecution {
     pub(crate) classpath: Vec<CacheKey>,
     pub(crate) publications: Vec<BuildTaskPublication>,
+    /// Texts a `publishText` terminal produced, for the host that owns the project to commit
+    /// below the script's output root. Empty under every host that refuses the terminal.
+    texts: Vec<PublishedText>,
 }
 
 /// Failure during capability preflight or task-node evaluation.
@@ -452,7 +462,7 @@ impl BuildTaskExecutor {
             options.host,
         )
         .await?;
-        let changes = match options.publications {
+        let mut changes = match options.publications {
             SourcePublication::Apply => {
                 Self::publication_changes(
                     &view,
@@ -464,8 +474,12 @@ impl BuildTaskExecutor {
                 )
                 .await?
             }
+            // Managed output below `target/jals/build` is still published under `Skip` — only the
+            // exclusive *source* roots wait — and a task-published text is managed output, so its
+            // changes ride along whichever way the publication switch is set.
             SourcePublication::Skip => Vec::new(),
         };
+        changes.extend(Self::published_text_changes(&view, &prepared, &execution)?);
         let task_classpath = execution.classpath;
         let script =
             publish_prepared_build_script(storage, &view, &prepared, session, changes).await?;
@@ -473,6 +487,74 @@ impl BuildTaskExecutor {
             script,
             task_classpath,
         })
+    }
+
+    /// The project changes that commit a `publishText` terminal's bytes below the script's output
+    /// root, in the same transaction the script's own generated files ride.
+    ///
+    /// The destination key is derived here rather than at the terminal for the reason every other
+    /// output path is: the root is the host's constant, and a plan carries only the relative path
+    /// below it. A path the *script* also wrote is refused rather than resolved by commit order —
+    /// one path has one writer — while a file a previous run published at the same path with the
+    /// same bytes is nothing to change. A path a previous preparation generated and the current
+    /// script no longer writes is the middle case: it is not a conflict, because the terminal is
+    /// now the writer, so its bytes are (re)staged even when they match and reconciliation drops
+    /// the stale output's removal.
+    fn published_text_changes(
+        view: &ProjectView,
+        prepared: &jals_build::build_script::PreparedBuildScript,
+        execution: &BuildTaskExecution,
+    ) -> Result<Vec<Change>, BuildTaskRunError> {
+        let output_root = DirKey::parse(jals_build::build_script::BUILD_SCRIPT_OUTPUT_ROOT)
+            .expect("build-script output root is a portable directory");
+        let mut changes = Vec::new();
+        for published in &execution.texts {
+            let relative = RelativePath::parse(&published.path).map_err(|error| {
+                BuildTaskRunError::Terminal(format!(
+                    "invalid published-text path `{}`: {error:?}",
+                    published.path
+                ))
+            })?;
+            if relative.is_root() {
+                return Err(BuildTaskRunError::Terminal(
+                    "a published text needs a path below the output root, not the root itself"
+                        .to_owned(),
+                ));
+            }
+            let key = output_root.file_at(&relative).map_err(|error| {
+                BuildTaskRunError::Terminal(format!(
+                    "invalid published-text path `{}`: {error:?}",
+                    published.path
+                ))
+            })?;
+            if prepared.generates_file(&key) {
+                return Err(BuildTaskRunError::Terminal(format!(
+                    "a build task publishes `{}`, which the script also wrote: one path has one \
+                     writer",
+                    published.path
+                )));
+            }
+            match view.file(&key) {
+                // Equal bytes are normally nothing to change. The exception is a stale script
+                // output reconciliation would remove: the terminal supersedes it, so a change
+                // has to be staged even though the bytes match, or the removal would delete the
+                // file the terminal just claimed.
+                Ok(existing)
+                    if existing.bytes() == published.bytes.as_slice()
+                        && !prepared.retires_file(&key) => {}
+                Ok(_) => changes.push(Change::ReplaceFile(key, published.bytes.clone().into())),
+                Err(jals_storage::Error::NotFoundFile(_)) => {
+                    changes.push(Change::CreateFile(key, published.bytes.clone().into()));
+                }
+                Err(error) => {
+                    return Err(BuildTaskRunError::Terminal(format!(
+                        "could not inspect the published-text destination `{}`: {error}",
+                        published.path
+                    )));
+                }
+            }
+        }
+        Ok(changes)
     }
 
     fn reject_blocked_roots(
@@ -489,11 +571,15 @@ impl BuildTaskExecutor {
         Ok(())
     }
 
-    /// Whether a plan declares any exclusive source-tree publication.
+    /// Whether a plan declares any publication into a project tree — an exclusive source root or
+    /// a text file below the script's output root.
     fn declares_publication(plan: &TaskPlan) -> bool {
-        plan.terminals
-            .iter()
-            .any(|terminal| matches!(terminal, TaskTerminal::PublishTree { .. }))
+        plan.terminals.iter().any(|terminal| {
+            matches!(
+                terminal,
+                TaskTerminal::PublishTree { .. } | TaskTerminal::PublishText { .. }
+            )
+        })
     }
 
     /// Digest of the whole plan, which is what makes one execution's identity differ from another's.
@@ -525,7 +611,9 @@ impl BuildTaskExecutor {
                 TaskTerminal::PublishTree {
                     owner, destination, ..
                 } => Some((script.to_string(), owner.clone(), destination.clone())),
-                TaskTerminal::AddClasspath { .. } | TaskTerminal::AddNestedClasspath { .. } => None,
+                TaskTerminal::AddClasspath { .. }
+                | TaskTerminal::AddNestedClasspath { .. }
+                | TaskTerminal::PublishText { .. } => None,
             })
             .collect();
         declared.sort();
@@ -738,6 +826,23 @@ impl BuildTaskExecutor {
             BuildTaskHost::NoTerminals if !plan.terminals.is_empty() => {
                 return Err(BuildTaskRunError::UnsupportedTerminal);
             }
+            // A text publication lands below the *publishing project's* own output root. A
+            // dependency's snapshot has no tree to write into and its consumer has no address to
+            // project one into — a tree publication comes back as a value and routes by intent,
+            // and a text file has neither route. Refused up front rather than after every node
+            // ran, because the refusal is a property of the plan and not of its execution.
+            BuildTaskHost::Snapshot
+                if plan
+                    .terminals
+                    .iter()
+                    .any(|terminal| matches!(terminal, TaskTerminal::PublishText { .. })) =>
+            {
+                return Err(BuildTaskRunError::Terminal(
+                    "Tasks.publishText writes below the script's own output root, which a \
+                     dependency's snapshot host does not own"
+                        .to_owned(),
+                ));
+            }
             // `Project` writes its publications; `Snapshot` hands them back to a caller that will
             // not. Neither is refused here, and neither is applied here — `execute` only evaluates.
             _ => {}
@@ -836,6 +941,29 @@ impl BuildTaskExecutor {
                         }
                     }
                 }
+                TaskTerminal::PublishText { path, text } => {
+                    // The plan-time gate above refuses this terminal under `Snapshot`, and
+                    // `NoTerminals`/`ArtifactsOnly` never reach the loop at all, so the host that
+                    // evaluates one is the one that owns the project it writes below.
+                    let text = Self::text(&values, *text).map_err(BuildTaskRunError::Terminal)?;
+                    let length = u64::try_from(text.len()).unwrap_or(u64::MAX);
+                    if length > runtime.max_fetch_bytes {
+                        return Err(BuildTaskRunError::Terminal(format!(
+                            "published text `{path}` has {length} bytes, exceeding the {} byte \
+                             task limit",
+                            runtime.max_fetch_bytes
+                        )));
+                    }
+                    if output.texts.iter().any(|published| published.path == *path) {
+                        return Err(BuildTaskRunError::Terminal(format!(
+                            "two build tasks publish the text `{path}`: one path has one writer"
+                        )));
+                    }
+                    output.texts.push(PublishedText {
+                        path: path.clone(),
+                        bytes: text.as_bytes().to_vec(),
+                    });
+                }
             }
         }
         Ok(output)
@@ -853,6 +981,12 @@ impl BuildTaskExecutor {
             TaskNodeKind::ExtractJava { prefix, .. } => (Activity::Extract, prefix.as_str()),
             TaskNodeKind::NestedJar { member, .. } => (Activity::Extract, member.as_str()),
             TaskNodeKind::RemapJar { .. } => (Activity::Remap, ""),
+            // The mapping-text derivations parse megabytes on a miss and answer from a memo on a
+            // hit, so each is a unit a reader can see the cost of — named for the table it
+            // produces rather than for the node that asked.
+            TaskNodeKind::ComposeMappings { .. } => (Activity::Compose, "mappings"),
+            TaskNodeKind::CopyMappings { .. } => (Activity::Compose, "copied entries"),
+            TaskNodeKind::ResolveReferences { .. } => (Activity::Compose, "references"),
             TaskNodeKind::MergeJars { .. } => (Activity::Merge, ""),
             TaskNodeKind::DecompileJava { prefix, .. } => (Activity::Decompile, prefix.as_str()),
             // A value node is arithmetic — a URL, a digest, a byte count, a projection out of
@@ -870,7 +1004,9 @@ impl BuildTaskExecutor {
             .iter()
             .filter_map(|terminal| match terminal {
                 TaskTerminal::PublishTree { destination, .. } => Some(destination),
-                TaskTerminal::AddClasspath { .. } | TaskTerminal::AddNestedClasspath { .. } => None,
+                TaskTerminal::AddClasspath { .. }
+                | TaskTerminal::AddNestedClasspath { .. }
+                | TaskTerminal::PublishText { .. } => None,
             })
             .map(|destination| {
                 DirKey::parse(destination).map_err(|error| {
@@ -1315,6 +1451,55 @@ impl BuildTaskExecutor {
                     .await
                     .map(TaskValue::Jar)
             }
+            TaskNodeKind::JarText { jar, member } => {
+                let jar = Self::jar(values, *jar)?.clone();
+                jals_classpath::NestedJar::member_text(exec, cache, &jar, member)
+                    .await
+                    .map(TaskValue::Text)
+            }
+            TaskNodeKind::ComposeMappings {
+                official,
+                intermediary,
+                format,
+            } => {
+                let official = Self::text(values, *official)?;
+                let intermediary = Self::text(values, *intermediary)?;
+                MappingText::compose(
+                    cache,
+                    official,
+                    intermediary,
+                    &Self::mapping_format(format),
+                    report,
+                )
+                .await
+                .map(TaskValue::Text)
+            }
+            TaskNodeKind::CopyMappings { mappings, copies } => {
+                let mappings = Self::text(values, *mappings)?;
+                MappingText::append_copies(cache, mappings, copies, report)
+                    .await
+                    .map(TaskValue::Text)
+            }
+            TaskNodeKind::ResolveReferences {
+                requests,
+                mappings,
+                format,
+            } => {
+                let mappings = Self::text(values, *mappings)?;
+                MappingText::resolve_references(
+                    cache,
+                    requests,
+                    mappings,
+                    &Self::mapping_format(format),
+                    report,
+                )
+                .await
+                .map(TaskValue::Text)
+            }
+            TaskNodeKind::JsonFromLines { records } => {
+                let records = Self::text(values, *records)?;
+                Self::json_from_lines(records).map(TaskValue::Text)
+            }
             TaskNodeKind::RemapJar {
                 jar,
                 mappings,
@@ -1489,6 +1674,72 @@ impl BuildTaskExecutor {
     fn json_scalar<'a>(value: &'a Value, path: &[String]) -> Result<&'a Value, String> {
         Self::json_at(value, path)
             .ok_or_else(|| format!("JSON path `{}` does not exist", path.join("/")))
+    }
+
+    /// Assemble `key<US>key…<tab>value` records into one JSON object document.
+    ///
+    /// The record grammar is the whole contract: keys are object levels from the root, the value
+    /// is the string leaf under them, and what the document *means* is the assembler's business.
+    /// Keys sort because the object is a `serde_json::Map` over a `BTreeMap`, so one record set is
+    /// one document byte for byte; a path declared twice with one value is one leaf, and with two
+    /// values is an error rather than a last-writer race.
+    fn json_from_lines(records: &str) -> Result<String, String> {
+        /// The unit separator between a record's key segments: a control character no class name,
+        /// member selector, or path can contain, which is what makes the split unambiguous.
+        const SEGMENT: char = '\u{1}';
+
+        fn insert(
+            level: &mut Value,
+            segments: &[&str],
+            value: &str,
+            number: usize,
+        ) -> Result<(), String> {
+            let Some((first, rest)) = segments.split_first() else {
+                return Err(format!("record {number} has no key segments"));
+            };
+            let map = level.as_object_mut().ok_or_else(|| {
+                format!("record {number} extends `{first}`, which a value already occupies")
+            })?;
+            if rest.is_empty() {
+                match map.get(*first) {
+                    Some(Value::String(existing)) if existing == value => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "record {number} redeclares `{first}` with a different value"
+                        ));
+                    }
+                    None => {
+                        map.insert((*first).to_owned(), Value::String(value.to_owned()));
+                    }
+                }
+                return Ok(());
+            }
+            let entry = map
+                .entry((*first).to_owned())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            insert(entry, rest, value, number)
+        }
+
+        let mut root = Value::Object(serde_json::Map::new());
+        for (index, raw) in records.lines().enumerate() {
+            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            if line.is_empty() {
+                continue;
+            }
+            let number = index + 1;
+            let (path, value) = line
+                .split_once('\t')
+                .ok_or_else(|| format!("record {number} is not `key<US>key…<tab>value`"))?;
+            let segments: Vec<&str> = path.split(SEGMENT).collect();
+            if segments.iter().any(|segment| segment.is_empty()) {
+                return Err(format!("record {number} has an empty key segment"));
+            }
+            insert(&mut root, &segments, value, number)?;
+        }
+        let mut document = serde_json::to_string_pretty(&root)
+            .map_err(|error| format!("the assembled document does not serialize: {error}"))?;
+        document.push('\n');
+        Ok(document)
     }
 }
 
@@ -1745,6 +1996,7 @@ mod tests {
                     },
                     intent: TaskPublishIntent::Navigation,
                 }],
+                texts: Vec::new(),
             };
             let roots = [DirKey::parse("src/main/java").unwrap()];
             let script = FileKey::parse("build.java").unwrap();
@@ -1846,5 +2098,359 @@ mod tests {
             without.finish(),
             "a task memo that does not fold in what a transform writes replays the old bytes"
         );
+    }
+
+    /// The two official-mapping fixture lines a composition test composes: `ServerLevel.tick` is
+    /// the inherited shape (the alternative table files it under `Level` alone), and `Level.tick`
+    /// is the one a join answers.
+    const OFFICIAL_FIXTURE: &str = "\
+net.minecraft.world.level.Level -> abc:
+    void tick(java.util.function.BooleanSupplier) -> a
+net.minecraft.server.level.ServerLevel -> xyz:
+    void tick(java.util.function.BooleanSupplier) -> a
+";
+
+    /// The alternative half of the fixture: tiny v2, obfuscated first.
+    const ALTERNATIVE_FIXTURE: &str = "\
+tiny\t2\t0\tofficial\tintermediary
+c\tabc\tclass_1937
+\tm\t(Ljava/util/function/BooleanSupplier;)V\ta\tmethod_18765
+c\txyz\tclass_3218
+";
+
+    /// What the fixture composes to, plus the copied section the chain test asks for.
+    const COMPOSED_FIXTURE: &str = "\
+tiny\t2\t0\tmojang\tintermediary
+c\tnet/minecraft/server/level/ServerLevel\tclass_3218
+c\tnet/minecraft/world/level/Level\tclass_1937
+\tm\t(Ljava/util/function/BooleanSupplier;)V\ttick\tmethod_18765
+c\tme/mod/LevelMixin\tme/mod/LevelMixin
+\tm\t(Ljava/util/function/BooleanSupplier;)V\ttick\tmethod_18765
+";
+
+    /// The whole mapping-text chain one script declares — fetch both halves, compose, copy a
+    /// shadow entry, resolve a reference, assemble the document, publish both files — and the
+    /// proof that a second run answers it all from cache with the network refused.
+    #[test]
+    fn mapping_text_tasks_publish_below_the_output_root() {
+        block_on_inline(async {
+            let script = format!(
+                r#"
+                    import jals.build.Tasks;
+
+                    class build {{
+                        public static void main() {{
+                            int official = Tasks.fetchText(
+                                Tasks.httpsUrl("https://example.invalid/client.txt"),
+                                Tasks.sha256("{}"),
+                                Tasks.bytes(65536));
+                            int intermediary = Tasks.fetchText(
+                                Tasks.httpsUrl("https://example.invalid/mappings.tiny"),
+                                Tasks.sha256("{}"),
+                                Tasks.bytes(65536));
+                            int composed = Tasks.composeMappings(
+                                official, intermediary, Tasks.tinyV2("intermediary", "mojang"));
+                            int extended = Tasks.copyMappings(composed,
+                                "me/mod/LevelMixin\tnet/minecraft/world/level/Level\ttick");
+                            Tasks.publishText("mappings/composed.tiny", extended);
+                            int resolved = Tasks.resolveReferences(
+                                "mappings\u0001me/LevelMixin\u0001tick\tnet/minecraft/server/level/ServerLevel\ttick",
+                                extended,
+                                Tasks.tinyV2("intermediary", "mojang"));
+                            Tasks.publishText("resources/refmap.json", Tasks.jsonFromLines(resolved));
+                        }}
+                    }}
+                "#,
+                ContentDigest::of(OFFICIAL_FIXTURE.as_bytes()).to_hex(),
+                ContentDigest::of(ALTERNATIVE_FIXTURE.as_bytes()).to_hex(),
+            );
+            let mut storage = storage(&script);
+            let online = MockFetcher::online(
+                [
+                    (
+                        "https://example.invalid/client.txt".to_owned(),
+                        OFFICIAL_FIXTURE.as_bytes().to_vec(),
+                    ),
+                    (
+                        "https://example.invalid/mappings.tiny".to_owned(),
+                        ALTERNATIVE_FIXTURE.as_bytes().to_vec(),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+            BuildTaskExecutor::execute_root(
+                &Exec::inline(),
+                &online,
+                &mut storage,
+                &mut BuildScriptSession::new(),
+                RootBuildScriptOptions {
+                    progress: &Progress::SILENT,
+                    manifest: &manifest(),
+                    environment: &BuildScriptEnvironment::new(),
+                    limits: &BuildScriptLimits::default(),
+                    host: BuildTaskHost::Project,
+                    blocked_files: &[],
+                    publications: SourcePublication::Apply,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(online.calls.load(Ordering::Relaxed), 2);
+
+            let view = storage.view();
+            let composed = view
+                .file_text(
+                    &FileKey::parse("target/jals/build/script/out/mappings/composed.tiny").unwrap(),
+                )
+                .expect("the composed table is published below the output root");
+            assert_eq!(composed, COMPOSED_FIXTURE);
+            let refmap = view
+                .file_text(
+                    &FileKey::parse("target/jals/build/script/out/resources/refmap.json").unwrap(),
+                )
+                .expect("the assembled document is published beside it");
+            assert_eq!(
+                refmap,
+                "{\n  \"mappings\": {\n    \"me/LevelMixin\": {\n      \"tick\": \"method_18765\"\n    }\n  }\n}\n"
+            );
+
+            // The same plan with the network refused: every fetch, every composition and every
+            // resolution answers from the cache, and the committed files are byte-identical.
+            let offline = MockFetcher::offline();
+            BuildTaskExecutor::execute_root(
+                &Exec::inline(),
+                &offline,
+                &mut storage,
+                &mut BuildScriptSession::new(),
+                RootBuildScriptOptions {
+                    progress: &Progress::SILENT,
+                    manifest: &manifest(),
+                    environment: &BuildScriptEnvironment::new(),
+                    limits: &BuildScriptLimits::default(),
+                    host: BuildTaskHost::Project,
+                    blocked_files: &[],
+                    publications: SourcePublication::Apply,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(offline.calls.load(Ordering::Relaxed), 0);
+            let view = storage.view();
+            assert_eq!(
+                view.file_text(
+                    &FileKey::parse("target/jals/build/script/out/mappings/composed.tiny",)
+                        .unwrap()
+                )
+                .expect("the published table survives the rerun"),
+                COMPOSED_FIXTURE
+            );
+        });
+    }
+
+    /// A text publication writes below the *publishing project's* own output root, so a host that
+    /// does not own one refuses the plan — before any node runs, since the refusal is a property
+    /// of the plan and not of its execution.
+    #[test]
+    fn publish_text_needs_a_host_that_owns_the_project() {
+        block_on_inline(async {
+            let script = r#"
+                import jals.build.Tasks;
+
+                class build {
+                    public static void main() {
+                        int text = Tasks.fetchText(
+                            Tasks.httpsUrl("https://example.invalid/notes.txt"),
+                            Tasks.sha256("PLACEHOLDER"),
+                            Tasks.bytes(1024));
+                        Tasks.publishText("notes.txt", text);
+                    }
+                }
+            "#
+            .replace("PLACEHOLDER", &ContentDigest::of(b"notes").to_hex());
+            for host in [BuildTaskHost::ArtifactsOnly, BuildTaskHost::Snapshot] {
+                let mut storage = storage(&script);
+                let fetcher = MockFetcher::online(StdBTreeMap::new());
+                let error = BuildTaskExecutor::execute_root(
+                    &Exec::inline(),
+                    &fetcher,
+                    &mut storage,
+                    &mut BuildScriptSession::new(),
+                    RootBuildScriptOptions {
+                        progress: &Progress::SILENT,
+                        manifest: &manifest(),
+                        environment: &BuildScriptEnvironment::new(),
+                        limits: &BuildScriptLimits::default(),
+                        host,
+                        blocked_files: &[],
+                        publications: SourcePublication::Apply,
+                    },
+                )
+                .await
+                .unwrap_err();
+                match (host, &error) {
+                    (
+                        BuildTaskHost::ArtifactsOnly,
+                        RootBuildScriptError::Task(BuildTaskRunError::UnsupportedPublication),
+                    ) => {}
+                    (BuildTaskHost::Snapshot, RootBuildScriptError::Task(error)) => {
+                        assert!(error.to_string().contains("output root"), "{error}");
+                    }
+                    _ => panic!("unexpected refusal for {host:?}: {error}"),
+                }
+                assert_eq!(fetcher.calls.load(Ordering::Relaxed), 0);
+            }
+        });
+    }
+
+    /// The record grammar of `Tasks.jsonFromLines`: nesting, sorting, one value per path, and the
+    /// refusals a malformed record set earns.
+    #[test]
+    fn json_records_assemble_into_one_sorted_document() {
+        let assembled =
+            BuildTaskExecutor::json_from_lines("b\u{1}c\tsecond\na\u{1}d\tfirst\na\u{1}d\tfirst\n")
+                .expect("assembles");
+        assert_eq!(
+            assembled,
+            "{\n  \"a\": {\n    \"d\": \"first\"\n  },\n  \"b\": {\n    \"c\": \"second\"\n  }\n}\n"
+        );
+        assert_eq!(
+            BuildTaskExecutor::json_from_lines("").expect("empty"),
+            "{}\n"
+        );
+        let conflict = BuildTaskExecutor::json_from_lines("a\tone\na\ttwo").unwrap_err();
+        assert!(conflict.contains("different value"), "{conflict}");
+        let value_in_the_way =
+            BuildTaskExecutor::json_from_lines("a\tone\na\u{1}b\ttwo").unwrap_err();
+        assert!(value_in_the_way.contains("occupies"), "{value_in_the_way}");
+        let missing_tab = BuildTaskExecutor::json_from_lines("just-a-path").unwrap_err();
+        assert!(missing_tab.contains("value"), "{missing_tab}");
+        let empty_segment = BuildTaskExecutor::json_from_lines("a\u{1}\u{1}b\tv").unwrap_err();
+        assert!(
+            empty_segment.contains("empty key segment"),
+            "{empty_segment}"
+        );
+        // A value is JSON-escaped; a key path segment travels verbatim because the assembler
+        // never sees one that needs it — both are serde's answer, not this function's.
+        let escaped = BuildTaskExecutor::json_from_lines("k\ta\"b\\c").expect("assembles");
+        assert!(escaped.contains("\"a\\\"b\\\\c\""), "{escaped}");
+    }
+
+    /// One `execute_root` against the default project manifest, for the migration tests below.
+    async fn run_migration_root(
+        storage: &mut MemoryStorage,
+        fetcher: &MockFetcher,
+    ) -> Result<RootBuildScriptOutput, RootBuildScriptError> {
+        BuildTaskExecutor::execute_root(
+            &Exec::inline(),
+            fetcher,
+            storage,
+            &mut BuildScriptSession::new(),
+            RootBuildScriptOptions {
+                progress: &Progress::SILENT,
+                manifest: &manifest(),
+                environment: &BuildScriptEnvironment::new(),
+                limits: &BuildScriptLimits::default(),
+                host: BuildTaskHost::Project,
+                blocked_files: &[],
+                publications: SourcePublication::Apply,
+            },
+        )
+        .await
+    }
+
+    /// A project whose script generates `target/jals/build/script/out/notes.txt` through
+    /// `Output.writeText`, run once so a later script edit recovers that output for reconciliation.
+    async fn storage_with_a_script_generated_note() -> MemoryStorage {
+        let script = r#"
+            import jals.build.Output;
+
+            class build {
+                public static void main() {
+                    Output.writeText("notes.txt", "hello");
+                }
+            }
+        "#;
+        let mut storage = storage(script);
+        let fetcher = MockFetcher::online(StdBTreeMap::new());
+        run_migration_root(&mut storage, &fetcher).await.unwrap();
+        storage
+    }
+
+    /// Swap `build.java` for one that publishes `content` through `Tasks.publishText` at the same
+    /// path, and run it.
+    async fn migrate_note_to_publish_text(
+        storage: &mut MemoryStorage,
+        content: &str,
+    ) -> Result<RootBuildScriptOutput, RootBuildScriptError> {
+        let script = format!(
+            r#"
+                import jals.build.Tasks;
+
+                class build {{
+                    public static void main() {{
+                        int text = Tasks.fetchText(
+                            Tasks.httpsUrl("https://example.invalid/notes.txt"),
+                            Tasks.sha256("{}"),
+                            Tasks.bytes(1024));
+                        Tasks.publishText("notes.txt", text);
+                    }}
+                }}
+            "#,
+            ContentDigest::of(content.as_bytes()).to_hex(),
+        );
+        let mut transaction = storage.transaction(storage.revision()).unwrap();
+        transaction
+            .replace_file(FileKey::parse("build.java").unwrap(), script.into_bytes())
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let fetcher = MockFetcher::online(
+            std::iter::once((
+                "https://example.invalid/notes.txt".to_owned(),
+                content.as_bytes().to_vec(),
+            ))
+            .collect(),
+        );
+        run_migration_root(storage, &fetcher).await
+    }
+
+    /// A path moved from `Output.writeText` to `Tasks.publishText` between runs must not fail
+    /// with `NotFoundFile` after reconciliation removes the recovered output the terminal's
+    /// replacement names: the terminal supersedes the stale output.
+    #[test]
+    fn publish_text_supersedes_a_stale_script_output() {
+        block_on_inline(async {
+            let mut storage = storage_with_a_script_generated_note().await;
+            migrate_note_to_publish_text(&mut storage, "world")
+                .await
+                .expect("the terminal takes the stale output's path over");
+            assert_eq!(
+                storage
+                    .view()
+                    .file_text(&FileKey::parse("target/jals/build/script/out/notes.txt").unwrap())
+                    .expect("the migrated path is published"),
+                "world"
+            );
+        });
+    }
+
+    /// The same migration with byte-identical content must keep the file: reconciliation's
+    /// removal may not delete a path a terminal also publishes, even though equal bytes are
+    /// normally nothing to change.
+    #[test]
+    fn publish_text_keeps_a_stale_script_output_with_identical_bytes() {
+        block_on_inline(async {
+            let mut storage = storage_with_a_script_generated_note().await;
+            migrate_note_to_publish_text(&mut storage, "hello")
+                .await
+                .expect("the migrated path survives the rerun");
+            assert_eq!(
+                storage
+                    .view()
+                    .file_text(&FileKey::parse("target/jals/build/script/out/notes.txt").unwrap())
+                    .expect("the migrated path is published"),
+                "hello"
+            );
+        });
     }
 }
