@@ -277,11 +277,13 @@ impl MappingText {
         ns_project: &str,
         ns_alternative: &str,
     ) -> Result<String, String> {
-        if ns_project.is_empty() || ns_alternative.is_empty() {
-            return Err("a composed mapping text needs two namespace names".to_owned());
+        if ns_project.is_empty() || ns_alternative.is_empty() || ns_project == ns_alternative {
+            return Err(
+                "a composed mapping text needs two distinct, non-empty namespace names".to_owned(),
+            );
         }
         let (project_to_obf, member_lines) = Self::parse_official(official)?;
-        let alternative = Self::parse_alternative(intermediary)?;
+        let alternative = Self::parse_alternative(intermediary, ns_alternative)?;
 
         // Classes first: every member join below reads the class map, and a class the alternative
         // table does not name keeps its obfuscated name — absent is not an error, it is a type
@@ -470,7 +472,15 @@ impl MappingText {
     /// The alternative tiny v2 text, read through its first two namespaces as the obfuscated-side
     /// half of a join. Later namespaces, and the sections this crate does not read, are skipped by
     /// the same rules the remap-side parser skips them under.
-    fn parse_alternative(intermediary: &str) -> Result<AlternativeTable, String> {
+    ///
+    /// `alternative` is the namespace name the caller's pair gives the side being joined onto. It
+    /// has to be the file's second namespace — the one the join reads — because the composed header
+    /// is written from the pair and every name the join takes would otherwise be labelled with a
+    /// namespace the caller named but the file does not.
+    fn parse_alternative(
+        intermediary: &str,
+        alternative: &str,
+    ) -> Result<AlternativeTable, String> {
         let mut lines = intermediary
             .lines()
             .enumerate()
@@ -480,6 +490,13 @@ impl MappingText {
             .find(|(_, line)| !line.is_empty())
             .ok_or_else(|| "alternative mapping text is empty".to_owned())?;
         let namespaces = Mappings::tiny_header(header, header_number)?;
+        if namespaces[1] != alternative {
+            return Err(format!(
+                "the alternative mapping text declares `{}` as its second namespace, not \
+                 `{alternative}`: a composition joins the obfuscated first namespace to the second",
+                namespaces[1]
+            ));
+        }
 
         let mut escaped = false;
         let mut body: Vec<(usize, usize, &str)> = Vec::new();
@@ -998,6 +1015,23 @@ c\tnet/minecraft/world/level/Level\tclass_1937
         ))
         .unwrap_err();
         assert!(error.contains("namespace pair"), "{error}");
+    }
+
+    #[test]
+    fn compose_refuses_a_pair_the_alternative_text_does_not_name() {
+        // The join reads the alternative text's second namespace, so a pair that names a
+        // different one would label every alternative name with a namespace the file does not
+        // declare. Refusing is the only answer that does not mislabel the whole table.
+        let error = MappingText::compose_text(&fixture(), ALTERNATIVE, "intermediary", "mojang")
+            .unwrap_err();
+        assert!(error.contains("second namespace"), "{error}");
+    }
+
+    #[test]
+    fn compose_needs_two_distinct_namespaces() {
+        let error =
+            MappingText::compose_text(&fixture(), ALTERNATIVE, "mojang", "mojang").unwrap_err();
+        assert!(error.contains("distinct"), "{error}");
     }
 
     #[test]
