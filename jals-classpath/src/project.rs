@@ -494,6 +494,25 @@ impl MemoryProjectPlan {
             }
         }
 
+        // Registry entries need a network-capable host: the in-memory assembly has one address
+        // space and no fetcher, so it can report the entry but cannot resolve it. Saying so is
+        // what keeps the browser playground's classpath honest rather than silently short. Only
+        // the build table is warned about — a dev entry would not be resolved by this plan under
+        // any scope.
+        for (name, dependency) in &manifest.dependencies {
+            if matches!(
+                dependency,
+                jals_config::Dependency::Registry(_) | jals_config::Dependency::RegistryVersion(_)
+            ) {
+                result.warn_path(
+                    name,
+                    "registry dependency requires a host fetch capability and is not resolved \
+                     in-memory"
+                        .to_owned(),
+                );
+            }
+        }
+
         result.source_roots.sort();
         result.source_roots.dedup();
         result

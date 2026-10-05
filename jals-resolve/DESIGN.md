@@ -317,14 +317,28 @@ Each phase lands green (workspace compiles, tests pass) and is independently val
 
 ## 12. Status
 
-Landed so far (each is green on its own):
+Landed (each commit is green on its own):
 
 1. **Foundation** — `jals-resolve` (versions, ids, summaries, lockfile, resolver algorithm,
    feature unification, fingerprint) with its own test suite.
-2. **Lowering bridge (partial phase 2)** — `jals-config/src/resolution.rs` lowers the *existing*
-   dependency forms (`jar`/`wasm`/`git`/`path`) and `[features]` into `Summary` /
-   `DependencyRequest`, so the resolver already consumes real manifests. The registry variant,
-   version keys, `[workspace]`, `[registries]`, and lockfile I/O remain.
+2. **Parallel resolution** — provider batches (`candidates_batch`/`summaries_batch`) with
+   cross-pass memoization; the native Maven provider overlaps metadata and POM reads with
+   `jals_exec::join_ordered`, while version choice stays sequential and deterministic.
+3. **Manifest schema (registry only so far)** — `registry` dependencies (table and
+   `group:artifact` shorthand) and `[registries]`, validated and lowered to resolver requests.
+   Version requirements, `[workspace]`, and inheritance remain.
+4. **Maven provider** — `maven-metadata.xml`, POM parent chains, property interpolation,
+   `dependencyManagement`, BOM imports, scope/optional filtering. Exclusions, classifiers, and
+   checksum sidecars are documented next steps.
+5. **Graph/classpath integration** — registry entries resolve inside
+   `NativeProjectPlan::assemble_native`, their jars enter the ordinary verified-cache download
+   path, and `jals-cli` reads/writes `jals.lock` (only when the rendered bytes changed). The
+   language server resolves without persisting. Registry entries are deliberately not graph
+   nodes; `root_only` keeps them for the classpath phase.
+6. **Feature/version cache audit** — the frontend key already folds dialect flags and (when
+   `attributes` is on) build features; the backend key folds the classpath digest, and jars are
+   content-addressed, so a lock/version/feature change moves every dependent key. `BackendOutput`
+   memoization is still unimplemented (pre-existing `hawk` override).
 
-Nothing user-visible changes until the graph phase consumes `ResolveGraph`; `hawk.toml` records
-why the crate is temporarily excluded from the visibility gate.
+Remaining phases: `[workspace]` members/inheritance/`-p`; `--locked`/`--frozen`,
+`jals update`/`fetch`/`tree`; `target/jals/deps` view; POM exclusions and checksum sidecars.

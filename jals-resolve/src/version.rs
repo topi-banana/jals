@@ -515,9 +515,7 @@ impl VersionReq {
                 let range = &ranges[0];
                 match (&range.lower, &range.upper) {
                     (Some(lower), Some(upper))
-                        if lower.inclusive
-                            && upper.inclusive
-                            && lower.version == upper.version =>
+                        if lower.inclusive && upper.inclusive && lower.version == upper.version =>
                     {
                         Some(&lower.version)
                     }

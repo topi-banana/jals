@@ -364,9 +364,10 @@ jobs:
       # only, so the analysis set matches what hawk.toml was tuned against (no `--all-features`).
       # `--exclude-crate jinja` is hawk's own name for a workspace library whose API is an external
       # boundary: that crate's surface is minijinja's, not one consumer's, and hawk.toml says why.
-      # `jals_resolve` is excluded for the same *mechanical* reason: its consumer (the manifest /
-      # graph integration) lands in a later change, so nothing in a shipped binary reaches it yet.
-      # It is not a boundary exemption — remove the flag when the graph consumes the resolver.
+      # `jals_resolve` is excluded for a temporary, mechanical reason: it is on the production path
+      # (`jals-cli` → `jals-classpath`/`jals-config` → `jals-resolve`), but parts of its vocabulary
+      # the migration has not reached yet have no production caller. Not a boundary exemption —
+      # remove the flag once the remaining phases consume the whole surface.
       - name: Run the closed-world visibility gate
         shell: bash
         run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja --exclude-crate jals_native --exclude-crate jals_resolve -D warnings
