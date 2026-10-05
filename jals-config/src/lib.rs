@@ -28,6 +28,7 @@ extern crate alloc;
 
 mod diagnostic;
 mod loader;
+mod resolution;
 
 pub mod fmt;
 pub mod lint;
@@ -46,4 +47,5 @@ pub use manifest::{
     MappingSource, Package, PathDependency, RemapSite, ResolvedBuildFeatures, ResourcePattern,
     ResourcePatternError, Run, UrlMappings, ValidationError,
 };
+pub use resolution::ResolveLowerError;
 pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};

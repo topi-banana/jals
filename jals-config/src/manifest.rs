@@ -1031,7 +1031,7 @@ impl<'a> FeatureRef<'a> {
     /// [`FeatureRefError`] for an empty entry or side, a second `/`, `dep/default` — the reserved
     /// directive is never enableable by name (see [`DEFAULT_BUILD_FEATURE`]) — or a `dep:` entry
     /// carrying a `/`, which would name a feature of an entry it is only meant to switch on.
-    fn parse(entry: &'a str) -> Result<Self, FeatureRefError> {
+    pub(crate) fn parse(entry: &'a str) -> Result<Self, FeatureRefError> {
         if entry.is_empty() {
             return Err(FeatureRefError::Empty);
         }

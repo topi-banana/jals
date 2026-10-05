@@ -1098,6 +1098,13 @@ Making a `features` release preset also imply a default `javac --release` is sti
 
 ## 3. Maven dependency management (the largest remaining gap)
 
+**Status.** The resolver foundation now exists: `jals-resolve` is a portable, provider-driven
+crate holding the version/requirement model, package identity, the feature graph, the resolver,
+and the `jals.lock` model; `jals-config` lowers today's dependency forms into it. The Maven
+registry provider, the manifest workspace/registry schema, lockfile I/O, and the graph
+integration are the remaining phases, specified in
+[`jals-resolve/DESIGN.md`](../jals-resolve/DESIGN.md).
+
 The transitive graph of explicit JALS path/Git source projects is implemented. The separate missing
 piece is Maven's coordinate graph: a `[dependencies]` table of Maven coordinates would be resolved
 through POMs and version selection into the `classpath` that `Invocation::build` already consumes.
