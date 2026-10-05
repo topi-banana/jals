@@ -42,12 +42,32 @@ use crate::summary::{
 /// How many passes a resolution may take before it is declared non-convergent.
 const DEFAULT_MAX_ROUNDS: usize = 32;
 
+/// One candidate fetch the resolver batches: a declaration plus, when a lock pinned it, the
+/// locked package the provider must keep reachable (a git commit, a registry version).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRequest {
+    /// The dependency declaration being resolved.
+    pub request: DependencyRequest,
+    /// The locked package for this name, when the previous lock has one.
+    pub locked: Option<LockedPackage>,
+}
+
 /// A source of package candidates and summaries.
 ///
 /// One implementation exists per source kind, and each owns all of that kind's I/O: the Maven
 /// provider lists versions from `maven-metadata.xml` and reads POMs; the git provider clones,
 /// checks out, and reads a manifest; the path provider canonicalizes and reads; the direct
 /// provider hashes bytes. The resolver never sees a URL, a path, or a byte.
+///
+/// **Batching is how resolution becomes parallel.** A resolver pass can always name a whole set
+/// of packages whose candidate lists or summaries it needs before it has to know any of their
+/// contents, and it asks for them through [`candidates_batch`](Provider::candidates_batch) /
+/// [`summaries_batch`](Provider::summaries_batch). The default bodies call the single-item
+/// methods in order — correct for a provider with nothing to overlap — while a provider with a
+/// fetcher overrides them to issue the independent requests concurrently (the native Maven
+/// provider overlaps its HTTP reads with `jals_exec::join_ordered`). Determinism does not move:
+/// the resolver zips results back against the requests in input order, and version *choices*
+/// stay sequential in the resolver itself.
 ///
 /// `async fn` in the trait is deliberate, exactly as in `jals-storage`'s backends: every future
 /// in this workspace is `!Send` (runtimes are current-thread), so the auto-trait bound the lint
@@ -72,6 +92,34 @@ pub trait Provider {
 
     /// The summary for one exact candidate id.
     async fn summary(&mut self, id: &PackageId) -> Result<Summary, Self::Error>;
+
+    /// Fetch candidate lists for a batch of independent requests.
+    ///
+    /// Results are aligned with `requests` index for index. The default is sequential; a
+    /// provider that can overlap work overrides this, and the resolver's output does not change
+    /// because it never inspects the results out of order.
+    async fn candidates_batch(
+        &mut self,
+        requests: Vec<CandidateRequest>,
+    ) -> Vec<Result<Vec<Candidate>, Self::Error>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in &requests {
+            results.push(
+                self.candidates(&request.request, request.locked.as_ref())
+                    .await,
+            );
+        }
+        results
+    }
+
+    /// Fetch summaries for a batch of exact ids, aligned index for index. Default sequential.
+    async fn summaries_batch(&mut self, ids: &[PackageId]) -> Vec<Result<Summary, Self::Error>> {
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            results.push(self.summary(id).await);
+        }
+        results
+    }
 }
 
 /// One resolved dependency edge.
@@ -192,9 +240,16 @@ impl ResolveGraph {
 }
 
 /// The resolver.
+///
+/// Holds the memoized provider answers across passes: a package that survived pass 1 keeps its
+/// candidate list and summary in pass 2, so a resolution that needs two passes over a diamond
+/// fetches each version list and each POM once. Hosts that need a *persistent* cache (the native
+/// Maven provider keeps registry bytes in the artifact cache) layer their own under the provider.
 pub struct Resolver<'p, P: Provider> {
     provider: &'p mut P,
     max_rounds: usize,
+    candidates: BTreeMap<(SourceRequest, PackageName), Vec<Candidate>>,
+    summaries: BTreeMap<PackageId, Summary>,
 }
 
 impl<'p, P: Provider> Resolver<'p, P> {
@@ -203,6 +258,8 @@ impl<'p, P: Provider> Resolver<'p, P> {
         Self {
             provider,
             max_rounds: DEFAULT_MAX_ROUNDS,
+            candidates: BTreeMap::new(),
+            summaries: BTreeMap::new(),
         }
     }
 
@@ -236,7 +293,14 @@ impl<'p, P: Provider> Resolver<'p, P> {
             .map(|(name, package)| (name.clone(), package.id.clone()))
             .collect();
         for _ in 0..self.max_rounds {
-            let pass = Pass::new(self.provider, roots, &locked, &pins);
+            let pass = Pass::new(
+                self.provider,
+                roots,
+                &locked,
+                &pins,
+                &mut self.candidates,
+                &mut self.summaries,
+            );
             let outcome = pass.run().await?;
             if outcome.pins == pins {
                 return Ok(Self::assemble(roots, &outcome, lock));
@@ -369,13 +433,15 @@ struct Pass<'a, P: Provider> {
     roots: &'a [RootRequest],
     locked: &'a BTreeMap<PackageName, LockedPackage>,
     pins: &'a BTreeMap<PackageName, PackageId>,
+    /// Candidate lists memoized across passes; keyed by `(source, package)`.
+    candidates: &'a mut BTreeMap<(SourceRequest, PackageName), Vec<Candidate>>,
+    /// Summaries memoized across passes; keyed by exact id.
+    summaries: &'a mut BTreeMap<PackageId, Summary>,
     root_ids: BTreeMap<PackageName, PackageId>,
     representatives: BTreeMap<PackageName, DependencyRequest>,
     sources: BTreeMap<PackageName, SourceRequest>,
     requirements: BTreeMap<PackageName, Vec<RequirementOrigin>>,
     requested: BTreeMap<PackageName, Requested>,
-    candidates: BTreeMap<(SourceRequest, PackageName), Vec<Candidate>>,
-    summaries: BTreeMap<PackageName, Summary>,
     chosen: BTreeMap<PackageName, PackageId>,
     checksums: BTreeMap<PackageName, Option<Checksum>>,
     expanded: BTreeMap<PackageName, Expansion>,
@@ -390,19 +456,21 @@ impl<'a, P: Provider> Pass<'a, P> {
         roots: &'a [RootRequest],
         locked: &'a BTreeMap<PackageName, LockedPackage>,
         pins: &'a BTreeMap<PackageName, PackageId>,
+        candidates: &'a mut BTreeMap<(SourceRequest, PackageName), Vec<Candidate>>,
+        summaries: &'a mut BTreeMap<PackageId, Summary>,
     ) -> Self {
         Self {
             provider,
             roots,
             locked,
             pins,
+            candidates,
+            summaries,
             root_ids: BTreeMap::new(),
             representatives: BTreeMap::new(),
             sources: BTreeMap::new(),
             requirements: BTreeMap::new(),
             requested: BTreeMap::new(),
-            candidates: BTreeMap::new(),
-            summaries: BTreeMap::new(),
             chosen: BTreeMap::new(),
             checksums: BTreeMap::new(),
             expanded: BTreeMap::new(),
@@ -415,10 +483,12 @@ impl<'a, P: Provider> Pass<'a, P> {
     async fn run(mut self) -> Result<PassOutcome, ResolveError<P::Error>> {
         self.seed_roots()?;
         while !self.package_queue.is_empty() || !self.feature_queue.is_empty() {
-            if let Some(name) = self.package_queue.pop_front() {
-                self.ensure_chosen(&name).await?;
-            }
-            if let Some(name) = self.feature_queue.pop_front() {
+            // Packages first: their candidate lists and summaries are fetched as one batch, so
+            // independent packages overlap inside a single provider call. Feature expansion can
+            // enqueue more packages (optional activation, forwards), so the loop checks again.
+            if !self.package_queue.is_empty() {
+                self.process_packages().await?;
+            } else if let Some(name) = self.feature_queue.pop_front() {
                 self.expand_features(&name)?;
             }
         }
@@ -447,8 +517,8 @@ impl<'a, P: Provider> Pass<'a, P> {
             let name = root.summary.id.name.clone();
             let id = root.summary.id.clone();
             self.root_ids.insert(name.clone(), id.clone());
-            self.summaries.insert(name.clone(), root.summary.clone());
-            self.chosen.insert(name.clone(), id);
+            self.summaries.insert(id, root.summary.clone());
+            self.chosen.insert(name.clone(), root.summary.id.clone());
             self.checksums.insert(name.clone(), None);
             let mut requested = Requested {
                 defaults: root.default_features,
@@ -481,11 +551,16 @@ impl<'a, P: Provider> Pass<'a, P> {
         // sure every touched package is expanded once its summary arrives.
         let pending: Vec<PackageName> = self.requested.keys().cloned().collect();
         for name in pending {
-            if self.summaries.contains_key(&name) {
+            if self.chosen.contains_key(&name) {
                 self.feature_queue.push_back(name);
             }
         }
         Ok(())
+    }
+
+    /// The summary chosen for `name`, from the pass's or a previous pass's fetch.
+    fn summary(&self, name: &PackageName) -> Option<&Summary> {
+        self.summaries.get(self.chosen.get(name)?)
     }
 
     /// Route one `<dependency>/<feature>` forward into the target's requested set.
@@ -538,103 +613,163 @@ impl<'a, P: Provider> Pass<'a, P> {
         Ok(())
     }
 
-    /// Choose a version for `name`, unless a root or an already-chosen package owns it.
-    async fn ensure_chosen(&mut self, name: &PackageName) -> Result<(), ResolveError<P::Error>> {
-        if let Some(root_id) = self.root_ids.get(name) {
+    /// Drain the queued packages: batch their candidate lists, batch their summaries, then
+    /// choose versions in deterministic order and enqueue what their summaries revealed.
+    async fn process_packages(&mut self) -> Result<(), ResolveError<P::Error>> {
+        // 1. Classify the queue: roots have their requirements checked, every other name is a
+        //    choice candidate, and names whose candidate list is not cached form the fetch batch.
+        let mut to_choose: Vec<PackageName> = Vec::new();
+        let mut misses: Vec<PackageName> = Vec::new();
+        while let Some(name) = self.package_queue.pop_front() {
+            if let Some(root_id) = self.root_ids.get(&name) {
+                let requirements = self
+                    .requirements
+                    .get(&name)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if !requirements
+                    .iter()
+                    .all(|origin| origin.requirement.matches(&root_id.version))
+                {
+                    return Err(ResolveError::NoMatchingVersion {
+                        name,
+                        requirements: requirements.to_vec(),
+                    });
+                }
+                continue;
+            }
+            if self.chosen.contains_key(&name) {
+                continue;
+            }
+            let Some(request) = self.representatives.get(&name) else {
+                continue;
+            };
+            if !self
+                .candidates
+                .contains_key(&(request.source.clone(), name.clone()))
+                && !misses.contains(&name)
+            {
+                misses.push(name.clone());
+            }
+            if !to_choose.contains(&name) {
+                to_choose.push(name);
+            }
+        }
+
+        // 2. One provider call for every missing candidate list. A provider with a fetcher
+        //    overlaps them; the resolver zips the results back in this order and never observes
+        //    a completion order.
+        if !misses.is_empty() {
+            let requests: Vec<CandidateRequest> = misses
+                .iter()
+                .map(|name| CandidateRequest {
+                    request: self.representatives[name].clone(),
+                    locked: self.locked.get(name).cloned(),
+                })
+                .collect();
+            let results = self.provider.candidates_batch(requests).await;
+            for (name, result) in misses.iter().zip(results) {
+                let request = &self.representatives[name];
+                let fetched = result.map_err(|source| ResolveError::Provider {
+                    context: format!("listing candidates for `{}`", request.package),
+                    source,
+                })?;
+                self.candidates
+                    .insert((request.source.clone(), name.clone()), fetched);
+            }
+        }
+
+        // 3. Choose sequentially: a later choice may see requirements an earlier edge added, and
+        //    that order is what keeps a pass deterministic under any provider concurrency.
+        let mut chosen_ids: Vec<PackageId> = Vec::new();
+        for name in &to_choose {
+            if self.chosen.contains_key(name) {
+                continue;
+            }
+            let request = self.representatives[name].clone();
+            let candidates = self
+                .candidates
+                .get(&(request.source.clone(), name.clone()))
+                .cloned()
+                .unwrap_or_default();
             let requirements = self
                 .requirements
                 .get(name)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            if !requirements
-                .iter()
-                .all(|origin| origin.requirement.matches(&root_id.version))
-            {
+            let pin = self.pins.get(name);
+            let pin_checksum = self
+                .locked
+                .get(name)
+                .and_then(|package| package.checksum.as_ref());
+            let Some((id, checksum)) = Self::select(
+                &candidates,
+                requirements,
+                pin,
+                pin_checksum,
+                &request.source,
+            ) else {
                 return Err(ResolveError::NoMatchingVersion {
                     name: name.clone(),
                     requirements: requirements.to_vec(),
                 });
-            }
-            return Ok(());
+            };
+            chosen_ids.push(id.clone());
+            self.chosen.insert(name.clone(), id);
+            self.checksums.insert(name.clone(), checksum);
         }
-        if self.chosen.contains_key(name) {
-            return Ok(());
-        }
-        let Some(request) = self.representatives.get(name).cloned() else {
-            return Ok(());
-        };
-        let locked = self.locked.get(name).cloned();
-        let key = (request.source.clone(), name.clone());
-        let candidates = if let Some(cached) = self.candidates.get(&key) {
-            cached.clone()
-        } else {
-            let fetched = self
-                .provider
-                .candidates(&request, locked.as_ref())
-                .await
-                .map_err(|source| ResolveError::Provider {
-                    context: format!("listing candidates for `{}`", request.package),
-                    source,
-                })?;
-            self.candidates.insert(key, fetched.clone());
-            fetched
-        };
-        let requirements = self
-            .requirements
-            .get(name)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let pin = self.pins.get(name);
-        let pin_checksum = locked
-            .as_ref()
-            .and_then(|package| package.checksum.as_ref());
-        let selected = Self::select(
-            &candidates,
-            requirements,
-            pin,
-            pin_checksum,
-            &request.source,
-        );
-        let Some((id, checksum)) = selected else {
-            return Err(ResolveError::NoMatchingVersion {
-                name: name.clone(),
-                requirements: requirements.to_vec(),
-            });
-        };
-        let summary =
-            self.provider
-                .summary(&id)
-                .await
-                .map_err(|source| ResolveError::Provider {
+
+        // 4. One provider call for every missing summary.
+        let missing: Vec<PackageId> = chosen_ids
+            .iter()
+            .filter(|id| !self.summaries.contains_key(*id))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            let results = self.provider.summaries_batch(&missing).await;
+            for (id, result) in missing.iter().zip(results) {
+                let summary = result.map_err(|source| ResolveError::Provider {
                     context: format!("reading the summary of `{id}`"),
                     source,
                 })?;
-        if summary.id != id {
-            return Err(ResolveError::SummaryMismatch {
-                requested: Box::new(id),
-                found: Box::new(summary.id),
-            });
+                if summary.id != *id {
+                    return Err(ResolveError::SummaryMismatch {
+                        requested: Box::new(id.clone()),
+                        found: Box::new(summary.id),
+                    });
+                }
+                self.summaries.insert(id.clone(), summary);
+            }
         }
-        self.chosen.insert(name.clone(), id);
-        self.checksums.insert(name.clone(), checksum);
-        self.summaries.insert(name.clone(), summary);
-        self.feature_queue.push_back(name.clone());
-        let dependencies: Vec<DependencyRequest> = self.summaries[name]
-            .dependencies
-            .iter()
-            .filter(|dependency| dependency.kind == DependencyKind::Normal)
-            .filter(|dependency| !dependency.optional)
-            .cloned()
-            .collect();
-        for dependency in dependencies {
-            self.enqueue_dependency(name, &dependency)?;
+
+        // 5. Feature expansion and edge discovery per chosen package.
+        for name in &to_choose {
+            if !self.chosen.contains_key(name) {
+                continue;
+            }
+            self.feature_queue.push_back(name.clone());
+            let dependencies: Vec<DependencyRequest> = self
+                .summary(name)
+                .map(|summary| {
+                    summary
+                        .dependencies
+                        .iter()
+                        .filter(|dependency| dependency.kind == DependencyKind::Normal)
+                        .filter(|dependency| !dependency.optional)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for dependency in dependencies {
+                self.enqueue_dependency(name, &dependency)?;
+            }
         }
         Ok(())
     }
 
     /// Expand one package's feature graph and act on what it reveals.
     fn expand_features(&mut self, name: &PackageName) -> Result<(), ResolveError<P::Error>> {
-        let Some(summary) = self.summaries.get(name).cloned() else {
+        let Some(summary) = self.summary(name).cloned() else {
             return Ok(());
         };
         let Some(requested) = self.requested.get(name).cloned() else {
@@ -819,6 +954,7 @@ mod tests {
     use crate::id::{DirectKind, RegistryId, SourceId};
     use crate::version::{Version, VersionReq};
     use alloc::vec;
+    use core::cell::{Cell, RefCell};
 
     fn pkg(text: &str) -> PackageName {
         PackageName::new(text).unwrap()
@@ -878,8 +1014,16 @@ mod tests {
     }
 
     /// An in-memory provider: all packages are registry packages, versions by name.
+    ///
+    /// Records the batch sizes and single-call counts the resolver drove, so the tests can
+    /// assert *how* work was requested without a network: candidate lists for independent
+    /// packages arrive in one `candidates_batch` call, and memoized answers are never re-asked.
     struct MemoryProvider {
         packages: BTreeMap<PackageName, Vec<Summary>>,
+        candidate_calls: Cell<usize>,
+        summary_calls: Cell<usize>,
+        candidate_batches: RefCell<Vec<usize>>,
+        summary_batches: RefCell<Vec<usize>>,
     }
 
     impl MemoryProvider {
@@ -894,7 +1038,21 @@ mod tests {
             for versions in packages.values_mut() {
                 versions.sort_by(|left, right| left.id.version.cmp(&right.id.version));
             }
-            Self { packages }
+            Self {
+                packages,
+                candidate_calls: Cell::new(0),
+                summary_calls: Cell::new(0),
+                candidate_batches: RefCell::new(Vec::new()),
+                summary_batches: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn candidate_calls(&self) -> usize {
+            self.candidate_calls.get()
+        }
+
+        fn summary_calls(&self) -> usize {
+            self.summary_calls.get()
         }
     }
 
@@ -909,6 +1067,7 @@ mod tests {
             request: &DependencyRequest,
             locked: Option<&LockedPackage>,
         ) -> Result<Vec<Candidate>, Self::Error> {
+            self.candidate_calls.set(self.candidate_calls.get() + 1);
             let mut candidates: Vec<Candidate> = self
                 .packages
                 .get(&request.package)
@@ -928,12 +1087,40 @@ mod tests {
         }
 
         async fn summary(&mut self, id: &PackageId) -> Result<Summary, Self::Error> {
+            self.summary_calls.set(self.summary_calls.get() + 1);
             Ok(self
                 .packages
                 .get(&id.name)
                 .and_then(|versions| versions.iter().find(|summary| summary.id == *id))
                 .cloned()
                 .expect("the test provider only asks for known summaries"))
+        }
+
+        async fn candidates_batch(
+            &mut self,
+            requests: Vec<CandidateRequest>,
+        ) -> Vec<Result<Vec<Candidate>, Self::Error>> {
+            self.candidate_batches.borrow_mut().push(requests.len());
+            let mut results = Vec::with_capacity(requests.len());
+            for request in &requests {
+                results.push(
+                    self.candidates(&request.request, request.locked.as_ref())
+                        .await,
+                );
+            }
+            results
+        }
+
+        async fn summaries_batch(
+            &mut self,
+            ids: &[PackageId],
+        ) -> Vec<Result<Summary, Self::Error>> {
+            self.summary_batches.borrow_mut().push(ids.len());
+            let mut results = Vec::with_capacity(ids.len());
+            for id in ids {
+                results.push(self.summary(id).await);
+            }
+            results
         }
     }
 
@@ -959,6 +1146,44 @@ mod tests {
         assert_eq!(graph.packages.len(), 2);
         assert_eq!(graph.package(&pkg("a")).unwrap().id.version, ver("1.0.0"));
         assert_eq!(graph.package(&pkg("b")).unwrap().id.version, ver("1.5.0"));
+    }
+
+    #[test]
+    fn independent_packages_are_batched_into_one_provider_call() {
+        let mut provider = MemoryProvider::new(vec![
+            summary("a", "1.0.0", vec![]),
+            summary("b", "1.0.0", vec![]),
+            summary("c", "1.0.0", vec![]),
+        ]);
+        let roots = [root(summary(
+            "app",
+            "0.0.0",
+            vec![request("a", "1"), request("b", "1"), request("c", "1")],
+        ))];
+        let graph = run(&mut provider, &roots);
+        assert_eq!(graph.packages.len(), 3);
+        assert_eq!(provider.candidate_batches.borrow().as_slice(), &[3]);
+        assert_eq!(provider.summary_batches.borrow().as_slice(), &[3]);
+    }
+
+    #[test]
+    fn provider_answers_are_memoized_across_passes() {
+        // Pass 1 chooses `c = 1.5.0` before `a`'s edge narrows it to `=1.0.0`; pass 2 re-picks
+        // from the same candidate list and only the newly selected summary is fetched.
+        let mut provider = MemoryProvider::new(vec![
+            summary("c", "1.0.0", vec![]),
+            summary("c", "1.5.0", vec![]),
+            summary("a", "1.0.0", vec![request("c", "=1.0.0")]),
+        ]);
+        let roots = [root(summary(
+            "app",
+            "0.0.0",
+            vec![request("c", "1"), request("a", "1")],
+        ))];
+        let graph = run(&mut provider, &roots);
+        assert_eq!(graph.package(&pkg("c")).unwrap().id.version, ver("1.0.0"));
+        assert_eq!(provider.candidate_calls(), 2);
+        assert_eq!(provider.summary_calls(), 3);
     }
 
     #[test]
