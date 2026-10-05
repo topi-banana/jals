@@ -145,6 +145,12 @@ pub struct Manifest {
     /// which at most one is ever active. The plural form is what lets one reference cover a project
     /// that targets many releases, each with its own mapping text.
     pub mappings: BTreeMap<String, MappingEntry>,
+    /// Named Maven repositories (`[registries]`), keyed by the name a
+    /// [`registry`](RegistryDependency::registry) reference uses.
+    ///
+    /// `maven-central` is implicit and may be declared to point at a mirror; any other name a
+    /// dependency references must be declared here, which validation enforces.
+    pub registries: BTreeMap<String, Registry>,
     /// `[test]`: where a test run's extra sources live and where its classes go.
     pub test: Test,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
@@ -216,6 +222,15 @@ pub enum Dependency {
     /// A **precompiled WebAssembly library**: one module that carries its own `jals.library` ABI
     /// section, linked into the artifact a `jals-wasm` backend produces.
     Wasm(WasmDependency),
+    /// A **Maven registry** dependency, resolved through `maven-metadata.xml` and POMs.
+    ///
+    /// The table form: the key is the artifact id with `group = "…"`, or the full
+    /// `group:artifact` coordinate. The selected version is a requirement — a bare version is a
+    /// caret requirement (`2.0.16` = `>=2.0.16, <3.0.0`), and Maven range syntax is accepted
+    /// verbatim (`[1.0,2.0)`).
+    Registry(RegistryDependency),
+    /// The coordinate-key shorthand for a registry dependency: `"org.slf4j:slf4j-api" = "2.0.16"`.
+    RegistryVersion(String),
 }
 
 /// The `wasm` form of a [`Dependency`]: a precompiled core module.
@@ -242,6 +257,36 @@ pub struct WasmDependency {
     /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
     /// See [`Dependency::is_optional`].
     optional: Option<bool>,
+}
+
+/// The `registry` form of a [`Dependency`]: a Maven coordinate resolved through POMs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct RegistryDependency {
+    /// The version **requirement**. A bare version is a caret requirement (`2.0.16` =
+    /// `>=2.0.16, <3.0.0`; `0.2.3` = `<0.3.0`); `=`, `~`, `*` wildcards, and Maven range syntax
+    /// (`[1.0,2.0)`) are accepted. Resolved by `jals-resolve`, never here.
+    pub version: String,
+    /// The Maven `groupId`. Omit it when the dependency key already is a `group:artifact`
+    /// coordinate, which is the other spelling of the same entry.
+    pub group: Option<String>,
+    /// The `[registries]` key to resolve from. Defaults to `maven-central`.
+    pub registry: Option<String>,
+    /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
+    /// See [`Dependency::is_optional`].
+    optional: Option<bool>,
+}
+
+/// One `[registries]` entry: a named Maven repository.
+///
+/// `maven-central` is implicit; declaring it overrides its URL (a mirror). Every other name is
+/// available to `registry = "…"` on a [`RegistryDependency`], and a reference to a name that is
+/// neither declared nor `maven-central` is refused at validation rather than resolved to nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Registry {
+    /// The repository base URL, e.g. `https://repo1.maven.org/maven2`.
+    pub url: String,
 }
 
 /// The `jar` form of a [`Dependency`]: a compiled `.jar` and its optional companion `sources` jar.
@@ -433,6 +478,25 @@ pub enum DependencyError {
         /// The dependency's name.
         name: String,
     },
+    /// A registry entry's `version` is not a version requirement.
+    RegistryRequirement {
+        /// The dependency's name.
+        name: String,
+        /// The offending value.
+        value: String,
+    },
+    /// A registry entry names no coordinate: no `group`, and a key that is not `group:artifact`.
+    RegistryCoordinate {
+        /// The dependency's name.
+        name: String,
+    },
+    /// A registry entry's `group` is empty, or carries `:` or `/`.
+    RegistryGroup {
+        /// The dependency's name.
+        name: String,
+        /// The offending value.
+        value: String,
+    },
 }
 
 impl fmt::Display for DependencyError {
@@ -472,6 +536,21 @@ impl fmt::Display for DependencyError {
                 "dependency `{name}` sets both `remap` and `sources`, but only the classes are \
                  remapped: go-to-definition would land on obfuscated names for types the classpath \
                  now spells out (drop one)"
+            ),
+            Self::RegistryRequirement { name, value } => write!(
+                f,
+                "registry dependency `{name}` has a `version` of `{value}`, which is not a version \
+                 requirement (`2.0.16`, `=2.0.16`, `~2.0`, `1.*`, `[1.0,2.0)`)"
+            ),
+            Self::RegistryCoordinate { name } => write!(
+                f,
+                "registry dependency `{name}` names no coordinate: write `group = \"org.example\"` \
+                 or use a `group:artifact` key"
+            ),
+            Self::RegistryGroup { name, value } => write!(
+                f,
+                "registry dependency `{name}` has a `group` of `{value}` (expected a dot-separated \
+                 group id with no `:` or `/`)"
             ),
         }
     }
@@ -2269,8 +2348,87 @@ impl Dependency {
                 }
                 Ok(())
             }
+            Self::Registry(registry) => {
+                Self::validate_registry_requirement(&registry.version, name)?;
+                if let Some(group) = &registry.group {
+                    if group.is_empty() || group.contains(':') || group.contains('/') {
+                        return Err(DependencyError::RegistryGroup {
+                            name: name.to_owned(),
+                            value: group.clone(),
+                        });
+                    }
+                } else if !name.contains(':') {
+                    // Without `group`, the key itself must be the coordinate. Naming neither is
+                    // an entry that could never resolve.
+                    return Err(DependencyError::RegistryCoordinate {
+                        name: name.to_owned(),
+                    });
+                }
+                Ok(())
+            }
+            Self::RegistryVersion(version) => {
+                Self::validate_registry_requirement(version, name)?;
+                if !name.contains(':') {
+                    return Err(DependencyError::RegistryCoordinate {
+                        name: name.to_owned(),
+                    });
+                }
+                Ok(())
+            }
         }?;
         self.validate_features(name)
+    }
+
+    /// The value-level checks on a registry version requirement: it parses as a
+    /// [`VersionReq`](jals_resolve::version::VersionReq).
+    fn validate_registry_requirement(value: &str, name: &str) -> Result<(), DependencyError> {
+        if value.is_empty() {
+            return Err(DependencyError::Empty {
+                name: name.to_owned(),
+                field: "version",
+            });
+        }
+        jals_resolve::version::VersionReq::parse(value).map_err(|_| {
+            DependencyError::RegistryRequirement {
+                name: name.to_owned(),
+                value: value.to_owned(),
+            }
+        })?;
+        Ok(())
+    }
+
+    /// The Maven `group:artifact` coordinate this entry names, derived from the manifest key.
+    ///
+    /// `None` for a non-registry form. A registry entry that names neither a `group` nor a
+    /// `group:artifact` key returns `None` too, which validation has already rejected on a
+    /// validated manifest.
+    pub fn registry_coordinate(&self, name: &str) -> Option<String> {
+        match self {
+            Self::Registry(registry) => registry.group.as_ref().map_or_else(
+                || name.contains(':').then(|| name.to_owned()),
+                |group| Some(alloc::format!("{group}:{name}")),
+            ),
+            Self::RegistryVersion(_) => name.contains(':').then(|| name.to_owned()),
+            _ => None,
+        }
+    }
+
+    /// The version requirement of a registry entry, as written.
+    pub fn registry_version(&self) -> Option<&str> {
+        match self {
+            Self::Registry(registry) => Some(&registry.version),
+            Self::RegistryVersion(version) => Some(version),
+            _ => None,
+        }
+    }
+
+    /// The `[registries]` key a registry entry resolves from, or `None` for the implicit
+    /// `maven-central`.
+    pub fn registry_name(&self) -> Option<&str> {
+        match self {
+            Self::Registry(registry) => registry.registry.as_deref(),
+            _ => None,
+        }
     }
 
     /// The **build features** this entry enables in the dependency project — Cargo's per-dependency
@@ -2285,7 +2443,7 @@ impl Dependency {
     /// parse error) and this returns an empty slice.
     pub fn features(&self) -> &[String] {
         match self {
-            Self::Jar(_) | Self::Wasm(_) => &[],
+            Self::Jar(_) | Self::Wasm(_) | Self::Registry(_) | Self::RegistryVersion(_) => &[],
             Self::Git(git) => &git.features,
             Self::Path(path) => &path.features,
         }
@@ -2300,7 +2458,7 @@ impl Dependency {
     /// is never read.
     pub fn default_features(&self) -> bool {
         match self {
-            Self::Jar(_) | Self::Wasm(_) => true,
+            Self::Jar(_) | Self::Wasm(_) | Self::Registry(_) | Self::RegistryVersion(_) => true,
             Self::Git(git) => git.default_features.unwrap_or(true),
             Self::Path(path) => path.default_features.unwrap_or(true),
         }
@@ -2315,7 +2473,11 @@ impl Dependency {
     pub fn remap(&self) -> Option<&str> {
         match self {
             Self::Jar(jar) => jar.remap.as_deref(),
-            Self::Git(_) | Self::Path(_) | Self::Wasm(_) => None,
+            Self::Git(_)
+            | Self::Path(_)
+            | Self::Wasm(_)
+            | Self::Registry(_)
+            | Self::RegistryVersion(_) => None,
         }
     }
 
@@ -2338,6 +2500,8 @@ impl Dependency {
             Self::Git(git) => git.optional.unwrap_or(false),
             Self::Path(path) => path.optional.unwrap_or(false),
             Self::Wasm(wasm) => wasm.optional.unwrap_or(false),
+            Self::Registry(registry) => registry.optional.unwrap_or(false),
+            Self::RegistryVersion(_) => false,
         }
     }
 
@@ -2349,7 +2513,7 @@ impl Dependency {
     /// answer here rather than inherit whichever side of the question the two callers assumed.
     const fn accepts_features(&self) -> bool {
         match self {
-            Self::Jar(_) | Self::Wasm(_) => false,
+            Self::Jar(_) | Self::Wasm(_) | Self::Registry(_) | Self::RegistryVersion(_) => false,
             Self::Git(_) | Self::Path(_) => true,
         }
     }
@@ -2603,6 +2767,30 @@ impl Manifest {
             dep.validate(name).map_err(ValidationError::Dependency)?;
             if let Some(mapping) = dep.remap() {
                 self.require_mapping(RemapSite::Dependency(name.clone()), mapping)?;
+            }
+            if let Some(registry) = dep.registry_name()
+                && registry != jals_resolve::id::RegistryId::MAVEN_CENTRAL
+                && !self.registries.contains_key(registry)
+            {
+                return Err(ValidationError::UndeclaredRegistry {
+                    dependency: name.clone(),
+                    registry: registry.to_owned(),
+                });
+            }
+        }
+
+        // `[registries]`: a name a dependency can reference and a URL the host can join paths to.
+        for (name, registry) in &self.registries {
+            if jals_resolve::id::RegistryId::new(name.clone()).is_err() {
+                return Err(ValidationError::InvalidRegistryName { name: name.clone() });
+            }
+            if registry.url.is_empty()
+                || !(registry.url.starts_with("https://") || registry.url.starts_with("http://"))
+            {
+                return Err(ValidationError::InvalidRegistryUrl {
+                    name: name.clone(),
+                    url: registry.url.clone(),
+                });
             }
         }
 
@@ -3278,6 +3466,26 @@ pub enum ValidationError {
         /// The compiler output directory containing it.
         classes_dir: String,
     },
+    /// A registry dependency names a `[registries]` key that is neither declared nor
+    /// `maven-central`.
+    UndeclaredRegistry {
+        /// The dependency that referenced it.
+        dependency: String,
+        /// The undeclared registry name.
+        registry: String,
+    },
+    /// A `[registries]` key is not a valid registry name.
+    InvalidRegistryName {
+        /// The offending key.
+        name: String,
+    },
+    /// A `[registries]` entry's URL is empty or is not `http(s)://`.
+    InvalidRegistryUrl {
+        /// The registry key.
+        name: String,
+        /// The offending URL.
+        url: String,
+    },
 }
 
 /// Where a `remap` reference was written, for [`ValidationError::UnknownMapping`]'s message.
@@ -3449,6 +3657,25 @@ impl fmt::Display for ValidationError {
                 f,
                 "invalid `[build] remap` jar `{jar}`: it must be outside `[build] classes-dir` \
                  `{classes_dir}`, which the compiler writes and `jals clean` removes"
+            ),
+            Self::UndeclaredRegistry {
+                dependency,
+                registry,
+            } => write!(
+                f,
+                "dependency `{dependency}` resolves from registry `{registry}`, which `[registries]` \
+                 does not declare (declare it, or omit `registry` for `maven-central`)"
+            ),
+            Self::InvalidRegistryName { name } => {
+                write!(
+                    f,
+                    "`[registries]` key `{name}` is not a valid registry name"
+                )
+            }
+            Self::InvalidRegistryUrl { name, url } => write!(
+                f,
+                "`[registries] {name}` has a URL of `{url}` (expected an `https://` or `http://` \
+                 repository base URL)"
             ),
         }
     }

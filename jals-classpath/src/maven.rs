@@ -99,6 +99,16 @@ impl Coordinate {
     fn artifact_file(&self, version: &Version, extension: &str) -> String {
         format!("{}-{}.{}", self.artifact, version.as_str(), extension)
     }
+
+    /// The URL of this coordinate's main artifact in a repository rooted at `base`.
+    pub fn artifact_url(&self, base: &str, version: &Version, extension: &str) -> String {
+        format!(
+            "{}/{}/{}",
+            base.trim_end_matches('/'),
+            self.version_directory(version),
+            self.artifact_file(version, extension)
+        )
+    }
 }
 
 /// One POM dependency before property interpolation and management.

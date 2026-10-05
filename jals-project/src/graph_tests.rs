@@ -890,6 +890,7 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
                 ),
                 ProjectInputOptions::Compile,
                 &jals_progress::Progress::SILENT,
+                None,
             )
             .await;
         assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
@@ -1246,6 +1247,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &UnreachableFetcher,
                 ProjectInputOptions::Analysis,
                 &jals_progress::Progress::SILENT,
+                None,
             )
             .await;
         assert_eq!(
@@ -1266,6 +1268,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &UnreachableFetcher,
                 ProjectInputOptions::Editor,
                 &jals_progress::Progress::SILENT,
+                None,
             )
             .await;
         assert_eq!(editor.inputs.source_dep_sources.len(), 1);
@@ -1322,6 +1325,7 @@ fn resolve_native_runs_the_whole_graph_phase_in_one_call() {
                 inert!(),
                 DependencyScope::Build,
                 ProjectInputOptions::Editor,
+                None,
             )
             .await
             .unwrap();
@@ -3193,6 +3197,7 @@ fn an_offline_graph_does_not_fetch_a_remote_jar_dependency() {
                 },
                 DependencyScope::Build,
                 ProjectInputOptions::Compile,
+                None,
             )
             .await
             .expect("an unreachable dependency is a warning, not a phase failure");

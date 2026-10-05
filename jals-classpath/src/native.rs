@@ -20,6 +20,11 @@ use jals_config::{
 };
 use jals_exec::tokio_rt::{on_blocking_pool, sleep_millis};
 use jals_progress::{Progress, Task};
+use jals_resolve::id::{PackageName, RegistryId, SourceId};
+use jals_resolve::lock::Lockfile;
+use jals_resolve::resolve::{ResolveGraph, Resolver};
+use jals_resolve::summary::{RootRequest, SourceRequest};
+use jals_resolve::version::Version;
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
     NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, ProvenanceFold,
@@ -27,11 +32,57 @@ use jals_storage::{
 };
 
 use crate::io::Fetch;
+use crate::maven::{Coordinate, MavenProvider};
 use crate::{
-    ClasspathEntry, DependencyLocation, ExternalLocator, FetchError, Fetcher, LibrarySource,
-    NetworkPolicy, ProjectInputOptions, ProjectInputPlan, ProjectInputs, RetrySchedule, Warning,
-    WarningOrigin,
+    ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, FetchError, Fetcher,
+    LibrarySource, NetworkPolicy, ProjectInputOptions, ProjectInputPlan, ProjectInputs,
+    RetrySchedule, Warning, WarningOrigin,
 };
+
+/// The lock a host reads before registry resolution and receives back afterwards.
+///
+/// The host owns persistence: this crate performs the resolution and hands back the lock it
+/// produced, because writing a file beside the manifest is a host concern (`jals-cli` reads and
+/// writes `jals.lock` next to the project root; the language server passes `None` and drops the
+/// result).
+#[derive(Debug, Default, Clone)]
+pub struct RegistryResolution {
+    /// The previous `jals.lock`, when the host has one. Pins survive resolution.
+    pub lock: Option<Lockfile>,
+    /// The lock this resolution produced, when at least one registry dependency was resolved.
+    pub resolved_lock: Option<Lockfile>,
+    /// The external packages that were resolved, id-sorted, for hosts that render a tree.
+    pub packages: Vec<PackageName>,
+    /// Warnings resolution produced without failing.
+    pub warnings: Vec<String>,
+}
+
+impl RegistryResolution {
+    /// A resolution with no lock preference and no outcome yet.
+    pub fn new(lock: Option<Lockfile>) -> Self {
+        Self {
+            lock,
+            ..Self::default()
+        }
+    }
+
+    /// Parse a host's `jals.lock` text, when there is one.
+    ///
+    /// # Errors
+    /// [`jals_resolve::lock::LockError`] for a malformed or unsupported lock. A host decides
+    /// whether that is fatal (it is for `jals build`) or ignorable.
+    pub fn from_lock_text(text: Option<&str>) -> Result<Self, jals_resolve::lock::LockError> {
+        match text {
+            Some(text) => Ok(Self::new(Some(Lockfile::parse(text)?))),
+            None => Ok(Self::default()),
+        }
+    }
+
+    /// The lockfile spelling of the outcome, for a host that compares before writing.
+    pub fn resolved_text(&self) -> Option<String> {
+        self.resolved_lock.as_ref().map(Lockfile::render)
+    }
+}
 
 /// A fetcher backed by `reqwest`'s async client.
 pub struct ReqwestFetcher {
@@ -280,6 +331,12 @@ pub struct NativeProjectPlan {
     /// `path` dependencies outside the project root, resolved against the host filesystem by
     /// [`materialize_path_sources`](Self::materialize_path_sources).
     path_dependencies: Vec<(Name, PathDependency)>,
+    /// Maven registry entries, resolved into classpath specs by
+    /// [`resolve_registry`](Self::resolve_registry) before the plan executes. They are not
+    /// project-graph nodes: a registry package contributes a jar, never `.java` a build script
+    /// could read. The manifest summary is the resolver's input, so the collected value carries
+    /// no name.
+    registry_dependencies: Vec<Dependency>,
     external_source_roots: Vec<PathBuf>,
     external_classpath: Vec<PathBuf>,
 }
@@ -308,6 +365,7 @@ impl NativeProjectPlan {
         fetcher: &F,
         options: ProjectInputOptions,
         progress: &Progress,
+        registry: Option<&mut RegistryResolution>,
     ) -> (ProjectInputs, Vec<DirKey>) {
         let mut native =
             Self::from_manifest(manifest, scope, features, project_root, &storage.view());
@@ -319,11 +377,149 @@ impl NativeProjectPlan {
             .materialize_git_sources(project_root, storage, fetcher)
             .await;
         native.materialize_path_sources(project_root, storage).await;
+        // Registry resolution runs after host materialization and before execution: its specs go
+        // through the same dependency resolver as explicit jars, so POM traversal is one batch of
+        // metadata/POM fetches and the jars download in parallel through the verified cache.
+        if let Some(specs) = native
+            .resolve_registry(manifest, scope, features, fetcher, registry)
+            .await
+        {
+            native.plan.dependencies.extend(specs);
+        }
         let mut inputs =
             ProjectInputs::assemble(fetcher, storage, &native.plan, options, progress).await;
         native.warnings.append(&mut inputs.warnings);
         inputs.warnings = native.warnings;
         (inputs, native.source_roots)
+    }
+
+    /// Resolve every registry entry into `DependencySpec`s and record the lock.
+    ///
+    /// Returns `None` when the plan declared no registry entry (the common case) or when
+    /// resolution failed, which is reported as a warning: a build whose classpath is missing a
+    /// library fails at `javac` with a missing symbol, which is worse than either the real
+    /// resolution error or no classpath at all. The warning carries the resolver's own message.
+    async fn resolve_registry<F: Fetcher>(
+        &mut self,
+        manifest: &Manifest,
+        scope: DependencyScope,
+        features: &ResolvedBuildFeatures,
+        fetcher: &F,
+        registry: Option<&mut RegistryResolution>,
+    ) -> Option<Vec<DependencySpec>> {
+        if self.registry_dependencies.is_empty() {
+            return None;
+        }
+        // A host without lock persistence (the language server) still gets resolution; it just
+        // has nowhere to store the outcome.
+        let mut scratch = RegistryResolution::default();
+        let registry = registry.map_or(&mut scratch, |registry| registry);
+        let root_name = manifest
+            .package
+            .name
+            .clone()
+            .unwrap_or_else(|| "jals-root".to_owned());
+        let root_id = PackageName::new(root_name.clone()).ok().map(|name| {
+            let version = manifest
+                .package
+                .version
+                .as_deref()
+                .and_then(|text| Version::parse(text).ok())
+                .unwrap_or_else(|| Version::parse("0.0.0").expect("`0.0.0` parses"));
+            jals_resolve::id::PackageId::new(
+                name,
+                version,
+                SourceId::Workspace(jals_resolve::id::WorkspaceSource { member: root_name }),
+            )
+        })?;
+        let mut root_summary = match manifest.resolver_summary(root_id) {
+            Ok(summary) => summary,
+            Err(error) => {
+                self.warnings.push(Warning::new(
+                    WarningOrigin::External(ExternalLocator::new("registry")),
+                    format!("registry dependencies could not be lowered: {error}"),
+                ));
+                return None;
+            }
+        };
+        // Only registry edges are this resolver's business; `git`/`path` entries are graph nodes
+        // whose provider lives in `jals-project`.
+        root_summary
+            .dependencies
+            .retain(|request| matches!(request.source, SourceRequest::Registry { .. }));
+        let request = RootRequest {
+            summary: root_summary,
+            features: features.features().clone(),
+            // `features` already resolved `default`; re-asking would double-expand it.
+            default_features: false,
+            include_dev: scope == DependencyScope::Test,
+        };
+        let mut registries: alloc::collections::BTreeMap<String, String> = manifest
+            .registries
+            .iter()
+            .map(|(name, registry)| (name.clone(), registry.url.clone()))
+            .collect();
+        registries
+            .entry(RegistryId::MAVEN_CENTRAL.to_owned())
+            .or_insert_with(|| "https://repo1.maven.org/maven2".to_owned());
+        let mut provider = MavenProvider::new(fetcher, registries.clone());
+        let graph: ResolveGraph = match Resolver::new(&mut provider)
+            .resolve(&[request], registry.lock.as_ref())
+            .await
+        {
+            Ok(graph) => graph,
+            Err(error) => {
+                self.warnings.push(Warning::new(
+                    WarningOrigin::External(ExternalLocator::new("registry")),
+                    format!("registry dependencies could not be resolved: {error}"),
+                ));
+                return None;
+            }
+        };
+        let mut specs = Vec::new();
+        for package in &graph.packages {
+            let SourceId::Registry(registry_name) = &package.id.source else {
+                continue;
+            };
+            let Some(coordinate) = Coordinate::parse(&package.id.name) else {
+                continue;
+            };
+            let Some(base) = registries.get(registry_name.as_str()) else {
+                continue;
+            };
+            let url = coordinate.artifact_url(base, &package.id.version, "jar");
+            // A `Name` is a portable path component: a coordinate's `:` is a Windows-reserved
+            // character, so the diagnostic label folds it to `-`. Nothing keys on this name
+            // except progress and warning text (`remap` is never set here).
+            let Ok(name) = Name::new(package.id.name.as_str().replace(':', "-")) else {
+                continue;
+            };
+            specs.push(DependencySpec {
+                name,
+                location: DependencyLocation::External {
+                    locator: ExternalLocator::new(url),
+                    // The verified cache is SHA-256 addressed; a SHA-1 sidecar checksum is kept
+                    // in the lock but cannot pin this location's cache key.
+                    expected: package.checksum.as_ref().and_then(|checksum| {
+                        (checksum.algorithm() == jals_resolve::id::ChecksumAlgorithm::Sha256)
+                            .then(|| ContentDigest::from_hex(checksum.hex()))
+                            .flatten()
+                    }),
+                },
+                remap: None,
+                recursive: false,
+            });
+        }
+        registry.resolved_lock = Some(graph.lockfile());
+        registry.packages = graph
+            .packages
+            .iter()
+            .map(|package| package.id.name.clone())
+            .collect();
+        for warning in &graph.warnings {
+            registry.warnings.push(warning.to_string());
+        }
+        Some(specs)
     }
 
     /// Lower the source roots, the `[build] classpath`, and the dependency entries `scope`
@@ -349,6 +545,7 @@ impl NativeProjectPlan {
             warnings: Vec::new(),
             git_dependencies: Vec::new(),
             path_dependencies: Vec::new(),
+            registry_dependencies: Vec::new(),
             external_source_roots: Vec::new(),
             external_classpath: Vec::new(),
         };
@@ -427,6 +624,17 @@ impl NativeProjectPlan {
             if matches!(dependency, Dependency::Jar(_)) {
                 continue;
             }
+            // Registry entries come first: their coordinate keys (`group:artifact`) are not
+            // portable `Name`s, and they are not lowered as graph input either way — the
+            // resolver reads them from the manifest summary, so the collected value carries no
+            // name.
+            if matches!(
+                dependency,
+                Dependency::Registry(_) | Dependency::RegistryVersion(_)
+            ) {
+                result.registry_dependencies.push(dependency.clone());
+                continue;
+            }
             let name = match Name::new(raw_name) {
                 Ok(name) => name,
                 Err(error) => {
@@ -442,7 +650,10 @@ impl NativeProjectPlan {
                 // classpath entry and no `.java` source either: what it needs is a link at
                 // instantiation, which is the compile's and the runner's business, not the
                 // resolver's.
-                Dependency::Jar(_) | Dependency::Wasm(_) => {}
+                Dependency::Jar(_)
+                | Dependency::Wasm(_)
+                | Dependency::Registry(_)
+                | Dependency::RegistryVersion(_) => {}
                 Dependency::Path(path) => match Self::project_path_root(path, project_root, view) {
                     Ok(Some(key)) => result.plan.source_dependency_roots.push(key),
                     // Outside the project root: scanned from the host filesystem by
@@ -541,7 +752,9 @@ impl NativeProjectPlan {
                         scopes.push(NativeScope::all(path));
                     }
                 }
-                Dependency::Git(_) => {}
+                // Registry packages have no local bytes to snapshot; their POM and jar live in the
+                // repository, and the artifact cache captures the jar when it is downloaded.
+                Dependency::Git(_) | Dependency::Registry(_) | Dependency::RegistryVersion(_) => {}
             }
         }
         scopes

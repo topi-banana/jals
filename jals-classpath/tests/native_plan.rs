@@ -374,6 +374,7 @@ classpath = ["../sibling-classes", "{absolute_class}"]
                 &NoFetch,
                 options,
                 &jals_progress::Progress::SILENT,
+                None,
             )
             .await
         })
@@ -449,4 +450,163 @@ required-features = ["1.19.4"]
             "`{expected}` is missing from the captured tree: {captured:?}"
         );
     }
+}
+
+/// A Maven repository served from memory, recording every URL that was fetched.
+struct MapFetcher {
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    seen: std::cell::RefCell<Vec<String>>,
+}
+
+impl MapFetcher {
+    const fn new() -> Self {
+        Self {
+            files: std::collections::BTreeMap::new(),
+            seen: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn add(&mut self, url: &str, body: &[u8]) {
+        self.files.insert(url.to_owned(), body.to_vec());
+    }
+}
+
+impl Fetcher for MapFetcher {
+    fn network(&self) -> jals_classpath::NetworkPolicy {
+        jals_classpath::NetworkPolicy::Online
+    }
+
+    fn retry(&self) -> jals_classpath::RetrySchedule {
+        jals_classpath::RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(
+        &self,
+        locator: &str,
+        _: &jals_progress::Task,
+    ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
+        self.seen.borrow_mut().push(locator.to_owned());
+        ready(self.files.get(locator).map_or_else(
+            || {
+                Err(jals_classpath::FetchError::permanent(format!(
+                    "no fixture for `{locator}`"
+                )))
+            },
+            |bytes| Ok(bytes.clone()),
+        ))
+    }
+}
+
+#[test]
+fn a_registry_dependency_resolves_through_poms_and_locks() {
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:lib" = { version = "1", registry = "test" }
+"#,
+    );
+    // The metadata lists one version; the POM declares one exact transitive dependency whose
+    // metadata is absent, which `pinned_base` covers.
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/maven-metadata.xml"),
+        br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom"),
+        br"<project>
+              <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></dependency>
+              </dependencies>
+            </project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/direct/2.0.0/direct-2.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.jar"),
+        b"lib-bytes",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/direct/2.0.0/direct-2.0.0.jar"),
+        b"direct-bytes",
+    );
+    let fetcher_ref = &fetcher;
+    let (inputs, registry) = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                Some(&mut registry),
+            )
+            .await;
+            (inputs, registry)
+        }
+    })
+    .unwrap();
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    let seen = fetcher.seen.borrow();
+    assert_eq!(
+        inputs.dependency_jars.len(),
+        2,
+        "resolved packages: {:?}, seen: {:?}",
+        registry.packages,
+        *seen
+    );
+    drop(seen);
+
+    let lock = registry
+        .resolved_lock
+        .as_ref()
+        .expect("resolution produced a lock");
+    let names: Vec<String> = lock
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["com.example:direct 2.0.0", "com.example:lib 1.0.0"]
+    );
+    let text = registry.resolved_text().unwrap();
+    assert_eq!(
+        jals_resolve::lock::Lockfile::parse(&text).unwrap(),
+        *lock,
+        "the rendered lock parses back"
+    );
+
+    let seen = fetcher.seen.borrow();
+    assert!(
+        seen.iter().any(|url| url.ends_with("lib-1.0.0.jar")),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|url| url.ends_with("direct-2.0.0.jar")),
+        "{seen:?}"
+    );
 }

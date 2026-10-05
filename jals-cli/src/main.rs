@@ -2614,7 +2614,8 @@ impl App {
         // The graph's own work is attributed per node, inside the graph: a dependency's script and
         // task plan belong to that dependency, not to whoever is building it.
         let progress = session.progress().clone();
-        let assembly = script
+        let mut registry = Self::read_registry_lock(root)?;
+        let resolved = script
             .assembled
             .resolve_native(
                 manifest,
@@ -2633,29 +2634,31 @@ impl App {
                 },
                 scope,
                 options,
+                Some(&mut registry),
             )
-            .await
-            .map_err(|failure| {
-                // Discovery had already found something worth saying about this project before a
-                // later phase failed, and it is usually the half that explains the other: the
-                // dependency preprocessing could not resolve is often the one discovery warned was
-                // unavailable. The assembly orders and grades both; this prints what it produced.
-                //
-                // The script phase is `Skipped` here whichever command is running: whoever ran a
-                // script reports it (`run_build_script`), and `jals lint` runs none at all.
-                Reporter::report_project(
-                    shell,
-                    &jals_project::ProjectDiagnostics::assemble(
-                        jals_project::ScriptOutcome::Skipped,
-                        jals_project::GraphOutcome::Failed(&failure),
-                        None,
-                    ),
+            .await;
+        Self::write_registry_lock(root, &registry, shell)?;
+        let assembly = resolved.map_err(|failure| {
+            // Discovery had already found something worth saying about this project before a
+            // later phase failed, and it is usually the half that explains the other: the
+            // dependency preprocessing could not resolve is often the one discovery warned was
+            // unavailable. The assembly orders and grades both; this prints what it produced.
+            //
+            // The script phase is `Skipped` here whichever command is running: whoever ran a
+            // script reports it (`run_build_script`), and `jals lint` runs none at all.
+            Reporter::report_project(
+                shell,
+                &jals_project::ProjectDiagnostics::assemble(
+                    jals_project::ScriptOutcome::Skipped,
+                    jals_project::GraphOutcome::Failed(&failure),
                     None,
-                );
-                // No `.context()` on top: it would restate this sentence, and the detail is in the
-                // diagnostics just reported rather than in the error chain.
-                anyhow!("the project dependency graph could not be resolved")
-            })?;
+                ),
+                None,
+            );
+            // No `.context()` on top: it would restate this sentence, and the detail is in the
+            // diagnostics just reported rather than in the error chain.
+            anyhow!("the project dependency graph could not be resolved")
+        })?;
 
         let reported = jals_project::ProjectDiagnostics::assemble(
             jals_project::ScriptOutcome::Skipped,
@@ -2747,6 +2750,47 @@ impl App {
         result.classpath_classes = assembly.inputs.classpath_classes;
         result.feature_set = assembly.inputs.feature_set;
         Ok(result)
+    }
+
+    /// Read `jals.lock` beside the root manifest, when the host has one.
+    ///
+    /// A malformed lock is an error: silently resolving past one would rewrite a file the user
+    /// may have hand-edited, hiding the mistake that produced it.
+    fn read_registry_lock(root: &Path) -> Result<jals_classpath::RegistryResolution> {
+        let path = root.join("jals.lock");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => jals_classpath::RegistryResolution::from_lock_text(Some(&text))
+                .map_err(|error| anyhow!("{}: {error}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(jals_classpath::RegistryResolution::default())
+            }
+            Err(error) => Err(anyhow!("cannot read {}: {error}", path.display())),
+        }
+    }
+
+    /// Write the resolved lock back when it changed.
+    ///
+    /// The comparison is by rendered bytes, so a run that changed nothing leaves the file's
+    /// timestamp alone.
+    fn write_registry_lock(
+        root: &Path,
+        registry: &jals_classpath::RegistryResolution,
+        shell: &Shell,
+    ) -> Result<()> {
+        let Some(text) = registry.resolved_text() else {
+            return Ok(());
+        };
+        let path = root.join("jals.lock");
+        if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+            return Ok(());
+        }
+        std::fs::write(&path, &text)
+            .map_err(|error| anyhow!("cannot write {}: {error}", path.display()))?;
+        shell.verbose_status(
+            Verb::Resolving,
+            format_args!("{} dependencies", registry.packages.len()),
+        );
+        Ok(())
     }
 
     /// Prepare the root and transitive compile inputs shared by `build` and `run`.
