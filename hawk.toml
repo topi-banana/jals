@@ -76,6 +76,14 @@ reason = "generated AST; uniform pub accessor surface emitted from java.ungram b
 # item lands with the test that drives it, or it lands unreachable with nothing
 # reporting it.
 
+# `jals_resolve` has no stanza here and is excluded on the command line beside `jinja` and
+# `jals_native` (`--exclude-crate jals_resolve`), but for a temporary, mechanical reason rather
+# than a boundary one: the crate is the new dependency-resolution core, and its consumer (the
+# `jals-config` manifest schema and the `jals-project` graph integration) has not landed yet. A
+# closed world over today's binaries cannot reach it, not because its API is external but because
+# nothing calls it. Remove the flag when the graph consumes the resolver; a permanently excluded
+# internal crate would be exactly the dead surface this gate exists to find.
+
 # `jals_fmt::import` lowers native formatter configs (Eclipse / IntelliJ / GJF /
 # Palantir / Spotless) into a jals `Config`. `jals fmt` / `jals init` now reach the
 # file-backed importers through `jals-cli/src/migrate.rs`, but three things here

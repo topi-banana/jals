@@ -1,0 +1,28 @@
+[package]
+name = "jals-resolve"
+version.workspace = true
+edition.workspace = true
+description = "Portable dependency resolution for jals: versions, requirements, lockfile, and the package graph"
+
+# Deliberately featureless, like `jals-progress` and `jals-frontend`: resolution is a pure
+# algorithm over a `Provider` seam, so there is no host capability to gate. Having no feature at
+# all is what makes portability impossible to regress silently — the crate is `no_std + alloc`
+# in every configuration, and the same resolver runs in the browser playground and in the CLI.
+#
+# This crate performs no I/O. Fetched bytes, clones, and path reads arrive through `Provider`,
+# exactly as `jals-cli` drives `jals-classpath`'s `Fetcher`. It must not name `jals-config`,
+# `jals-classpath`, or `jals-project`: those crates depend on this vocabulary to describe
+# manifests and artifacts, so a dependency back would invert the stack.
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+# The resolver's own code is synchronous: `Provider` is async, but the resolver only awaits it,
+# and a test provider's futures complete inline. The executor is needed solely to drive the
+# tests, exactly as `jals-syntax` drives its async lexer.
+jals-exec.workspace = true
+
+[lints]
+workspace = true

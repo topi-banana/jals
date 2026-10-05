@@ -364,9 +364,12 @@ jobs:
       # only, so the analysis set matches what hawk.toml was tuned against (no `--all-features`).
       # `--exclude-crate jinja` is hawk's own name for a workspace library whose API is an external
       # boundary: that crate's surface is minijinja's, not one consumer's, and hawk.toml says why.
+      # `jals_resolve` is excluded for the same *mechanical* reason: its consumer (the manifest /
+      # graph integration) lands in a later change, so nothing in a shipped binary reaches it yet.
+      # It is not a boundary exemption — remove the flag when the graph consumes the resolver.
       - name: Run the closed-world visibility gate
         shell: bash
-        run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja --exclude-crate jals_native -D warnings
+        run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja --exclude-crate jals_native --exclude-crate jals_resolve -D warnings
 
   typos:
     name: typos
@@ -465,7 +468,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # The fifteen checks below stay sequential, and deliberately so: they share one target
+      # The seventeen checks below stay sequential, and deliberately so: they share one target
       # directory, whose lock cargo holds for a whole build, and they select deliberately different
       # feature sets — so grouping them would trade a queue for a fingerprint fight and check the
       # same things more slowly.
@@ -474,8 +477,10 @@ jobs:
       - run: cargo check -p jals-build --no-default-features
       - run: cargo check -p jals-project --no-default-features
       # jals-frontend has no features at all, so a plain check *is* the portability check:
-      # there is no configuration in which it stops being `no_std + alloc`.
+      # there is no configuration in which it stops being `no_std + alloc`. `jals-resolve` is the
+      # same statement: featureless, so plain and wasm32 checks are the whole audit.
       - run: cargo check -p jals-frontend
+      - run: cargo check -p jals-resolve
       - run: cargo check -p jals-project --all-features
       - run: cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
       # The same statement's other half, and the one the browser rests on: the engine alone, the
@@ -488,6 +493,7 @@ jobs:
       - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-frontend --target wasm32-unknown-unknown
+      - run: cargo check -p jals-resolve --target wasm32-unknown-unknown
       - run: cargo build -p jals-playground --target wasm32-unknown-unknown
       - run: cargo tree -e features -p jals-classpath --no-default-features
       - run: cargo tree -e features -p jals-build --no-default-features

@@ -116,6 +116,15 @@ filesystem reads into portable interfaces.
   `streams` key). `Lint<O>`'s serialized *shape* follows the options **type**
   (`LintOptions::HAS_KEYS`) and not the values, which is what lets `jals-lint/tests/registry.rs`
   find every option by walking one serialized config.
+- `jals-resolve`: the dependency-resolution core — Maven-compatible versions and requirements,
+  package/source identity (`PackageId` is `(name, version, resolved source)`, never a locator),
+  the feature-graph `Summary`, the `Provider` seam, the Cargo-style resolver (one version per
+  name, unified features, cycles as edges), and the deterministic `jals.lock` model. Portable
+  and featureless: it performs no I/O, and the same resolver runs in the browser playground and
+  in the CLI. It must stay free of `jals-config`/`jals-classpath`/`jals-project` — those crates
+  consume this vocabulary, so a dependency back would invert the stack. The target architecture
+  and migration plan live in `jals-resolve/DESIGN.md`; `hawk.toml` records why the crate is
+  excluded from the visibility gate until the graph consumes it.
 - `jals-classpath`: resolution over project bytes and cache artifacts.
   - The in-house zip reader is isolated in `zip.rs` behind `archive` (portable, `no_std`, over the
     async io seam; also a stored-only writer for jar remap/merge; the `zip` crate is a dev-only
@@ -776,9 +785,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo unused-allow --all-targets -- --workspace --all-features
 cargo nextest run --workspace --all-features --no-fail-fast
 cargo test --workspace --all-features --doc     # nextest does not run doctests
-cargo hawk check --exclude-crate jinja -D warnings   # closed-world visibility over hawk.toml's
-                                                    # roots; `jinja`'s API is an external
-                                                    # boundary, and hawk.toml says why
+# Closed-world visibility over hawk.toml's roots; `jinja`'s API is an external boundary and
+# hawk.toml says why. `jals_resolve` is excluded until the project graph consumes it.
+cargo hawk check --exclude-crate jinja --exclude-crate jals_resolve -D warnings
 ```
 
 The portable-core and feature audit (CI's `portable core and feature audit` job) — run it whenever
@@ -791,6 +800,7 @@ cargo check -p jals-build --no-default-features
 cargo check -p jals-project --no-default-features
 cargo check -p jals-frontend
 cargo check -p jals-progress
+cargo check -p jals-resolve
 cargo check -p jinja
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
@@ -799,6 +809,7 @@ cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unkn
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
 cargo check -p jals-progress --target wasm32-unknown-unknown
+cargo check -p jals-resolve --target wasm32-unknown-unknown
 cargo check -p jinja --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 cargo tree -e features -p jals-classpath --no-default-features

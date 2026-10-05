@@ -1167,6 +1167,7 @@ name = "jals-config"
 version = "0.1.0"
 dependencies = [
  "jals-exec",
+ "jals-resolve",
  "jals-storage",
  "serde",
  "serde_json",
@@ -1362,6 +1363,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "zip",
+]
+
+[[package]]
+name = "jals-resolve"
+version = "0.1.0"
+dependencies = [
+ "jals-exec",
+ "serde",
+ "sha2",
+ "toml",
 ]
 
 [[package]]

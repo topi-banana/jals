@@ -22,6 +22,7 @@ members = [
   "jals-playground",
   "jals-progress",
   "jals-project",
+  "jals-resolve",
   "jals-syntax",
   "jals-tests",
   "xtask",
@@ -80,6 +81,12 @@ jals-native = { path = "jals-native" }
 jals-platform = { path = "jals-platform" }
 jals-progress = { path = "jals-progress" }
 jals-project = { path = "jals-project", default-features = false }
+# Featureless by design: dependency resolution is a pure algorithm over a provider seam, so the
+# same resolver runs in the CLI and in the browser playground, and `no_std + alloc` is provable
+# rather than a feature combination. It must stay free of `jals-config`/`jals-classpath`/
+# `jals-project`: those crates consume this vocabulary, so a dependency back would invert the
+# stack.
+jals-resolve = { path = "jals-resolve" }
 jals-syntax = { path = "jals-syntax" }
 # Featureless by design: rendering a template is pure computation over `core + alloc`.
 jinja = { path = "crates/jinja" }
