@@ -24,6 +24,8 @@ mod mapping_text;
 #[cfg(feature = "archive")]
 mod mappings;
 #[cfg(feature = "native")]
+mod maven;
+#[cfg(feature = "native")]
 mod native;
 #[cfg(feature = "archive")]
 mod project;
@@ -49,6 +51,8 @@ pub use load::{
 };
 #[cfg(feature = "archive")]
 pub use mapping_text::MappingText;
+#[cfg(feature = "native")]
+pub use maven::{Coordinate, MavenProvider};
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};
 #[cfg(feature = "archive")]

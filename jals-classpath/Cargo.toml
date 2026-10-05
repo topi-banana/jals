@@ -14,6 +14,9 @@ native = [
   "archive",
   "dep:reqwest",
   "dep:tempfile",
+  # POM / maven-metadata parsing for registry resolution. Host-only like the fetch adapter it
+  # reads bytes from; the resolver core stays portable behind its `Provider` seam.
+  "dep:quick-xml",
   "jals-storage/std",
   "jals-exec/tokio",
 ]
@@ -24,6 +27,7 @@ jals-config.workspace = true
 jals-decompile.workspace = true
 jals-exec.workspace = true
 jals-progress.workspace = true
+jals-resolve.workspace = true
 jals-storage.workspace = true
 sha1.workspace = true
 miniz_oxide = { workspace = true, optional = true }
@@ -31,6 +35,7 @@ crc32fast = { workspace = true, optional = true }
 # Host-only async HTTP adapter. Kept out of the no-`native` build, which injects a `Fetcher`.
 reqwest = { workspace = true, optional = true }
 tempfile = { version = "3", optional = true }
+quick-xml = { workspace = true, optional = true }
 
 [dev-dependencies]
 jals-syntax.workspace = true

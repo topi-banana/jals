@@ -502,6 +502,32 @@ impl VersionReq {
         &self.raw
     }
 
+    /// The one version this requirement pins to, when it pins one.
+    ///
+    /// A provider that must answer when its version index is unavailable (a Maven mirror without
+    /// `maven-metadata.xml`) can offer exactly this version: `=1.2.3`, `^1.2.3`, `~1.2.3` and a
+    /// single-version range `[1.2.3]` all name a concrete base, while `1.*`/`*`/multi-version
+    /// ranges do not.
+    pub fn pinned_base(&self) -> Option<&Version> {
+        match &self.kind {
+            ReqKind::Exact(base) | ReqKind::Caret(base) | ReqKind::Tilde(base) => Some(base),
+            ReqKind::Ranges(ranges) if ranges.len() == 1 => {
+                let range = &ranges[0];
+                match (&range.lower, &range.upper) {
+                    (Some(lower), Some(upper))
+                        if lower.inclusive
+                            && upper.inclusive
+                            && lower.version == upper.version =>
+                    {
+                        Some(&lower.version)
+                    }
+                    _ => None,
+                }
+            }
+            ReqKind::Any | ReqKind::Wildcard { .. } | ReqKind::Ranges(_) => None,
+        }
+    }
+
     /// Whether `version` satisfies this requirement.
     pub fn matches(&self, version: &Version) -> bool {
         match &self.kind {
