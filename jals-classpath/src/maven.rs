@@ -80,7 +80,7 @@ impl Coordinate {
     }
 
     /// The package name this coordinate is addressed by.
-    pub(crate) fn package_name(&self) -> PackageName {
+    fn package_name(&self) -> PackageName {
         PackageName::new(format!("{}:{}", self.group, self.artifact))
             .expect("a parsed coordinate is a valid package name")
     }

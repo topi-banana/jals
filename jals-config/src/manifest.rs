@@ -273,12 +273,12 @@ pub struct RegistryDependency {
     /// The version **requirement**. A bare version is a caret requirement (`2.0.16` =
     /// `>=2.0.16, <3.0.0`; `0.2.3` = `<0.3.0`); `=`, `~`, `*` wildcards, and Maven range syntax
     /// (`[1.0,2.0)`) are accepted. Resolved by `jals-resolve`, never here.
-    pub(crate) version: String,
+    version: String,
     /// The Maven `groupId`. Omit it when the dependency key already is a `group:artifact`
     /// coordinate, which is the other spelling of the same entry.
-    pub(crate) group: Option<String>,
+    group: Option<String>,
     /// The `[registries]` key to resolve from. Defaults to `maven-central`.
-    pub(crate) registry: Option<String>,
+    registry: Option<String>,
     /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
     /// See [`Dependency::is_optional`].
     optional: Option<bool>,
