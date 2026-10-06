@@ -59,7 +59,7 @@ pub struct RegistryResolution {
     /// The external packages that were resolved, id-sorted, for hosts that render a tree.
     pub packages: Vec<PackageName>,
     /// Warnings resolution produced without failing.
-    pub warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Default for RegistryResolution {
@@ -76,7 +76,7 @@ impl Default for RegistryResolution {
 
 impl RegistryResolution {
     /// A resolution with no lock preference and no outcome yet.
-    pub fn new(lock: Option<Lockfile>) -> Self {
+    pub(crate) fn new(lock: Option<Lockfile>) -> Self {
         Self {
             lock,
             ..Self::default()
@@ -123,7 +123,7 @@ pub struct RegistryGraphs {
     /// Names in the lock (or the selected graph when no lock was generated), id-sorted.
     pub packages: Vec<PackageName>,
     /// Non-fatal messages from either pass.
-    pub warnings: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 /// Registry resolution as a standalone step.

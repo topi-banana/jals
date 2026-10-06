@@ -114,16 +114,9 @@ impl ProjectWorkspace {
             members.push(root.join("jals.toml"));
         }
         for directory in &directories {
-            let relative = directory
-                .strip_prefix(root)
-                .map_err(|_| anyhow!("member directory escaped the workspace root"))?;
-            let path = RelativePath::resolve(&RelativePath::ROOT, &relative.to_string_lossy())
-                .map_err(|error| {
-                    anyhow!(
-                        "member path `{}` is not portable: {error}",
-                        relative.display()
-                    )
-                })?;
+            let Some(path) = Self::relative_path(root, directory) else {
+                continue;
+            };
             if matches_any(&patterns, &path) && !matches_any(&excludes, &path) {
                 members.push(directory.join("jals.toml"));
             }
@@ -144,11 +137,7 @@ impl ProjectWorkspace {
             let member_dirs: Vec<RelativePath> = members
                 .iter()
                 .filter_map(|manifest| manifest.parent())
-                .filter_map(|dir| dir.strip_prefix(root).ok())
-                .map(|relative| {
-                    RelativePath::resolve(&RelativePath::ROOT, &relative.to_string_lossy())
-                        .unwrap_or(RelativePath::ROOT)
-                })
+                .filter_map(|dir| Self::relative_path(root, dir))
                 .collect();
             if !member_dirs.iter().any(|path| pattern.matches(path)) {
                 return Err(anyhow!(
@@ -161,6 +150,28 @@ impl ProjectWorkspace {
             root: root.to_path_buf(),
             members,
         })
+    }
+
+    /// `dir` relative to `root` as a portable path, or `None` when it is outside `root`.
+    ///
+    /// The portability matters: `Path` renders with the host separator (a backslash on Windows),
+    /// and a [`RelativePath`] is `/`-separated by contract. Building the path from components
+    /// keeps member matching identical on every platform — which is what the CI matrix checks.
+    fn relative_path(root: &Path, dir: &Path) -> Option<RelativePath> {
+        let relative = dir.strip_prefix(root).ok()?;
+        if relative.as_os_str().is_empty() {
+            return Some(RelativePath::ROOT);
+        }
+        let mut segments = Vec::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(name) => {
+                    segments.push(name.to_string_lossy().into_owned());
+                }
+                _ => return None,
+            }
+        }
+        RelativePath::resolve(&RelativePath::ROOT, &segments.join("/")).ok()
     }
 
     /// Collect directories containing a `jals.toml`, below `dir` (which is `root` at entry).
@@ -265,12 +276,9 @@ mod tests {
             .members()
             .iter()
             .map(|path| {
-                path.parent()
+                ProjectWorkspace::relative_path(root, path.parent().unwrap())
                     .unwrap()
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
+                    .to_string()
             })
             .collect();
         assert_eq!(members, vec!["app", "libs/a", "libs/b"]);
@@ -294,14 +302,12 @@ mod tests {
             .members()
             .iter()
             .map(|path| {
-                let dir = path.parent().unwrap();
-                if dir == root {
+                let relative =
+                    ProjectWorkspace::relative_path(root, path.parent().unwrap()).unwrap();
+                if relative.segments().next().is_none() {
                     ".".to_owned()
                 } else {
-                    dir.strip_prefix(root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned()
+                    relative.to_string()
                 }
             })
             .collect();

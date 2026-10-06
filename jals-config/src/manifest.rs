@@ -273,12 +273,12 @@ pub struct RegistryDependency {
     /// The version **requirement**. A bare version is a caret requirement (`2.0.16` =
     /// `>=2.0.16, <3.0.0`; `0.2.3` = `<0.3.0`); `=`, `~`, `*` wildcards, and Maven range syntax
     /// (`[1.0,2.0)`) are accepted. Resolved by `jals-resolve`, never here.
-    pub version: String,
+    pub(crate) version: String,
     /// The Maven `groupId`. Omit it when the dependency key already is a `group:artifact`
     /// coordinate, which is the other spelling of the same entry.
-    pub group: Option<String>,
+    pub(crate) group: Option<String>,
     /// The `[registries]` key to resolve from. Defaults to `maven-central`.
-    pub registry: Option<String>,
+    pub(crate) registry: Option<String>,
     /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
     /// See [`Dependency::is_optional`].
     optional: Option<bool>,
@@ -321,12 +321,6 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Whether this workspace declares anything at all. An empty `[workspace]` is a mistake, not
-    /// a root with no members: it would capture every upward walk and resolve nothing.
-    pub const fn is_empty(&self) -> bool {
-        self.members.is_empty() && self.exclude.is_empty() && self.default_members.is_empty()
-    }
-
     /// Validate every pattern as a resource-style glob, and reject an empty entry.
     fn validate(&self) -> Result<(), ValidationError> {
         for (key, patterns) in [
@@ -2477,7 +2471,7 @@ impl Dependency {
     /// `None` for a non-registry form. A registry entry that names neither a `group` nor a
     /// `group:artifact` key returns `None` too, which validation has already rejected on a
     /// validated manifest.
-    pub fn registry_coordinate(&self, name: &str) -> Option<String> {
+    pub(crate) fn registry_coordinate(&self, name: &str) -> Option<String> {
         match self {
             Self::Registry(registry) => registry.group.as_ref().map_or_else(
                 || name.contains(':').then(|| name.to_owned()),
@@ -2499,7 +2493,7 @@ impl Dependency {
 
     /// The `[registries]` key a registry entry resolves from, or `None` for the implicit
     /// `maven-central`.
-    pub fn registry_name(&self) -> Option<&str> {
+    pub(crate) fn registry_name(&self) -> Option<&str> {
         match self {
             Self::Registry(registry) => registry.registry.as_deref(),
             _ => None,

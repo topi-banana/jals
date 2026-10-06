@@ -52,8 +52,6 @@ pub use load::{
 #[cfg(feature = "archive")]
 pub use mapping_text::MappingText;
 #[cfg(feature = "native")]
-pub use maven::{Coordinate, MavenProvider};
-#[cfg(feature = "native")]
 pub use native::{
     LockMode, NativeProjectPlan, RegistryGraphs, RegistryResolution, RegistryResolver,
     ReqwestFetcher,

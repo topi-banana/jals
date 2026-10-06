@@ -132,7 +132,9 @@ impl Manifest {
     ///
     /// # Errors
     /// [`ResolveLowerError`] as in [`resolver_summary`](Manifest::resolver_summary).
-    pub fn resolver_dependencies(&self) -> Result<Vec<DependencyRequest>, ResolveLowerError> {
+    pub(crate) fn resolver_dependencies(
+        &self,
+    ) -> Result<Vec<DependencyRequest>, ResolveLowerError> {
         let mut requests =
             Vec::with_capacity(self.dependencies.len() + self.dev_dependencies.len());
         for (label, dependency) in &self.dependencies {
@@ -150,7 +152,7 @@ impl Manifest {
     /// to nothing, which is exactly how `expand_build_features` treats one when it arrives in a
     /// dependency's set — and `validate` has already rejected every malformed shape a manifest
     /// can write, so this only decides what to do with a manifest that never passed it.
-    pub fn resolver_features(&self) -> BTreeMap<String, Vec<FeatureValue>> {
+    pub(crate) fn resolver_features(&self) -> BTreeMap<String, Vec<FeatureValue>> {
         fn feature_value(entry: &str) -> FeatureValue {
             match FeatureRef::parse(entry) {
                 Ok(FeatureRef::Local(name)) => FeatureValue::Feature(name.to_owned()),

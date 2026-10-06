@@ -64,14 +64,14 @@ const MAX_INTERPOLATION_DEPTH: usize = 16;
 
 /// A Maven `group:artifact` coordinate.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Coordinate {
+pub(crate) struct Coordinate {
     group: String,
     artifact: String,
 }
 
 impl Coordinate {
     /// Split a package name into a coordinate, or `None` for a bare project name.
-    pub fn parse(name: &PackageName) -> Option<Self> {
+    pub(crate) fn parse(name: &PackageName) -> Option<Self> {
         let (group, artifact) = name.maven_parts()?;
         Some(Self {
             group: group.to_owned(),
@@ -80,7 +80,7 @@ impl Coordinate {
     }
 
     /// The package name this coordinate is addressed by.
-    pub fn package_name(&self) -> PackageName {
+    pub(crate) fn package_name(&self) -> PackageName {
         PackageName::new(format!("{}:{}", self.group, self.artifact))
             .expect("a parsed coordinate is a valid package name")
     }
@@ -101,7 +101,7 @@ impl Coordinate {
     }
 
     /// The URL of this coordinate's main artifact in a repository rooted at `base`.
-    pub fn artifact_url(&self, base: &str, version: &Version, extension: &str) -> String {
+    pub(crate) fn artifact_url(&self, base: &str, version: &Version, extension: &str) -> String {
         format!(
             "{}/{}/{}",
             base.trim_end_matches('/'),
@@ -383,7 +383,7 @@ impl Xml {
 }
 
 /// A resolver provider over one or more Maven registries.
-pub struct MavenProvider<'f, F: Fetcher> {
+pub(crate) struct MavenProvider<'f, F: Fetcher> {
     fetcher: &'f F,
     registries: BTreeMap<String, String>,
     metadata: BTreeMap<(Coordinate, RegistryId), Vec<Version>>,
@@ -393,7 +393,7 @@ pub struct MavenProvider<'f, F: Fetcher> {
 
 impl<'f, F: Fetcher> MavenProvider<'f, F> {
     /// A provider over `registries` (name → base URL); `maven-central` is added when absent.
-    pub fn new(fetcher: &'f F, registries: BTreeMap<String, String>) -> Self {
+    pub(crate) fn new(fetcher: &'f F, registries: BTreeMap<String, String>) -> Self {
         let mut registries = registries;
         registries
             .entry(RegistryId::MAVEN_CENTRAL.to_owned())
@@ -405,11 +405,6 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
             poms: BTreeMap::new(),
             effective: BTreeMap::new(),
         }
-    }
-
-    /// The declared registry URLs.
-    pub const fn registries(&self) -> &BTreeMap<String, String> {
-        &self.registries
     }
 
     fn base_url<'s>(&'s self, registry: &RegistryId) -> Result<&'s str, String> {
