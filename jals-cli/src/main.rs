@@ -64,6 +64,8 @@ enum Commands {
     Test(TestArgs),
     /// Remove a project's `classes-dir` and reserved build-script outputs.
     Clean(CleanArgs),
+    /// Re-resolve registry dependencies and rewrite `jals.lock`.
+    Update(UpdateArgs),
     /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
     Init(InitArgs),
 }
@@ -115,6 +117,10 @@ struct LintArgs {
     /// manifest's `default` list.
     #[command(flatten)]
     features: FeatureArgs,
+
+    /// Lockfile policy for dependency resolution.
+    #[command(flatten)]
+    lock: LockArgs,
 }
 
 #[derive(Args)]
@@ -152,6 +158,45 @@ impl FeatureArgs {
         manifest
             .resolve_build_features(&self.features, self.all_features, self.no_default_features)
             .map_err(|e| anyhow!("{e}"))
+    }
+}
+
+/// Lockfile policy, shared by the commands that resolve dependencies.
+///
+/// `--locked` refuses to change `jals.lock`; `--frozen` additionally refuses the network, so a
+/// build that can only succeed by re-resolving fails instead of quietly rewriting the lock.
+#[derive(Args, Clone, Copy, Default)]
+struct LockArgs {
+    /// Fail if `jals.lock` would need to change.
+    #[arg(long)]
+    locked: bool,
+    /// Equivalent to `--locked --offline`.
+    #[arg(long)]
+    frozen: bool,
+}
+
+impl LockArgs {
+    const fn policy(self) -> LockPolicy {
+        LockPolicy {
+            locked: self.locked || self.frozen,
+            frozen: self.frozen,
+        }
+    }
+}
+
+/// What a command is allowed to do with `jals.lock`.
+#[derive(Clone, Copy)]
+struct LockPolicy {
+    /// A resolution that would change the lock is an error.
+    locked: bool,
+    /// The lock may not change and no network locator may be fetched.
+    frozen: bool,
+}
+
+impl LockPolicy {
+    /// Whether a fetch may reach the network under this policy.
+    const fn offline(self, requested: bool) -> bool {
+        requested || self.frozen
     }
 }
 
@@ -258,6 +303,10 @@ struct BuildArgs {
 
     #[command(flatten)]
     features: FeatureArgs,
+
+    /// Lockfile policy for dependency resolution.
+    #[command(flatten)]
+    lock: LockArgs,
 }
 
 #[derive(Args)]
@@ -297,6 +346,10 @@ struct RunArgs {
 
     #[command(flatten)]
     features: FeatureArgs,
+
+    /// Lockfile policy for dependency resolution.
+    #[command(flatten)]
+    lock: LockArgs,
 }
 
 /// `jals test`, with `cargo nextest run` as the model for both the flags and the output.
@@ -390,6 +443,10 @@ struct TestArgs {
     network_retry: u32,
     #[command(flatten)]
     features: FeatureArgs,
+
+    /// Lockfile policy for dependency resolution.
+    #[command(flatten)]
+    lock: LockArgs,
 }
 
 /// The `--run-ignored` spelling, mapped onto `jals-build`'s own value.
@@ -424,6 +481,78 @@ struct CleanArgs {
     dry_run: bool,
 }
 
+/// `jals update`: ignore the lock's pins, resolve every registry entry afresh, and write the
+/// result.
+///
+/// Cargo's `cargo update`. There is no per-package selection yet: the whole lock moves together,
+/// which is also what makes the command safe to run at any time.
+#[derive(Args)]
+struct UpdateArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Resolve only from what is already cached; never fetch.
+    #[arg(long)]
+    offline: bool,
+    /// Extra attempts a transient network failure is given before the fetch fails.
+    #[arg(long, value_name = "N", default_value_t = jals_classpath::RetrySchedule::DEFAULT_RETRIES)]
+    network_retry: u32,
+}
+
+impl UpdateArgs {
+    /// Re-resolve the project's registry dependencies without lock preference and write
+    /// `jals.lock`.
+    ///
+    /// The lock is generated from the all-active pass (see `LockMode::Generate`), so it does not
+    /// depend on a feature selection. A project with no registry dependency has no lock to write
+    /// and says so.
+    async fn run(&self, session: &Session) -> Result<ExitCode> {
+        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        session.note_project(&root, manifest.package.name.as_deref());
+        let features = manifest
+            .resolve_build_features(&[], false, false)
+            .map_err(|error| anyhow!("{error}"))?;
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(
+            root.clone(),
+            jals_classpath::NetworkPolicy::when_offline(self.offline),
+            jals_classpath::RetrySchedule::new(self.network_retry),
+        );
+        let graphs = jals_classpath::RegistryResolver::resolve(
+            &manifest,
+            DependencyScope::Test,
+            &features,
+            &fetcher,
+            // No lock preference: that is the whole point of the command.
+            None,
+            jals_classpath::LockMode::Generate,
+        )
+        .await
+        .map_err(|error| anyhow!("registry dependencies could not be resolved: {error}"))?;
+        if graphs.packages.is_empty() {
+            session
+                .shell()
+                .status(Verb::Resolving, "no registry dependencies; nothing to lock");
+            return Ok(ExitCode::SUCCESS);
+        }
+        let Some(lock) = graphs.lock else {
+            session
+                .shell()
+                .status(Verb::Resolving, "no registry dependencies; nothing to lock");
+            return Ok(ExitCode::SUCCESS);
+        };
+        let text = lock.render();
+        std::fs::write(root.join("jals.lock"), &text).map_err(|error| {
+            anyhow!("cannot write {}: {error}", root.join("jals.lock").display())
+        })?;
+        session.shell().status(
+            Verb::Resolving,
+            format_args!("{} dependencies locked", graphs.packages.len()),
+        );
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
 #[derive(Args)]
 struct InitArgs {
     /// Directory to initialize. Created if it does not exist. Defaults to the current directory.
@@ -454,6 +583,7 @@ fn main() -> ExitCode {
             Commands::Run(args) => args.run(&session).await,
             Commands::Test(args) => args.run(&session).await,
             Commands::Clean(args) => args.run(&session).await,
+            Commands::Update(args) => args.run(&session).await,
             Commands::Init(args) => args.run(&session).await,
         };
         session.finish_display();
@@ -759,7 +889,8 @@ impl LintArgs {
         let anchor = named
             .first()
             .map_or_else(|| PathBuf::from("."), |file| file.config_dir.clone());
-        let mut project = LintProject::open(&anchor, exec, &self.features, session).await?;
+        let mut project =
+            LintProject::open(&anchor, exec, &self.features, self.lock, session).await?;
 
         // Reported ⊆ indexed. The workspace indexes the source-root walk ∪ `project_sources`,
         // because diagnostics assembly reports every type name that resolves to nothing and a
@@ -954,7 +1085,7 @@ impl BuildArgs {
         // can fetch is handed the same answer instead of being told it separately.
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
-            jals_classpath::NetworkPolicy::when_offline(self.offline),
+            jals_classpath::NetworkPolicy::when_offline(self.lock.policy().offline(self.offline)),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
         let (sources, tree, inputs, _) = App::prepare_compile_inputs(
@@ -968,6 +1099,7 @@ impl BuildArgs {
                 jals_project::SourcePublication::Apply
             },
             Lowering::Build,
+            self.lock.policy(),
             session,
         )
         .await?;
@@ -1119,7 +1251,7 @@ impl RunArgs {
         // One fetch capability for the whole command; see `BuildArgs::run`.
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
-            jals_classpath::NetworkPolicy::when_offline(self.offline),
+            jals_classpath::NetworkPolicy::when_offline(self.lock.policy().offline(self.offline)),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
         let (sources, tree, inputs, _) = App::prepare_compile_inputs(
@@ -1133,6 +1265,7 @@ impl RunArgs {
                 jals_project::SourcePublication::Apply
             },
             Lowering::Build,
+            self.lock.policy(),
             session,
         )
         .await?;
@@ -1393,7 +1526,7 @@ impl TestArgs {
         let reporter = self.reporter(0, session);
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
-            jals_classpath::NetworkPolicy::when_offline(self.offline),
+            jals_classpath::NetworkPolicy::when_offline(self.lock.policy().offline(self.offline)),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
         let (sources, tree, inputs, discovered_tests) = App::prepare_compile_inputs(
@@ -1403,6 +1536,7 @@ impl TestArgs {
             &fetcher,
             jals_project::SourcePublication::Apply,
             lowering,
+            self.lock.policy(),
             session,
         )
         .await?;
@@ -1973,6 +2107,7 @@ impl LintProject {
         start_dir: &Path,
         exec: &Exec,
         selection: &FeatureArgs,
+        lock: LockArgs,
         session: &Session,
     ) -> Result<Self> {
         let shell = session.shell();
@@ -2053,6 +2188,7 @@ impl LintProject {
                 // Nothing to retry: the refusal comes before an attempt is made.
                 jals_classpath::RetrySchedule::none(),
             ),
+            lock.policy(),
             session,
         )
         .await
@@ -2606,6 +2742,7 @@ impl App {
         script: RootScript,
         scripts: &RootScriptInputs<'_>,
         fetcher: &jals_classpath::ReqwestFetcher,
+        policy: LockPolicy,
         session: &Session,
     ) -> Result<HostProjectInputs> {
         let shell = session.shell();
@@ -2637,7 +2774,7 @@ impl App {
                 Some(&mut registry),
             )
             .await;
-        Self::write_registry_lock(root, &registry, shell)?;
+        Self::apply_registry_lock(root, &registry, policy, shell)?;
         let assembly = resolved.map_err(|failure| {
             // Discovery had already found something worth saying about this project before a
             // later phase failed, and it is usually the half that explains the other: the
@@ -2768,13 +2905,14 @@ impl App {
         }
     }
 
-    /// Write the resolved lock back when it changed.
+    /// Apply the resolved lock under the command's policy.
     ///
-    /// The comparison is by rendered bytes, so a run that changed nothing leaves the file's
-    /// timestamp alone.
-    fn write_registry_lock(
+    /// A policy that locks the file refuses any change; otherwise the file is written only when
+    /// the rendered bytes differ, so a run that changed nothing leaves its timestamp alone.
+    fn apply_registry_lock(
         root: &Path,
         registry: &jals_classpath::RegistryResolution,
+        policy: LockPolicy,
         shell: &Shell,
     ) -> Result<()> {
         let Some(text) = registry.resolved_text() else {
@@ -2783,6 +2921,17 @@ impl App {
         let path = root.join("jals.lock");
         if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
             return Ok(());
+        }
+        if policy.locked {
+            bail!(
+                "{} needs to be updated, but the command was run with {}",
+                path.display(),
+                if policy.frozen {
+                    "--frozen"
+                } else {
+                    "--locked"
+                }
+            );
         }
         std::fs::write(&path, &text)
             .map_err(|error| anyhow!("cannot write {}: {error}", path.display()))?;
@@ -2794,6 +2943,9 @@ impl App {
     }
 
     /// Prepare the root and transitive compile inputs shared by `build` and `run`.
+    // As `project_inputs`: every parameter is a distinct input — the project, the selection, the
+    // fetch capability, the publication policy, the lowering, the lock policy, and the reporter.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_compile_inputs(
         manifest: &mut Manifest,
         root: &Path,
@@ -2801,6 +2953,7 @@ impl App {
         fetcher: &jals_classpath::ReqwestFetcher,
         publications: jals_project::SourcePublication,
         lowering: Lowering,
+        policy: LockPolicy,
         session: &Session,
     ) -> Result<(
         jals_build::StagedTree,
@@ -2846,6 +2999,7 @@ impl App {
                 features,
             },
             fetcher,
+            policy,
             session,
         )
         .await?;

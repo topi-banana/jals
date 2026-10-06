@@ -54,7 +54,10 @@ pub use mapping_text::MappingText;
 #[cfg(feature = "native")]
 pub use maven::{Coordinate, MavenProvider};
 #[cfg(feature = "native")]
-pub use native::{NativeProjectPlan, RegistryResolution, ReqwestFetcher};
+pub use native::{
+    LockMode, NativeProjectPlan, RegistryGraphs, RegistryResolution, RegistryResolver,
+    ReqwestFetcher,
+};
 #[cfg(feature = "archive")]
 pub use project::{
     MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile,

@@ -335,10 +335,14 @@ Landed (each commit is green on its own):
    path, and `jals-cli` reads/writes `jals.lock` (only when the rendered bytes changed). The
    language server resolves without persisting. Registry entries are deliberately not graph
    nodes; `root_only` keeps them for the classpath phase.
-6. **Feature/version cache audit** — the frontend key already folds dialect flags and (when
+6. **Lock lifecycle** — `--locked`/`--frozen` refuse a lock rewrite, `jals update` re-resolves
+   ignoring the pins, and the lock is feature-independent: `LockMode::Generate` runs a second
+   resolution pass with every optional and dev registry entry forced active, so toggling
+   `--features` never churns the file.
+7. **Feature/version cache audit** — the frontend key already folds dialect flags and (when
    `attributes` is on) build features; the backend key folds the classpath digest, and jars are
    content-addressed, so a lock/version/feature change moves every dependent key. `BackendOutput`
    memoization is still unimplemented (pre-existing `hawk` override).
 
-Remaining phases: `[workspace]` members/inheritance/`-p`; `--locked`/`--frozen`,
-`jals update`/`fetch`/`tree`; `target/jals/deps` view; POM exclusions and checksum sidecars.
+Remaining phases: `[workspace]` members/inheritance/`-p`; `jals fetch`/`tree`; the
+`target/jals/deps` view; POM exclusions, classifiers, and checksum sidecars.

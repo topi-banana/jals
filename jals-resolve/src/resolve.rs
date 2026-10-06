@@ -540,7 +540,13 @@ impl<'a, P: Provider> Pass<'a, P> {
                 .summary
                 .dependencies
                 .iter()
-                .filter(|dependency| dependency.kind == DependencyKind::Normal || root.include_dev)
+                // Optional entries wait for feature expansion: `expand_features` activates them
+                // through `dep:`/implicit features and enqueues them then. Seeding them here
+                // would resolve an entry no selection turned on.
+                .filter(|dependency| {
+                    (dependency.kind == DependencyKind::Normal || root.include_dev)
+                        && !dependency.optional
+                })
                 .cloned()
                 .collect();
             for dependency in deps {
@@ -1362,6 +1368,35 @@ mod tests {
         let a = graph.package(&pkg("a")).unwrap();
         assert!(a.activated.contains("b"));
         assert!(a.features.contains("on"));
+    }
+
+    #[test]
+    fn an_optional_root_dependency_needs_activation_too() {
+        let unactivated = || {
+            let mut request = request("b", "1");
+            request.optional = true;
+            request
+        };
+        let root_summary = || {
+            featured(
+                "app",
+                "0.0.0",
+                vec![unactivated()],
+                &[("on", vec![FeatureValue::Dependency(pkg("b"))])],
+            )
+        };
+        let b = summary("b", "1.0.0", vec![]);
+
+        let mut provider = MemoryProvider::new(vec![root_summary(), b.clone()]);
+        let roots = [root(root_summary())];
+        let graph = run(&mut provider, &roots);
+        assert!(graph.package(&pkg("b")).is_none());
+
+        let mut provider = MemoryProvider::new(vec![root_summary(), b]);
+        let mut selection = root(root_summary());
+        selection.features.insert("on".to_owned());
+        let graph = run(&mut provider, &[selection]);
+        assert!(graph.package(&pkg("b")).is_some());
     }
 
     #[test]

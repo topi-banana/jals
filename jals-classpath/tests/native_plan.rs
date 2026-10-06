@@ -610,3 +610,75 @@ url = "https://repo.test/maven2"
         "{seen:?}"
     );
 }
+
+#[test]
+fn the_lock_covers_optional_and_dev_entries_the_selection_skips() {
+    const BASE: &str = "https://repo.test/maven2";
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+lib = { group = "com.example", version = "1", registry = "test" }
+opt = { group = "com.example", version = "3.0.0", registry = "test", optional = true }
+
+[dev-dependencies]
+dev = { group = "com.example", version = "4.0.0", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/maven-metadata.xml"),
+        br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+    );
+    for (artifact, version) in [("lib", "1.0.0"), ("opt", "3.0.0"), ("dev", "4.0.0")] {
+        fetcher.add(
+            &format!("{BASE}/com/example/{artifact}/{version}/{artifact}-{version}.pom"),
+            format!(
+                "<project><groupId>com.example</groupId><artifactId>{artifact}</artifactId><version>{version}</version></project>"
+            )
+            .as_bytes(),
+        );
+    }
+    let features = features(&manifest);
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve(
+            &manifest,
+            DependencyScope::Build,
+            &features,
+            &fetcher,
+            None,
+            jals_classpath::LockMode::Generate,
+        )
+        .await
+        .unwrap()
+    })
+    .unwrap();
+
+    // The classpath selection skips the unactivated optional entry and the dev table.
+    let specs: Vec<String> = graphs
+        .specs
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    assert_eq!(specs, vec!["com.example-lib"]);
+
+    // The lock covers every declared registry entry regardless of the selection.
+    let names: Vec<String> = graphs
+        .lock
+        .as_ref()
+        .unwrap()
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "com.example:dev 4.0.0",
+            "com.example:lib 1.0.0",
+            "com.example:opt 3.0.0",
+        ]
+    );
+}
