@@ -890,6 +890,8 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
                 ),
                 ProjectInputOptions::Compile,
                 &jals_progress::Progress::SILENT,
+                DependencyScope::Build,
+                &ResolvedBuildFeatures::default(),
                 None,
             )
             .await;
@@ -1247,6 +1249,8 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &UnreachableFetcher,
                 ProjectInputOptions::Analysis,
                 &jals_progress::Progress::SILENT,
+                DependencyScope::Build,
+                &ResolvedBuildFeatures::default(),
                 None,
             )
             .await;
@@ -1268,6 +1272,8 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &UnreachableFetcher,
                 ProjectInputOptions::Editor,
                 &jals_progress::Progress::SILENT,
+                DependencyScope::Build,
+                &ResolvedBuildFeatures::default(),
                 None,
             )
             .await;
@@ -1355,6 +1361,85 @@ fn resolve_native_runs_the_whole_graph_phase_in_one_call() {
         // reads. The `lib/Box.class` entry above is on the same compile classpath and is not here:
         // a hierarchy entry is unpacked as an archive, and bare class bytes would fail that.
         assert_eq!(assembly.task_classpath, [task_key]);
+    })
+    .unwrap();
+}
+
+/// A registry dependency's activation comes from the root's own selection. Registry entries are
+/// skipped by the graph walk, so `project_native` must lower them under the same `scope`/`features`
+/// the walk resolved: a hardcoded build scope and an empty feature set would drop an optional entry
+/// the root's `default` feature activates (and every dev entry a test run declares).
+#[test]
+fn resolve_native_lowers_registry_dependencies_under_the_roots_selection() {
+    const BASE: &str = "https://repo.test/maven2";
+
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "src/main/java/Root.java", "class Root {}\n");
+        let root = manifest(
+            "[registries.test]\nurl = \"https://repo.test/maven2\"\n\
+             [dependencies]\n\
+             opt = { group = \"com.example\", version = \"1\", registry = \"test\", optional = true }\n\
+             [features]\ndefault = [\"opt\"]\n",
+        );
+        let features = root.resolve_build_features(&[], false, false).unwrap();
+        let mut root_storage = storage(project.path(), &exec).await;
+
+        let metadata = format!("{BASE}/com/example/opt/maven-metadata.xml");
+        let pom = format!("{BASE}/com/example/opt/1.0.0/opt-1.0.0.pom");
+        let jar = format!("{BASE}/com/example/opt/1.0.0/opt-1.0.0.jar");
+        let files: [(&str, &[u8]); 3] = [
+            (
+                metadata.as_str(),
+                br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+            ),
+            (
+                pom.as_str(),
+                br"<project><groupId>com.example</groupId><artifactId>opt</artifactId><version>1.0.0</version></project>",
+            ),
+            (jar.as_str(), b"opt-bytes"),
+        ];
+        let fetcher = CountingFetcher::new(&files);
+        let mut registry = jals_classpath::RegistryResolution::default();
+        let assembly = ProjectScript::skipped()
+            .resolve_native(
+                &root,
+                project.path(),
+                &mut root_storage,
+                GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
+                    exec: &Exec::inline(),
+                    fetcher: &fetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &features,
+                    limits: &BuildScriptLimits::default(),
+                },
+                DependencyScope::Build,
+                ProjectInputOptions::Compile,
+                Some(&mut registry),
+            )
+            .await
+            .unwrap();
+
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+        // The optional entry `default` activates reached the lock...
+        let lock = registry
+            .resolved_lock
+            .expect("the registry resolution produced a lock");
+        assert!(
+            lock.packages
+                .iter()
+                .any(|package| package.id.name.as_str() == "com.example:opt"),
+            "{:?}",
+            lock.packages
+        );
+        // ...and the same resolution put its jar on the classpath.
+        assert_eq!(
+            assembly.inputs.dependency_jars.len(),
+            1,
+            "fetched: {:?}",
+            fetcher.calls()
+        );
     })
     .unwrap();
 }
