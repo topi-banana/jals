@@ -553,8 +553,21 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
                     ))
                     .await
                     {
-                        for (managed_key, managed) in imported.managed {
-                            effective.managed.entry(managed_key).or_insert(managed);
+                        // Maven resolves an imported BOM's dependency management in the BOM's own
+                        // model: a managed version the BOM writes as one of *its* properties
+                        // (`${netty.version}`) must be interpolated here, because the importing
+                        // POM has no such property and would drop the entry as unresolvable. The
+                        // key is derived after interpolation for the same reason: it is the
+                        // resolved coordinate the importer looks up.
+                        let EffectivePom {
+                            properties,
+                            managed,
+                            ..
+                        } = imported;
+                        for (_, entry) in managed {
+                            let entry = Self::interpolated(entry, &properties);
+                            let Some(key) = entry.key() else { continue };
+                            effective.managed.entry(key).or_insert(entry);
                         }
                     }
                     continue;
@@ -584,6 +597,28 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
             group: group.to_owned(),
             artifact: artifact.to_owned(),
         })
+    }
+
+    /// Interpolate a dependency's coordinates and version with `properties`.
+    ///
+    /// Used for imported `dependencyManagement`: the entry belongs to the imported POM's model, so
+    /// its `${...}` references are that model's to resolve, and the key it is stored under must be
+    /// the resolved coordinate the importer looks up.
+    fn interpolated(
+        mut entry: PomDependency,
+        properties: &BTreeMap<String, String>,
+    ) -> PomDependency {
+        for value in [
+            &mut entry.group_id,
+            &mut entry.artifact_id,
+            &mut entry.version,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *value = Self::interpolate(value, properties);
+        }
+        entry
     }
 
     /// Interpolate `${...}` references to a bounded fixpoint; an unresolved reference is left
@@ -1235,6 +1270,48 @@ mod tests {
         );
         let summary = jals_exec::block_on_inline(provider.summary(&id)).unwrap();
         assert_eq!(summary.dependencies.len(), 1);
+        assert_eq!(summary.dependencies[0].version.as_str(), "=5.0.0");
+    }
+
+    #[test]
+    fn a_bom_import_resolves_the_boms_own_properties() {
+        let mut fetcher = MapFetcher::new();
+        fetcher.add(
+            "com/example/platform/1.0.0/platform-1.0.0.pom",
+            r"<project>
+                 <groupId>com.example</groupId><artifactId>platform</artifactId><version>1.0.0</version>
+                 <packaging>pom</packaging>
+                 <properties><platform-lib.version>5.0.0</platform-lib.version></properties>
+                 <dependencyManagement><dependencies>
+                   <dependency><groupId>com.example</groupId><artifactId>platform-lib</artifactId><version>${platform-lib.version}</version></dependency>
+                 </dependencies></dependencyManagement>
+               </project>",
+        );
+        fetcher.add(
+            "com/example/app/1.0.0/app-1.0.0.pom",
+            r"<project>
+                 <groupId>com.example</groupId><artifactId>app</artifactId><version>1.0.0</version>
+                 <dependencyManagement><dependencies>
+                   <dependency><groupId>com.example</groupId><artifactId>platform</artifactId><version>1.0.0</version><type>pom</type><scope>import</scope></dependency>
+                 </dependencies></dependencyManagement>
+                 <dependencies>
+                   <dependency><groupId>com.example</groupId><artifactId>platform-lib</artifactId></dependency>
+                 </dependencies>
+               </project>",
+        );
+        let mut provider = provider(&fetcher);
+        let id = PackageId::new(
+            PackageName::new("com.example:app").unwrap(),
+            Version::parse("1.0.0").unwrap(),
+            SourceId::Registry(registry()),
+        );
+        let summary = jals_exec::block_on_inline(provider.summary(&id)).unwrap();
+        assert_eq!(
+            summary.dependencies.len(),
+            1,
+            "the BOM's property resolves its managed version: {:?}",
+            summary.dependencies
+        );
         assert_eq!(summary.dependencies[0].version.as_str(), "=5.0.0");
     }
 
