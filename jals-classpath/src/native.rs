@@ -204,11 +204,13 @@ impl RegistryResolver {
     }
 
     /// Whether the lock pass differs from the selected pass: an optional registry entry the
-    /// selection may not activate, or a dev entry a build-scope selection excludes.
+    /// selection may not activate (in either table), or a dev entry a build-scope selection
+    /// excludes.
     fn needs_full_pass(manifest: &Manifest, scope: DependencyScope) -> bool {
         let optional = manifest
             .dependencies
             .values()
+            .chain(manifest.dev_dependencies.values())
             .any(|entry| entry.registry_version().is_some() && entry.is_optional());
         let dev = manifest
             .dev_dependencies
@@ -722,9 +724,6 @@ impl NativeProjectPlan {
         fetcher: &F,
         registry: Option<&mut RegistryResolution>,
     ) -> Option<Vec<DependencySpec>> {
-        if self.registry_dependencies.is_empty() {
-            return None;
-        }
         // A host without lock persistence (the language server) still gets resolution; it just
         // has nowhere to store the outcome, and no full-lock pass to pay for. A host that already
         // resolved the workspace lock (`generate_lock == false`) pins against it without
@@ -732,13 +731,24 @@ impl NativeProjectPlan {
         let host_has_lock = registry.is_some();
         let mut scratch = RegistryResolution::default();
         let registry = registry.map_or(&mut scratch, |registry| registry);
+        let generate_lock = host_has_lock && registry.generate_lock;
+        // A selection with no active registry entry can still have work: `needs_full_pass` exists
+        // because the lock must cover the optional and dev entries a selection skips, and the
+        // full pass is the only place they resolve. Only a lock-generating host is asked to pay
+        // for that, so a classpath-only pass (the language server, a workspace member) still
+        // returns early when the selection itself is empty.
+        if self.registry_dependencies.is_empty()
+            && !(generate_lock && RegistryResolver::needs_full_pass(manifest, scope))
+        {
+            return None;
+        }
         let graphs = match RegistryResolver::resolve(
             manifest,
             scope,
             features,
             fetcher,
             registry.lock.as_ref(),
-            if host_has_lock && registry.generate_lock {
+            if generate_lock {
                 LockMode::Generate
             } else {
                 LockMode::Skip
@@ -767,9 +777,10 @@ impl NativeProjectPlan {
     /// declares into the portable plan.
     ///
     /// `scope` is the host's, never inferred: the two callers ask different questions. The
-    /// projection path hands over a manifest whose dependency tables `ProjectScript::root_only`
-    /// already emptied — every declared entry is a graph node there — so only `jals lint`'s
-    /// graph-less fallback reaches this with entries still in place.
+    /// projection path hands over a manifest whose non-registry tables `ProjectScript::root_only`
+    /// already emptied — every such entry is a graph node there — so the registry entries it kept
+    /// are lowered under the caller's own selection, and only `jals lint`'s graph-less fallback
+    /// reaches this with the other forms still in place.
     pub fn from_manifest(
         manifest: &Manifest,
         scope: DependencyScope,

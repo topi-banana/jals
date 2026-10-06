@@ -684,6 +684,76 @@ dev = { group = "com.example", version = "4.0.0", registry = "test" }
 }
 
 #[test]
+fn a_dev_only_manifest_still_generates_the_lock() {
+    // `[dev-dependencies]` under a build scope leaves the selected classpath with no registry
+    // entry at all. The lock is still supposed to cover the dev table, and the gate in
+    // `resolve_registry` used to return before the full pass that does it, so no `jals.lock` was
+    // ever written for a project whose only registry dependency is a dev one.
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dev-dependencies]
+dev = { group = "com.example", version = "4.0.0", registry = "test" }
+"#,
+    );
+    // No version index: the pinned requirement resolves to its base, and the POM is what the
+    // summary needs.
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/dev/4.0.0/dev-4.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>dev</artifactId><version>4.0.0</version></project>",
+    );
+    let fetcher_ref = &fetcher;
+    let (inputs, registry) = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                Some(&mut registry),
+            )
+            .await;
+            (inputs, registry)
+        }
+    })
+    .unwrap();
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    // Nothing is on the build classpath: the only entry is a dev one...
+    assert!(
+        inputs.dependency_jars.is_empty(),
+        "the build classpath holds only the dev entry: {:?}",
+        inputs.dependency_jars.len()
+    );
+    // ...but the full pass resolved it, so a lock-generating host has a file to write.
+    let lock = registry
+        .resolved_lock
+        .expect("the full pass generates the lock for the dev entry");
+    let names: Vec<String> = lock
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(names, vec!["com.example:dev 4.0.0"]);
+}
+
+#[test]
 fn workspace_members_share_one_lock_and_one_transitive_package() {
     const BASE: &str = "https://repo.test/maven2";
     let member_a: Manifest = "[package]\nname = \"a\"\n\n[registries.test]\nurl = \"https://repo.test/maven2\"\n\n[dependencies]\nlib = { group = \"com.example\", version = \"1\", registry = \"test\" }\n"
