@@ -118,7 +118,9 @@ pub enum LockMode {
 pub struct RegistryGraphs {
     /// External dependency specs for the selected classpath, in resolver order.
     pub specs: Vec<DependencySpec>,
-    /// The feature-independent lock, when one was generated.
+    /// The feature-independent lock, when one was generated *and* carries at least one package.
+    /// An empty lock is not a lock: a project with no registry dependency has nothing to pin, and
+    /// writing `version = 1` alone would make `--locked` demand a file nothing resolves against.
     pub lock: Option<Lockfile>,
     /// Names in the lock (or the selected graph when no lock was generated), id-sorted.
     pub packages: Vec<PackageName>,
@@ -176,6 +178,10 @@ impl RegistryResolver {
         } else {
             None
         };
+        // An empty lock is not a lock. `RegistryGraphs::lock` gates a host's write, so a manifest
+        // with no registry package must hand back `None` rather than `version = 1` alone: a
+        // `--locked` build of such a project must not demand a file nothing resolves against.
+        let lockfile = lockfile.filter(|lock| !lock.packages.is_empty());
         let specs = Self::specs(&selected, &registries);
         let packages = match &lockfile {
             Some(lock) => lock
@@ -245,14 +251,17 @@ impl RegistryResolver {
             .resolve(&roots, lock)
             .await
             .map_err(|error| error.to_string())?;
+        let packages: Vec<PackageName> = graph
+            .packages
+            .iter()
+            .map(|package| package.id.name.clone())
+            .collect();
         Ok(RegistryGraphs {
             specs: Vec::new(),
-            lock: Some(graph.lockfile()),
-            packages: graph
-                .packages
-                .iter()
-                .map(|package| package.id.name.clone())
-                .collect(),
+            // An empty lock is not a lock, exactly as in `resolve`: a workspace with no registry
+            // package must not make its host write `version = 1` (nor fail `--locked` against it).
+            lock: (!packages.is_empty()).then(|| graph.lockfile()),
+            packages,
             warnings: graph.warnings.iter().map(ToString::to_string).collect(),
         })
     }

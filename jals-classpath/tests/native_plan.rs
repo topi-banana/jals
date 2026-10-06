@@ -734,3 +734,24 @@ fn workspace_members_share_one_lock_and_one_transitive_package() {
         "`shared` is reached from both members and is one package"
     );
 }
+
+#[test]
+fn a_workspace_without_registry_dependencies_produces_no_lock() {
+    // The CLI writes a lock whenever `RegistryGraphs::lock` is `Some`, and fails `--locked` on a
+    // byte mismatch. An empty lock here would write `version = 1` on every first build and then
+    // make `--locked` demand that file; a workspace with nothing to resolve must hand back `None`.
+    let member_a: Manifest = "[package]\nname = \"a\"\n".parse().unwrap();
+    let member_b: Manifest = "[package]\nname = \"b\"\n".parse().unwrap();
+    let fetcher = MapFetcher::new();
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve_workspace(&[&member_a, &member_b], &fetcher, None)
+            .await
+            .unwrap()
+    })
+    .unwrap();
+    assert!(
+        graphs.lock.is_none(),
+        "an empty lock is not a lock: {:?}",
+        graphs.packages
+    );
+}
