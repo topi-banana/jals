@@ -151,6 +151,13 @@ pub struct Manifest {
     /// `maven-central` is implicit and may be declared to point at a mirror; any other name a
     /// dependency references must be declared here, which validation enforces.
     pub registries: BTreeMap<String, Registry>,
+    /// Workspace settings (`[workspace]`), present on a workspace root manifest only.
+    ///
+    /// A root manifest may be *virtual* (no `[package]`) or an ordinary package that members
+    /// share. [`Workspace::members`] are the patterns the host expands to member directories; a
+    /// member's own manifest never carries this table — discovery walks upward to find the root,
+    /// so a nested `[workspace]` starts a nested workspace rather than extending one.
+    pub workspace: Option<Workspace>,
     /// `[test]`: where a test run's extra sources live and where its classes go.
     pub test: Test,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
@@ -287,6 +294,73 @@ pub struct RegistryDependency {
 pub struct Registry {
     /// The repository base URL, e.g. `https://repo1.maven.org/maven2`.
     pub url: String,
+}
+
+/// `[workspace]`: the member patterns a root manifest shares with its subprojects.
+///
+/// The **root** is the manifest carrying this table. Discovery walks upward from a project's
+/// manifest until it finds one, so a member never restates the workspace; `members` are patterns
+/// relative to the root (`"app"`, `"libs/*"`), `exclude` removes matched directories, and
+/// `default-members` must name a subset of what `members` discovers (the host validates that
+/// against the filesystem, which this pure type cannot see).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Workspace {
+    /// Member directories, as resource-style globs relative to the workspace root (`*` within one
+    /// segment, `**` across segments). `"."` names the root itself, which is a member exactly
+    /// when the root manifest has a `[package]`.
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// Member directories the patterns must not include.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// The members a command with no explicit selection targets. Must match at least one member,
+    /// which only the host can decide.
+    #[serde(default)]
+    pub default_members: Vec<String>,
+}
+
+impl Workspace {
+    /// Whether this workspace declares anything at all. An empty `[workspace]` is a mistake, not
+    /// a root with no members: it would capture every upward walk and resolve nothing.
+    pub const fn is_empty(&self) -> bool {
+        self.members.is_empty() && self.exclude.is_empty() && self.default_members.is_empty()
+    }
+
+    /// Validate every pattern as a resource-style glob, and reject an empty entry.
+    fn validate(&self) -> Result<(), ValidationError> {
+        for (key, patterns) in [
+            ("members", &self.members),
+            ("exclude", &self.exclude),
+            ("default-members", &self.default_members),
+        ] {
+            for pattern in patterns {
+                if pattern.is_empty() {
+                    return Err(ValidationError::InvalidWorkspacePattern {
+                        key,
+                        pattern: pattern.clone(),
+                        reason: None,
+                    });
+                }
+                // `"."` names the root; the resource grammar rejects it as a relative segment,
+                // so it is the one spelling handled before the grammar sees it.
+                if pattern == "." {
+                    continue;
+                }
+                if let Err(error) = ResourcePattern::parse(pattern) {
+                    return Err(ValidationError::InvalidWorkspacePattern {
+                        key,
+                        pattern: pattern.clone(),
+                        reason: Some(error),
+                    });
+                }
+            }
+        }
+        if self.members.is_empty() {
+            return Err(ValidationError::EmptyWorkspace);
+        }
+        Ok(())
+    }
 }
 
 /// The `jar` form of a [`Dependency`]: a compiled `.jar` and its optional companion `sources` jar.
@@ -1938,9 +2012,10 @@ impl fmt::Display for ResourcePatternError {
     }
 }
 
+impl core::error::Error for ResourcePatternError {}
+
 impl ResourcePattern {
-    /// Parse one `[build.resources] template` entry.
-    ///
+    /// Parse one `[build.resources] template` entry.    ///
     /// `*` matches any run of characters within one segment, `?` matches exactly one, and `**` is a
     /// whole segment matching zero or more segments. Character classes and brace expansion are
     /// deliberately absent: the vocabulary is the one a resource layout needs, and every addition
@@ -2794,6 +2869,12 @@ impl Manifest {
             }
         }
 
+        // `[workspace]` patterns are globs this crate can parse; whether they match a directory
+        // is the host's question, answered during discovery.
+        if let Some(workspace) = &self.workspace {
+            workspace.validate()?;
+        }
+
         // `[features]`: every local name a `default`/`enables` list references must itself be a
         // declared feature, and every `<dependency>/<feature>` entry must name a dependency that can
         // actually receive one. The command-line `--features` selection is checked later against the
@@ -3486,6 +3567,17 @@ pub enum ValidationError {
         /// The offending URL.
         url: String,
     },
+    /// A `[workspace]` table declares no member at all.
+    EmptyWorkspace,
+    /// A `[workspace]` pattern is empty or is not a resource-style glob.
+    InvalidWorkspacePattern {
+        /// Which workspace key carried it (`members` / `exclude` / `default-members`).
+        key: &'static str,
+        /// The offending pattern.
+        pattern: String,
+        /// The grammar failure, when the pattern reached the glob parser at all.
+        reason: Option<ResourcePatternError>,
+    },
 }
 
 /// Where a `remap` reference was written, for [`ValidationError::UnknownMapping`]'s message.
@@ -3677,6 +3769,24 @@ impl fmt::Display for ValidationError {
                 "`[registries] {name}` has a URL of `{url}` (expected an `https://` or `http://` \
                  repository base URL)"
             ),
+            Self::EmptyWorkspace => write!(
+                f,
+                "`[workspace]` declares no `members`; a workspace with no member pattern would \
+                 capture every upward walk and resolve nothing"
+            ),
+            Self::InvalidWorkspacePattern {
+                key,
+                pattern,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "`[workspace] {key}` entry `{pattern}` is not a member glob"
+                )?;
+                reason
+                    .as_ref()
+                    .map_or(Ok(()), |reason| write!(f, ": {reason}"))
+            }
         }
     }
 }
@@ -3687,6 +3797,10 @@ impl Error for ValidationError {
             Self::Dependency(err) => Some(err),
             Self::Mapping(err) => Some(err),
             Self::InvalidFeatureRef { reason, .. } => Some(reason),
+            Self::InvalidWorkspacePattern {
+                reason: Some(reason),
+                ..
+            } => Some(reason),
             _ => None,
         }
     }

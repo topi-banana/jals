@@ -442,6 +442,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_member_patterns_are_validated() {
+        let manifest = manifest(
+            r#"
+            [workspace]
+            members = ["app", "libs/*"]
+            exclude = ["libs/legacy"]
+            default-members = ["app"]
+            "#,
+        );
+        let workspace = manifest.workspace.unwrap();
+        assert_eq!(workspace.members, vec!["app", "libs/*"]);
+        assert_eq!(workspace.default_members, vec!["app"]);
+
+        let empty = toml::from_str::<Manifest>("[workspace]\nexclude = [\"target\"]\n")
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(matches!(
+            empty,
+            crate::manifest::ValidationError::EmptyWorkspace
+        ));
+
+        let malformed = toml::from_str::<Manifest>("[workspace]\nmembers = [\"libs/**x\"]\n")
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(matches!(
+            malformed,
+            crate::manifest::ValidationError::InvalidWorkspacePattern { .. }
+        ));
+
+        // `.` is the root spelling and bypasses the resource grammar, which rejects `..`-style
+        // segments.
+        let root_as_member = toml::from_str::<Manifest>("[workspace]\nmembers = [\".\"]\n")
+            .unwrap()
+            .validate();
+        assert!(root_as_member.is_ok());
+    }
+
+    #[test]
     fn registry_entries_lower_to_registry_requests() {
         let manifest = manifest(
             r#"

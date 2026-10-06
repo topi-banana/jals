@@ -95,6 +95,36 @@ fn update_without_registry_dependencies_writes_no_lock() {
     );
 }
 
+#[test]
+fn update_from_a_member_uses_workspace_discovery() {
+    let dir = tempdir().unwrap();
+    // A `default-members` entry that matches nothing is only an error if discovery walked up and
+    // read the root manifest at all, which is exactly what this asserts.
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[workspace]\nmembers = [\"app\"]\ndefault-members = [\"missing\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("app/src/main/java")).unwrap();
+    std::fs::write(
+        dir.path().join("app/jals.toml"),
+        "[package]\nname = \"app\"\n",
+    )
+    .unwrap();
+    let output = jals()
+        .arg("update")
+        .arg("--manifest-path")
+        .arg(dir.path().join("app/jals.toml"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("matches no member"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Build a minimal project tree (`jals.toml` + one source) under a fresh tempdir.
 fn project(manifest: &str) -> tempfile::TempDir {
     let dir = tempdir().unwrap();

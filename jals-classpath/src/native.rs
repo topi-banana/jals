@@ -46,16 +46,32 @@ use crate::{
 /// produced, because writing a file beside the manifest is a host concern (`jals-cli` reads and
 /// writes `jals.lock` next to the project root; the language server passes `None` and drops the
 /// result).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct RegistryResolution {
     /// The previous `jals.lock`, when the host has one. Pins survive resolution.
     pub lock: Option<Lockfile>,
+    /// Whether the classpath pass also generates the lock. A host that already resolved a
+    /// workspace-wide lock (because one file covers every member) clears this, so the
+    /// member-scoped pass pins against the lock without shrinking it.
+    pub generate_lock: bool,
     /// The lock this resolution produced, when at least one registry dependency was resolved.
     pub resolved_lock: Option<Lockfile>,
     /// The external packages that were resolved, id-sorted, for hosts that render a tree.
     pub packages: Vec<PackageName>,
     /// Warnings resolution produced without failing.
     pub warnings: Vec<String>,
+}
+
+impl Default for RegistryResolution {
+    fn default() -> Self {
+        Self {
+            lock: None,
+            generate_lock: true,
+            resolved_lock: None,
+            packages: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
 }
 
 impl RegistryResolution {
@@ -193,6 +209,78 @@ impl RegistryResolver {
             .values()
             .any(|entry| entry.registry_version().is_some());
         optional || (dev && scope != DependencyScope::Test)
+    }
+
+    /// Resolve every workspace member into **one** lock.
+    ///
+    /// Each member is a root, so a transitive package two members share is one package — the
+    /// resolver's one-version-per-name rule makes the workspace's classpaths agree. `specs` is
+    /// empty: a workspace lock says what the members resolve to, and each member's own classpath
+    /// phase then resolves its selection against the written lock.
+    ///
+    /// # Errors
+    /// Two members with one package name, two declarations of one registry name with different
+    /// URLs, a lowering failure, or any resolver failure.
+    pub async fn resolve_workspace<F: Fetcher>(
+        members: &[&Manifest],
+        fetcher: &F,
+        lock: Option<&Lockfile>,
+    ) -> Result<RegistryGraphs, String> {
+        let registries = Self::merged_registries(members)?;
+        let mut provider = MavenProvider::new(fetcher, registries);
+        let defaults = ResolvedBuildFeatures::default();
+        let mut roots = Vec::with_capacity(members.len());
+        let mut names = BTreeSet::new();
+        for manifest in members {
+            let root = Self::root_request(manifest, &defaults, DependencyScope::Test, true)?;
+            let name = root.summary.id.name.to_string();
+            if !names.insert(name.clone()) {
+                return Err(format!(
+                    "two workspace members are named `{name}`; member names must be unique"
+                ));
+            }
+            roots.push(root);
+        }
+        let graph = Resolver::new(&mut provider)
+            .resolve(&roots, lock)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(RegistryGraphs {
+            specs: Vec::new(),
+            lock: Some(graph.lockfile()),
+            packages: graph
+                .packages
+                .iter()
+                .map(|package| package.id.name.clone())
+                .collect(),
+            warnings: graph.warnings.iter().map(ToString::to_string).collect(),
+        })
+    }
+
+    /// Union of every member's `[registries]`, rejecting one name with two URLs.
+    fn merged_registries(members: &[&Manifest]) -> Result<BTreeMap<String, String>, String> {
+        let mut merged: BTreeMap<String, String> = BTreeMap::new();
+        for manifest in members {
+            for (name, registry) in &manifest.registries {
+                match merged.get(name) {
+                    Some(url) if url != &registry.url => {
+                        return Err(format!(
+                            "registry `{name}` is declared with two different URLs (`{url}` and \
+                             `{}`)",
+                            registry.url
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        merged.insert(name.clone(), registry.url.clone());
+                    }
+                }
+            }
+        }
+        merged
+            .entry(RegistryId::MAVEN_CENTRAL.to_owned())
+            .or_insert_with(|| "https://repo1.maven.org/maven2".to_owned());
+        Ok(merged)
     }
 
     /// The registry name → base URL map, with the implicit `maven-central` default.
@@ -629,7 +717,9 @@ impl NativeProjectPlan {
             return None;
         }
         // A host without lock persistence (the language server) still gets resolution; it just
-        // has nowhere to store the outcome, and no full-lock pass to pay for.
+        // has nowhere to store the outcome, and no full-lock pass to pay for. A host that already
+        // resolved the workspace lock (`generate_lock == false`) pins against it without
+        // generating it again.
         let host_has_lock = registry.is_some();
         let mut scratch = RegistryResolution::default();
         let registry = registry.map_or(&mut scratch, |registry| registry);
@@ -639,7 +729,7 @@ impl NativeProjectPlan {
             features,
             fetcher,
             registry.lock.as_ref(),
-            if host_has_lock {
+            if host_has_lock && registry.generate_lock {
                 LockMode::Generate
             } else {
                 LockMode::Skip

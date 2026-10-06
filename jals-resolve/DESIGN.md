@@ -343,6 +343,13 @@ Landed (each commit is green on its own):
    `attributes` is on) build features; the backend key folds the classpath digest, and jars are
    content-addressed, so a lock/version/feature change moves every dependent key. `BackendOutput`
    memoization is still unimplemented (pre-existing `hawk` override).
+8. **Workspace (partial)** — `[workspace]` members/exclude/default-members with host discovery
+   (nearest root wins, glob expansion, `default-members` validated), one lock at the root:
+   `RegistryResolver::resolve_workspace` resolves every member as a root, so a shared transitive
+   package is one package, and a member-scoped classpath pass pins against the workspace lock
+   without rewriting it. **Not yet**: `[workspace.dependencies]` inheritance and
+   `<field>.workspace = true`, `default-members` as a build selection, `-p`, and building several
+   members in one command.
 
-Remaining phases: `[workspace]` members/inheritance/`-p`; `jals fetch`/`tree`; the
+Remaining phases: workspace inheritance and member selection; `jals fetch`/`tree`; the
 `target/jals/deps` view; POM exclusions, classifiers, and checksum sidecars.

@@ -682,3 +682,55 @@ dev = { group = "com.example", version = "4.0.0", registry = "test" }
         ]
     );
 }
+
+#[test]
+fn workspace_members_share_one_lock_and_one_transitive_package() {
+    const BASE: &str = "https://repo.test/maven2";
+    let member_a: Manifest = "[package]\nname = \"a\"\n\n[registries.test]\nurl = \"https://repo.test/maven2\"\n\n[dependencies]\nlib = { group = \"com.example\", version = \"1\", registry = \"test\" }\n"
+        .parse()
+        .unwrap();
+    let member_b: Manifest = "[package]\nname = \"b\"\n\n[registries.test]\nurl = \"https://repo.test/maven2\"\n\n[dependencies]\nshared = { group = \"com.example\", version = \"2.0.0\", registry = \"test\" }\n"
+        .parse()
+        .unwrap();
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/maven-metadata.xml"),
+        br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom"),
+        br"<project>
+              <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>shared</artifactId><version>2.0.0</version></dependency>
+              </dependencies>
+            </project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/shared/2.0.0/shared-2.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>shared</artifactId><version>2.0.0</version></project>",
+    );
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve_workspace(&[&member_a, &member_b], &fetcher, None)
+            .await
+            .unwrap()
+    })
+    .unwrap();
+    assert!(
+        graphs.specs.is_empty(),
+        "a workspace lock projects no classpath"
+    );
+    let names: Vec<String> = graphs
+        .lock
+        .as_ref()
+        .unwrap()
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["com.example:lib 1.0.0", "com.example:shared 2.0.0"],
+        "`shared` is reached from both members and is one package"
+    );
+}

@@ -1106,8 +1106,9 @@ version/requirement model, package identity, feature graph, resolver, and `jals.
 resolved jars join the verified-cache download path; `jals-cli` reads and writes `jals.lock`
 (only when it changed), `--locked`/`--frozen` refuse a lock rewrite, and `jals update` re-resolves
 ignoring the pins. The lock is feature-independent: it is generated from a pass that forces every
-optional and dev registry entry active. `[workspace]`, `jals fetch`/`tree`, the
-`target/jals/deps` view, and POM exclusions/classifiers remain. The target architecture and
+optional and dev registry entry active. `[workspace]` roots share one lock across their members
+(discovery + union resolution; inheritance and `-p` are not implemented yet). `jals fetch`/`tree`,
+the `target/jals/deps` view, and POM exclusions/classifiers remain. The target architecture and
 migration plan live in [`jals-resolve/DESIGN.md`](../jals-resolve/DESIGN.md).
 
 The transitive graph of explicit JALS path/Git source projects is implemented. The separate missing

@@ -8,6 +8,7 @@ mod shell;
 mod testrun;
 mod timings;
 mod ui;
+mod workspace;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
@@ -26,6 +27,7 @@ use jals_config::{
 };
 use jals_exec::Exec;
 use jals_storage::{DirKey, FileKey, Name, NativeScope, NativeStorage, RelativePath};
+use workspace::ProjectWorkspace;
 
 use report::Reporter;
 use session::Session;
@@ -518,17 +520,35 @@ impl UpdateArgs {
             jals_classpath::NetworkPolicy::when_offline(self.offline),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
-        let graphs = jals_classpath::RegistryResolver::resolve(
-            &manifest,
-            DependencyScope::Test,
-            &features,
-            &fetcher,
-            // No lock preference: that is the whole point of the command.
-            None,
-            jals_classpath::LockMode::Generate,
-        )
-        .await
-        .map_err(|error| anyhow!("registry dependencies could not be resolved: {error}"))?;
+        // A workspace updates one file for every member, from the root; a standalone project
+        // updates its own.
+        let workspace = ProjectWorkspace::discover(&root)?;
+        let (lock_root, graphs) = if let Some(workspace) = workspace {
+            let manifests = workspace.manifests().await?;
+            let members: Vec<&Manifest> = manifests.iter().collect();
+            let graphs = jals_classpath::RegistryResolver::resolve_workspace(
+                &members, &fetcher,
+                // No lock preference: that is the whole point of the command.
+                None,
+            )
+            .await
+            .map_err(|error| {
+                anyhow!("workspace registry dependencies could not be resolved: {error}")
+            })?;
+            (workspace.root().to_path_buf(), graphs)
+        } else {
+            let graphs = jals_classpath::RegistryResolver::resolve(
+                &manifest,
+                DependencyScope::Test,
+                &features,
+                &fetcher,
+                None,
+                jals_classpath::LockMode::Generate,
+            )
+            .await
+            .map_err(|error| anyhow!("registry dependencies could not be resolved: {error}"))?;
+            (root.clone(), graphs)
+        };
         if graphs.packages.is_empty() {
             session
                 .shell()
@@ -542,9 +562,9 @@ impl UpdateArgs {
             return Ok(ExitCode::SUCCESS);
         };
         let text = lock.render();
-        std::fs::write(root.join("jals.lock"), &text).map_err(|error| {
-            anyhow!("cannot write {}: {error}", root.join("jals.lock").display())
-        })?;
+        let lock_path = lock_root.join("jals.lock");
+        std::fs::write(&lock_path, &text)
+            .map_err(|error| anyhow!("cannot write {}: {error}", lock_path.display()))?;
         session.shell().status(
             Verb::Resolving,
             format_args!("{} dependencies locked", graphs.packages.len()),
@@ -2751,7 +2771,59 @@ impl App {
         // The graph's own work is attributed per node, inside the graph: a dependency's script and
         // task plan belong to that dependency, not to whoever is building it.
         let progress = session.progress().clone();
-        let mut registry = Self::read_registry_lock(root)?;
+        // One lock for the whole workspace. When a workspace root exists, its members are resolved
+        // together (one version per name across all of them) and the lock is written once, at the
+        // root; this member's classpath pass then pins against the result without rewriting it.
+        let workspace = match ProjectWorkspace::discover(root) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                shell.warn(format_args!("workspace discovery failed: {error:#}"));
+                None
+            }
+        };
+        if let Some(workspace) = &workspace
+            && workspace
+                .members()
+                .iter()
+                .all(|member| member != &root.join("jals.toml"))
+        {
+            bail!(
+                "{} is a workspace root that is not itself a member; run the command from a \
+                 member directory",
+                root.display()
+            );
+        }
+        let lock_root = workspace.as_ref().map_or_else(
+            || root.to_path_buf(),
+            |workspace| workspace.root().to_path_buf(),
+        );
+        let mut registry = Self::read_registry_lock(&lock_root)?;
+        if let Some(workspace) = &workspace {
+            registry.generate_lock = false;
+            match workspace.manifests().await {
+                Ok(manifests) => {
+                    let members: Vec<&Manifest> = manifests.iter().collect();
+                    match jals_classpath::RegistryResolver::resolve_workspace(
+                        &members,
+                        fetcher,
+                        registry.lock.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(graphs) => {
+                            if let Some(lock) = graphs.lock {
+                                registry.lock = Some(lock.clone());
+                                registry.resolved_lock = Some(lock);
+                            }
+                        }
+                        Err(error) => shell.warn(format_args!(
+                            "workspace registry dependencies could not be resolved: {error}"
+                        )),
+                    }
+                }
+                Err(error) => shell.warn(format_args!("{error:#}")),
+            }
+        }
         let resolved = script
             .assembled
             .resolve_native(
@@ -2774,7 +2846,7 @@ impl App {
                 Some(&mut registry),
             )
             .await;
-        Self::apply_registry_lock(root, &registry, policy, shell)?;
+        Self::apply_registry_lock(&lock_root, &registry, policy, shell)?;
         let assembly = resolved.map_err(|failure| {
             // Discovery had already found something worth saying about this project before a
             // later phase failed, and it is usually the half that explains the other: the

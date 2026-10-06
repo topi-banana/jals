@@ -44,8 +44,9 @@ pub use manifest::{
     BuildScript, Dependency, DependencyError, DependencyScope, Feature, FeatureRefError,
     FeatureSet, FileMappings, FrontendKind, GitDependency, GitRef, JarDependency, Manifest,
     ManifestParseError, MappingDigest, MappingEntry, MappingError, MappingFormatKind,
-    MappingSource, Package, PathDependency, RemapSite, ResolvedBuildFeatures, ResourcePattern,
-    ResourcePatternError, Run, UrlMappings, ValidationError,
+    MappingSource, Package, PathDependency, Registry, RegistryDependency, RemapSite,
+    ResolvedBuildFeatures, ResourcePattern, ResourcePatternError, Run, UrlMappings,
+    ValidationError, Workspace,
 };
 pub use resolution::ResolveLowerError;
 pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};
