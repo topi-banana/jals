@@ -2009,7 +2009,8 @@ impl fmt::Display for ResourcePatternError {
 impl core::error::Error for ResourcePatternError {}
 
 impl ResourcePattern {
-    /// Parse one `[build.resources] template` entry.    ///
+    /// Parse one `[build.resources] template` entry.
+    ///
     /// `*` matches any run of characters within one segment, `?` matches exactly one, and `**` is a
     /// whole segment matching zero or more segments. Character classes and brace expansion are
     /// deliberately absent: the vocabulary is the one a resource layout needs, and every addition
