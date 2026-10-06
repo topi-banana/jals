@@ -140,7 +140,7 @@ impl Version {
             } else if ch.is_ascii_digit() {
                 if !is_digit && i > start {
                     let text: String = chars[start..i].iter().collect();
-                    arena[current].push(RawItem::Text(Self::alias(&text).to_owned()));
+                    arena[current].push(RawItem::Text(Self::alias(&text, true).to_owned()));
                     start = i;
                     let child = arena.len();
                     arena.push(Vec::new());
@@ -172,7 +172,7 @@ impl Version {
         if is_digit {
             RawItem::Number(Self::normalize_number(&text))
         } else {
-            RawItem::Text(Self::alias(&text).to_owned())
+            RawItem::Text(Self::alias(&text, false).to_owned())
         }
     }
 
@@ -205,8 +205,18 @@ impl Version {
     }
 
     /// Maven's aliases: the explicit release spellings fold into the empty qualifier, and `cr`
-    /// is a spelling of `rc`.
-    fn alias(text: &str) -> &str {
+    /// is a spelling of `rc`. A single `a`/`b`/`m` immediately followed by a digit is the legacy
+    /// `alpha`/`beta`/`milestone` shorthand (`1.0a1` == `1.0-alpha-1`, `1.0.0-M1` < `1.0.0`),
+    /// which is why the caller states whether the qualifier ended at a digit.
+    fn alias(text: &str, followed_by_digit: bool) -> &str {
+        if followed_by_digit && text.len() == 1 {
+            match text {
+                "a" => return "alpha",
+                "b" => return "beta",
+                "m" => return "milestone",
+                _ => {}
+            }
+        }
         match text {
             "ga" | "final" | "release" => "",
             "cr" => "rc",
@@ -272,8 +282,13 @@ impl Version {
             (Item::Number(a), Item::Number(b)) => Self::compare_numbers(a, b),
             (Item::Text(a), Item::Text(b)) => Self::compare_qualifiers(a, b),
             (Item::List(a), Item::List(b)) => Self::compare_items(a, b),
-            (Item::Number(_), Item::Text(_) | Item::List(_)) => Ordering::Greater,
-            (Item::Text(_) | Item::List(_), Item::Number(_) | Item::Text(_) | Item::List(_)) => {
+            // Maven's cross-kind rules: a number outranks a qualifier and a list; a qualifier
+            // outranks neither. A list outranks a qualifier — `ListItem.compareTo(StringItem)`
+            // is 1, as in `1-1 > 1-sp` — but still ranks below a number.
+            (Item::Number(_), Item::Text(_) | Item::List(_)) | (Item::List(_), Item::Text(_)) => {
+                Ordering::Greater
+            }
+            (Item::Text(_), Item::Number(_) | Item::List(_)) | (Item::List(_), Item::Number(_)) => {
                 Ordering::Less
             }
         }
@@ -910,6 +925,27 @@ mod tests {
         assert_eq!(version("1.0alpha1"), version("1.0-alpha-1"));
         assert!(version("1.0-1") < version("1.0.1"));
         assert!(version("1-1") < version("1.0.1"));
+    }
+
+    #[test]
+    fn a_single_letter_before_a_digit_aliases_like_maven() {
+        assert_eq!(version("1.0a1"), version("1.0-alpha-1"));
+        assert_eq!(version("1.0b1"), version("1.0-beta-1"));
+        assert_eq!(version("1.0m1"), version("1.0-milestone-1"));
+        // A milestone is a pre-release: it must sort below its release, or a caret
+        // requirement admits it as a newer satisfying version. Both the dash and the legacy
+        // one-letter spellings are used in the wild (`1.0.0-M1`, `1.0.0.M1`).
+        assert!(version("1.0.0-M1") < version("1.0.0"));
+        assert!(version("1.0.0.M1") < version("1.0.0"));
+        assert!(version("6.0.0-M1") < version("6.0.0"));
+        assert!(!req("6.0.0").matches(&version("6.0.0-M1")));
+    }
+
+    #[test]
+    fn a_list_sorts_after_a_string_item_at_the_same_level() {
+        // Maven's `ListItem.compareTo(StringItem)` is 1, as in `1-1 > 1-sp`.
+        assert!(version("1-1") > version("1-sp"));
+        assert!(version("1-rc1") > version("1-rc.alpha"));
     }
 
     #[test]
