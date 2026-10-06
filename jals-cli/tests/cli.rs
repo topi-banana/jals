@@ -530,8 +530,14 @@ fn run_dry_run_prints_javac_and_java_commands() {
         manifest.to_str().unwrap(),
     ]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("javac "), "got: {stdout}");
-    assert!(stdout.contains("java -cp "), "got: {stdout}");
+    assert!(
+        stdout.contains(&format!("{} ", javac_binary_name())),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{} -cp ", java_binary_name())),
+        "got: {stdout}"
+    );
     assert!(stdout.contains("com.example.Main"), "got: {stdout}");
 }
 
@@ -1588,7 +1594,10 @@ fn run_bin_flag_selects_main_class() {
         manifest.to_str().unwrap(),
     ]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("java -cp "), "got: {stdout}");
+    assert!(
+        stdout.contains(&format!("{} -cp ", java_binary_name())),
+        "got: {stdout}"
+    );
     assert!(stdout.contains("com.example.Two"), "got: {stdout}");
     assert!(!stdout.contains("com.example.One"), "got: {stdout}");
 }

@@ -630,11 +630,13 @@ mod tests {
 
     #[test]
     fn relative_path_resolves_against_project_root() {
-        // "jdk/bin/javac" ends in the tool name → the binary itself, resolved against the root.
+        // "jdk/bin/javac" ends in the tool name → the binary itself, resolved against the root and
+        // used verbatim: an explicit binary path keeps the spelling the configuration gave, so the
+        // `bin/` leaf is not run through `executable_name` here.
         let out =
             resolver(&[], None).resolve(Tool::Javac, Some(ToolSpec::Path("jdk/bin/javac")), None);
         assert!(out.preferred.is_empty(), "{:?}", out.preferred);
-        assert_eq!(out.fallback, bin_path("/proj/jdk", Tool::Javac));
+        assert_eq!(out.fallback, Path::new("/proj").join("jdk/bin/javac"));
     }
 
     #[test]
