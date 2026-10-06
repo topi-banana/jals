@@ -4034,6 +4034,24 @@ const fn java_binary_name() -> &'static str {
     if cfg!(windows) { "java.exe" } else { "java" }
 }
 
+/// The platform's `javac` executable name, for the same reason as [`java_binary_name`].
+const fn javac_binary_name() -> &'static str {
+    if cfg!(windows) { "javac.exe" } else { "javac" }
+}
+
+/// Whether a printed command's program is `expected`.
+///
+/// Component-wise (`Path::ends_with`) rather than a substring: a host path is spelled with the
+/// platform's separators, so a literal `target/jdk/…` comparison holds on Unix and fails on
+/// Windows for a reason that has nothing to do with what the command resolves.
+fn command_targets(cmd_line: &str, expected: &Path) -> bool {
+    cmd_line
+        .split_whitespace()
+        .next()
+        .map(|program| program.trim_matches('"'))
+        .is_some_and(|program| Path::new(program).ends_with(expected))
+}
+
 /// Write a fake JDK home (`bin/java`, `bin/javac`) under `directory`, ready to be archived or
 /// linked. The tools are no-op scripts: every toolchain test asserts *which* path was selected,
 /// never what the selected `java` would compute.
@@ -4147,7 +4165,7 @@ fn a_toolchain_installs_lists_resolves_and_uninstalls_offline() {
     assert!(output.status.success());
     let which = String::from_utf8_lossy(&output.stdout);
     assert!(
-        which.trim().ends_with("target/jdk/temurin-21"),
+        Path::new(which.trim()).ends_with(Path::new("target").join("jdk").join("temurin-21")),
         "`which` answers with the JDK home: {which}"
     );
 
@@ -4166,17 +4184,12 @@ fn a_toolchain_installs_lists_resolves_and_uninstalls_offline() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
-        stdout.contains("target/jdk/temurin-21")
-            && stdout
-                .split_whitespace()
-                .next()
-                .is_some_and(|program| Path::new(program).ends_with(
-                    Path::new("target/jdk/temurin-21/bin").join(if cfg!(windows) {
-                        "javac.exe"
-                    } else {
-                        "javac"
-                    })
-                )),
+        command_targets(
+            &stdout,
+            &dir.path()
+                .join("target/jdk/temurin-21/bin")
+                .join(javac_binary_name())
+        ),
         "the compile resolves the installed toolchain: {stdout}"
     );
 
@@ -4266,7 +4279,12 @@ fn a_linked_toolchain_can_become_the_projects_default() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
-        stdout.contains("target/jdk/custom-21"),
+        command_targets(
+            &stdout,
+            &dir.path()
+                .join("target/jdk/custom-21/bin")
+                .join(javac_binary_name())
+        ),
         "a `system` selection prefers the project's default: {stdout}"
     );
 

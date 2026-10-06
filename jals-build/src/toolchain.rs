@@ -41,12 +41,43 @@ pub enum Tool {
 }
 
 impl Tool {
-    /// The bare executable name (`"javac"` / `"java"`), used both as the `bin/` leaf of a JDK home
-    /// and as the ultimate `PATH`-resolved fallback.
+    /// The bare executable name (`"javac"` / `"java"`), used as the ultimate `PATH`-resolved
+    /// fallback and as the stem of a spilled argument file.
+    ///
+    /// Deliberately extension-less on every platform: `CreateProcess` appends `.exe` when it
+    /// searches `PATH`, and the argument file a run spills is named for the *tool*, not for the
+    /// host's executable spelling. The name a JDK home actually holds is
+    /// [`executable_name`](Self::executable_name).
     pub(crate) const fn binary_name(self) -> &'static str {
         match self {
             Self::Javac => "javac",
             Self::Java => "java",
+        }
+    }
+
+    /// The file name a JDK `home` holds this tool under (`javac.exe` on Windows, `javac`
+    /// elsewhere).
+    ///
+    /// Distinct from [`binary_name`](Self::binary_name) because a Windows JDK stores `javac.exe`
+    /// and a filesystem probe of `bin/javac` does **not** append the extension — so a discovered
+    /// install, a `$JAVA_HOME`, and a project-local toolchain were all invisible there and every
+    /// selection silently fell through to `PATH`.
+    pub(crate) const fn executable_name(self) -> &'static str {
+        match self {
+            Self::Javac => {
+                if cfg!(windows) {
+                    "javac.exe"
+                } else {
+                    "javac"
+                }
+            }
+            Self::Java => {
+                if cfg!(windows) {
+                    "java.exe"
+                } else {
+                    "java"
+                }
+            }
         }
     }
 
@@ -62,7 +93,7 @@ impl Tool {
     /// Where this tool lives inside a JDK `home` (`<home>/bin/<tool>`) — the one place the JDK
     /// layout rule is encoded.
     fn path_in(self, home: &Path) -> PathBuf {
-        home.join("bin").join(self.binary_name())
+        home.join("bin").join(self.executable_name())
     }
 }
 
@@ -530,6 +561,14 @@ mod tests {
         }
     }
 
+    /// `home`'s `bin/<tool>` as [`Tool::path_in`] spells it on this platform.
+    ///
+    /// These tests spell homes POSIX-style on every platform, so the expected `bin/` leaf comes
+    /// from the resolver's own name rule (`javac.exe` on Windows) rather than a literal.
+    fn bin_path(home: &str, tool: Tool) -> PathBuf {
+        Path::new(home).join("bin").join(tool.executable_name())
+    }
+
     #[test]
     fn env_override_wins_unconditionally() {
         let installs = [install("/jvm/temurin-21", Some("temurin"), Some(21))];
@@ -550,10 +589,7 @@ mod tests {
             Some(ToolSpec::System),
             None,
         );
-        assert_eq!(
-            out.preferred,
-            vec![PathBuf::from("/opt/java-home/bin/javac")]
-        );
+        assert_eq!(out.preferred, vec![bin_path("/opt/java-home", Tool::Javac)]);
         assert_eq!(out.fallback, PathBuf::from("javac"));
     }
 
@@ -575,7 +611,7 @@ mod tests {
             None,
         );
         assert_eq!(out.preferred, vec![PathBuf::from(JDK_HOME)]);
-        assert_eq!(out.fallback, Path::new(JDK_HOME).join("bin").join("javac"));
+        assert_eq!(out.fallback, bin_path(JDK_HOME, Tool::Javac));
     }
 
     #[test]
@@ -598,7 +634,7 @@ mod tests {
         let out =
             resolver(&[], None).resolve(Tool::Javac, Some(ToolSpec::Path("jdk/bin/javac")), None);
         assert!(out.preferred.is_empty(), "{:?}", out.preferred);
-        assert_eq!(out.fallback, PathBuf::from("/proj/jdk/bin/javac"));
+        assert_eq!(out.fallback, bin_path("/proj/jdk", Tool::Javac));
     }
 
     #[test]
@@ -612,7 +648,7 @@ mod tests {
         };
         let out = resolver.resolve(Tool::Javac, Some(ToolSpec::Path("~/jdks/21")), None);
         assert_eq!(out.preferred, vec![PathBuf::from("/home/dev/jdks/21")]);
-        assert_eq!(out.fallback, PathBuf::from("/home/dev/jdks/21/bin/javac"));
+        assert_eq!(out.fallback, bin_path("/home/dev/jdks/21", Tool::Javac));
     }
 
     #[test]
@@ -639,7 +675,7 @@ mod tests {
         // Only the temurin-21 install matches; bare name is the fallback.
         assert_eq!(
             out.preferred,
-            vec![PathBuf::from("/jvm/temurin-21/bin/javac")]
+            vec![bin_path("/jvm/temurin-21", Tool::Javac)]
         );
         assert_eq!(out.fallback, PathBuf::from("javac"));
     }
@@ -661,8 +697,8 @@ mod tests {
         assert_eq!(
             out.preferred,
             vec![
-                PathBuf::from("/jvm/openjdk-17/bin/java"),
-                PathBuf::from("/jvm/temurin-17/bin/java"),
+                bin_path("/jvm/openjdk-17", Tool::Java),
+                bin_path("/jvm/temurin-17", Tool::Java),
             ]
         );
         assert_eq!(out.fallback, PathBuf::from("java"));
@@ -680,7 +716,7 @@ mod tests {
             None,
         );
         // No install matches, so only the system + bare-name fallbacks remain.
-        assert_eq!(out.preferred, vec![PathBuf::from("/sys/jdk/bin/javac")]);
+        assert_eq!(out.preferred, vec![bin_path("/sys/jdk", Tool::Javac)]);
         assert_eq!(out.fallback, PathBuf::from("javac"));
     }
 

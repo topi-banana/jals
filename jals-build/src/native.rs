@@ -491,8 +491,9 @@ mod tests {
         }
         let temp_dir = tempfile::tempdir().unwrap();
         let home = temp_dir.path().join("target/jdk/custom-21");
+        let javac = Tool::Javac.executable_name();
         std::fs::create_dir_all(home.join("bin")).unwrap();
-        std::fs::write(home.join("bin").join("javac"), b"").unwrap();
+        std::fs::write(home.join("bin").join(javac), b"").unwrap();
         std::fs::write(temp_dir.path().join("target/jdk/default"), "custom-21\n").unwrap();
 
         let manifest = Manifest::default();
@@ -510,13 +511,21 @@ mod tests {
             compile_env: &BTreeMap::new(),
         };
         let program = block_on_inline(toolchain.plan_compile(&request)).program;
-        assert_eq!(Path::new(&program), home.join("bin").join("javac"));
+        assert_eq!(Path::new(&program), home.join("bin").join(javac));
+    }
+
+    /// Whether `program` names `tool`, however the platform spells it (`javac`, `javac.exe`).
+    fn names(program: &str, tool: Tool) -> bool {
+        Path::new(program)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == tool.binary_name())
     }
 
     #[test]
     fn default_manifest_plans_bare_tools() {
         // A manifest with no `[toolchain]` and no env override resolves to the system tools; whatever
-        // path is chosen, it ends in the tool's binary name.
+        // path is chosen, its file stem is the tool's binary name.
         let manifest = Manifest::default();
         let root = Path::new("/proj");
         let toolchain = block_on_inline(SubprocessToolchain::from_manifest(&manifest, root));
@@ -532,8 +541,8 @@ mod tests {
         };
         let program = block_on_inline(toolchain.plan_compile(&compile_req)).program;
         assert!(
-            program.ends_with("javac"),
-            "compiler program should end in `javac`, got {program}"
+            names(&program, Tool::Javac),
+            "compiler program should name `javac`, got {program}"
         );
 
         let run_req = RunRequest {
@@ -547,8 +556,8 @@ mod tests {
         };
         let program = block_on_inline(toolchain.plan_run(&run_req)).program;
         assert!(
-            program.ends_with("java"),
-            "runtime program should end in `java`, got {program}"
+            names(&program, Tool::Java),
+            "runtime program should name `java`, got {program}"
         );
     }
 

@@ -156,26 +156,27 @@ impl Archive {
 
     /// Give a zip member the executable bit its Unix mode asks for, where that is a thing.
     ///
-    /// A Windows JDK zip stores modes that mean nothing to Windows; a vendor's Unix zip is the
-    /// case this exists for. A mode-less member keeps the umask's answer, which is what the tar
-    /// path gives a member with no permission bits.
+    /// A mode-less member keeps the umask's answer, which is what the tar path gives a member with
+    /// no permission bits.
+    #[cfg(unix)]
     fn apply_unix_mode(path: &Path, mode: Option<u32>) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
 
-            if let Some(mode) = mode {
-                let mode = mode & 0o7777;
-                if mode != 0 {
-                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-                }
+        if let Some(mode) = mode {
+            let mode = mode & 0o7777;
+            if mode != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
             }
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (path, mode);
-        }
     }
+
+    /// Windows has no executable bit to restore: a member keeps whatever the filesystem assigns.
+    ///
+    /// Split from the Unix body rather than one function with a `cfg`'d empty arm, because the
+    /// Windows arm then *is* a `const fn` and clippy says so — and an `#[allow]` for that would be
+    /// a suppression Linux's `cargo unused-allow` correctly reports as unused.
+    #[cfg(not(unix))]
+    const fn apply_unix_mode(_path: &Path, _mode: Option<u32>) {}
 
     /// The directory inside `extracted` holding `bin/java`, nearest the root.
     ///
