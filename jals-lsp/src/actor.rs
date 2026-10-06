@@ -1938,6 +1938,9 @@ impl AssembledWorkspace {
                 // any other — so the scope is the one that carries the types those files name.
                 DependencyScope::Test,
                 jals_classpath::ProjectInputOptions::Editor,
+                // The language server has nowhere to persist a lock; resolution still runs for
+                // the classpath, and the outcome is dropped.
+                None,
             )
             .await
     }
@@ -2133,14 +2136,15 @@ impl AssembledWorkspace {
                         reassemble_inputs.push(path);
                     }
                 }
-                Dependency::Git(_) => {}
                 // A precompiled module is a watch input like a jar's bytes: a change to it is a
-                // change to what the project links.
+                // change to what the project links. Git checkouts and registry entries live
+                // outside the project tree; resolution refetches them.
                 Dependency::Wasm(wasm) => {
                     if let Some(path) = local_path(root, &wasm.wasm) {
                         reassemble_inputs.push(path);
                     }
                 }
+                Dependency::Git(_) | Dependency::Registry(_) | Dependency::RegistryVersion(_) => {}
             }
         }
         reassemble_inputs.extend(graph_watch_paths.iter().cloned());

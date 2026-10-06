@@ -8,6 +8,10 @@ edition.workspace = true
 # discovery. Pure/`no_std`: loaders read an immutable `jals-storage` revision, so this crate has no
 # direct filesystem access and stays `wasm32`-compatible.
 jals-exec.workspace = true
+# `resolution.rs` lowers a validated manifest into the resolver's `Summary`/`DependencyRequest`
+# vocabulary. The dependency points down the stack (the resolver names no manifest type), and the
+# resolver is itself portable, so this changes nothing about the crate's portability.
+jals-resolve.workspace = true
 jals-storage.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true

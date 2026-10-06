@@ -15,8 +15,11 @@ use alloc::vec::Vec;
 
 use jals_classpath::{
     Fetcher, NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs,
+    RegistryResolution,
 };
-use jals_config::{DependencyScope, GitDependency, Manifest, PathDependency};
+use jals_config::{
+    DependencyScope, GitDependency, Manifest, PathDependency, ResolvedBuildFeatures,
+};
 use jals_exec::Exec;
 use jals_progress::Progress;
 use jals_storage::{
@@ -201,6 +204,9 @@ impl ProjectScript {
     /// resolution included — a host cannot ask the graph to be discovered online and resolved
     /// offline, because there is one capability and every step is handed the same one.
     /// `preprocess.exec` likewise drives all of it.
+    // As `project_native`: every parameter is a distinct input, and the registry hand-over is a
+    // phase, not a field of any other.
+    #[allow(clippy::too_many_arguments)]
     pub async fn resolve_native<F: Fetcher>(
         &self,
         manifest: &Manifest,
@@ -209,6 +215,7 @@ impl ProjectScript {
         preprocess: GraphPreprocess<'_, F>,
         scope: DependencyScope,
         options: ProjectInputOptions,
+        registry: Option<&mut RegistryResolution>,
     ) -> Result<NativeProjectAssembly, GraphResolveError> {
         // `preprocess` is consumed by the phase it names, but the graph plan needs the same fetch
         // capability again when it resolves. The field is a shared reference, so copy it out first
@@ -216,6 +223,9 @@ impl ProjectScript {
         // under `--offline`.
         let fetcher = preprocess.fetcher;
         let progress = preprocess.progress;
+        // The root's resolved selection is the registry lowering's input too: registry entries are
+        // not graph nodes, so this is the only place their optional/dev activation is decided.
+        let features = preprocess.root_features;
         let graph =
             NativeProjectGraph::discover(manifest, scope, root, preprocess.exec, fetcher.network())
                 .await
@@ -226,27 +236,37 @@ impl ProjectScript {
             .await
             .map_err(|error| GraphResolveError::reporting(error, discovered))?;
         Ok(self
-            .project_native(&graph, manifest, root, storage, fetcher, options, progress)
+            .project_native(
+                &graph, manifest, root, storage, fetcher, options, progress, scope, features,
+                registry,
+            )
             .await)
     }
 
-    /// The root manifest with **both** dependency tables removed.
+    /// The root manifest with its non-registry dependency tables removed.
     ///
     /// Unlike the portable sibling, [`NativeProjectPlan::assemble_native`] *does* lower a
     /// `[dependencies]` jar entry — it has to, because a host path or URL is exactly what it exists
-    /// to classify. Every declared dependency is already a graph node, so leaving the table in place
-    /// would resolve each jar a second time and double-count it on the classpath. That makes this
-    /// stripping the native path's own precondition, not a rule about root plans in general, which
-    /// is why it lives here and `resolve_memory` hands its manifest over whole.
+    /// to classify. Every such declared dependency is already a graph node, so leaving the table in
+    /// place would resolve each jar a second time and double-count it on the classpath. That makes
+    /// this stripping the native path's own precondition, not a rule about root plans in general,
+    /// which is why it lives here and `resolve_memory` hands its manifest over whole.
     ///
-    /// `[dev-dependencies]` is cleared unconditionally rather than under the caller's scope: an
-    /// entry the walk did not visit contributes no node, so clearing one the plan would not have
-    /// lowered either costs nothing, and a scope threaded to here would be a second place the
-    /// selection is stated.
+    /// **Registry entries are kept.** They are deliberately not graph nodes — a Maven package has
+    /// no `.java` and no build script — so `assemble_native` is the one place they resolve, and
+    /// dropping them here would silently remove every registry dependency from the classpath.
+    ///
+    /// `[dev-dependencies]` is cleared for the same reason as the build table: an entry the walk
+    /// did not visit contributes no node. Its registry entries are kept under the caller's scope,
+    /// because a test run's plan is the only place they would be lowered.
     fn root_only(manifest: &Manifest) -> Manifest {
         let mut root_only = manifest.clone();
-        root_only.dependencies.clear();
-        root_only.dev_dependencies.clear();
+        root_only
+            .dependencies
+            .retain(|_, dependency| dependency.registry_version().is_some());
+        root_only
+            .dev_dependencies
+            .retain(|_, dependency| dependency.registry_version().is_some());
         root_only
     }
 
@@ -257,6 +277,10 @@ impl ProjectScript {
     /// preprocessed graph under more than one [`ProjectInputOptions`] without rediscovering it.
     /// A host has no such need and reaches it through
     /// [`resolve_native`](Self::resolve_native), which owns the order of the phases before it.
+    ///
+    /// `scope` and `features` are the root's own selection: `root_only` keeps the registry entries
+    /// the graph walk skips, so they are what decides which of those entries this projection
+    /// lowers.
     // As `project`, which this is the native half of: every parameter is a distinct input.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn project_native<F: Fetcher>(
@@ -268,20 +292,23 @@ impl ProjectScript {
         fetcher: &F,
         mode: ProjectInputOptions,
         progress: &Progress,
+        scope: DependencyScope,
+        features: &ResolvedBuildFeatures,
+        registry: Option<&mut RegistryResolution>,
     ) -> NativeProjectAssembly {
         let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
         let (inputs, source_roots) = NativeProjectPlan::assemble_native(
             &Self::root_only(root_manifest),
-            // `root_only` emptied both dependency tables, so the scope selects between two empty
-            // maps and the features nothing lowers here reads. The graph resolved the real
-            // selection per node before this point.
-            DependencyScope::Build,
-            &jals_config::ResolvedBuildFeatures::default(),
+            // The graph resolved the real selection per node before this point; the root's
+            // registry entries, which the walk skipped, are lowered here under that same selection.
+            scope,
+            features,
             root_directory,
             storage,
             fetcher,
             mode,
             progress,
+            registry,
         )
         .await;
         let projected = self

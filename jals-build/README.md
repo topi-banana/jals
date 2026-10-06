@@ -939,6 +939,7 @@ jals run -- arg1 arg2       # ...passing args to the program
 jals run --main-class com.example.Other
 jals run --invoke f -- 7    # for a `jals-wasm` project: call an exported static method
 jals clean                  # remove target/classes and target/jals/build
+jals update                 # re-resolve registry dependencies and rewrite jals.lock
 ```
 
 ## Library API
@@ -1097,6 +1098,18 @@ Making a `features` release preset also imply a default `javac --release` is sti
 | `[lints]`                             | `[lints]`             | wire `jals-lint` / `-Xlint` configuration                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 ## 3. Maven dependency management (the largest remaining gap)
+
+**Status.** Registry dependencies are implemented end to end: `jals-resolve` holds the
+version/requirement model, package identity, feature graph, resolver, and `jals.lock` model;
+`jals-classpath` resolves Maven coordinates through `maven-metadata.xml` and POMs (parent chains,
+`dependencyManagement`, BOM imports, scopes, transitively) with parallel metadata/POM fetches; the
+resolved jars join the verified-cache download path; `jals-cli` reads and writes `jals.lock`
+(only when it changed), `--locked`/`--frozen` refuse a lock rewrite, and `jals update` re-resolves
+ignoring the pins. The lock is feature-independent: it is generated from a pass that forces every
+optional and dev registry entry active. `[workspace]` roots share one lock across their members
+(discovery + union resolution; inheritance and `-p` are not implemented yet). `jals fetch`/`tree`,
+the `target/jals/deps` view, and POM exclusions/classifiers remain. The target architecture and
+migration plan live in [`jals-resolve/DESIGN.md`](../jals-resolve/DESIGN.md).
 
 The transitive graph of explicit JALS path/Git source projects is implemented. The separate missing
 piece is Maven's coordinate graph: a `[dependencies]` table of Maven coordinates would be resolved

@@ -86,6 +86,13 @@ filesystem reads into portable interfaces.
   that must see an entry a selection did not activate (discovery, the LSP watch set). A name in both
   tables is rejected rather than overridden as Cargo does: one name denotes one entry wherever it is
   read — `dep:<name>`, `<name>/<feature>`, one discovery edge.
+
+  The `registry` form (table with `group`/`version`/`registry`, or the `group:artifact` <=>
+  version shorthand) joins `jar`/`git`/`path`/`wasm`, and `[registries]` declares named Maven
+  repositories (`maven-central` implicit). Validation checks the requirement parses, a coordinate
+  is derivable, the name and URL are well formed, and a referenced registry is declared.
+  `resolution.rs` lowers every form into `jals-resolve`'s `Summary`/`DependencyRequest`; a
+  registry entry becomes `SourceRequest::Registry` with an exact POM version or a Maven range.
   A crate that produces diagnostics states how they present without depending on an editor, which
   is why the vocabulary lives here: `jals-editor` and `jals-project` both assemble diagnostics and
   neither depends on the other. `jals-editor` re-exports the name, so a host still spells it
@@ -116,6 +123,15 @@ filesystem reads into portable interfaces.
   `streams` key). `Lint<O>`'s serialized *shape* follows the options **type**
   (`LintOptions::HAS_KEYS`) and not the values, which is what lets `jals-lint/tests/registry.rs`
   find every option by walking one serialized config.
+- `jals-resolve`: the dependency-resolution core — Maven-compatible versions and requirements,
+  package/source identity (`PackageId` is `(name, version, resolved source)`, never a locator),
+  the feature-graph `Summary`, the `Provider` seam, the Cargo-style resolver (one version per
+  name, unified features, cycles as edges), and the deterministic `jals.lock` model. Portable
+  and featureless: it performs no I/O, and the same resolver runs in the browser playground and
+  in the CLI. It must stay free of `jals-config`/`jals-classpath`/`jals-project` — those crates
+  consume this vocabulary, so a dependency back would invert the stack. The target architecture
+  and migration plan live in `jals-resolve/DESIGN.md`; `hawk.toml` records why the crate is
+  excluded from the visibility gate while parts of its vocabulary await a production caller.
 - `jals-classpath`: resolution over project bytes and cache artifacts.
   - The in-house zip reader is isolated in `zip.rs` behind `archive` (portable, `no_std`, over the
     async io seam; also a stored-only writer for jar remap/merge; the `zip` crate is a dev-only
@@ -169,6 +185,17 @@ filesystem reads into portable interfaces.
   - A `Warning` carries its subject in `origin`, not in `message` — several messages name no
     location at all — so a host reports one by rendering the whole `Warning` through its `Display`,
     never `warning.message` alone.
+  - **Registry resolution is `maven.rs`, and it is a `jals-resolve::Provider` like any other.**
+    The batch methods are the parallel seam: every `maven-metadata.xml` in one resolver batch, and
+    every selected POM in one summary batch, is fetched concurrently with `jals_exec::join_ordered`
+    from a *shared* `Fetcher` reference, then parsed and expanded in input order — concurrency
+    never moves the output. `NativeProjectPlan::assemble_native` runs the resolver before plan
+    execution and appends the resolved jars as ordinary `DependencySpec`s, so POMs are one batch
+    and jars download through the same verified, content-addressed path as explicit ones. Registry
+    entries are deliberately **not** project-graph nodes: `jals-project`'s `root_only` keeps them
+    (it strips only entries the graph already lowered), and the graph walk skips them. A host owns
+    lock persistence through `RegistryResolution` (`jals-cli` reads/writes `jals.lock`; the LSP
+    passes `None` and drops the outcome).
   - `NetworkPolicy` is part of the `Fetcher`, not a value travelling beside it: a host that must
     not fetch constructs one that refuses, and every step it is handed inherits the refusal. That
     is why `ReqwestFetcher::for_project` takes the policy and has no `Default`, and why nothing
@@ -776,9 +803,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo unused-allow --all-targets -- --workspace --all-features
 cargo nextest run --workspace --all-features --no-fail-fast
 cargo test --workspace --all-features --doc     # nextest does not run doctests
-cargo hawk check --exclude-crate jinja -D warnings   # closed-world visibility over hawk.toml's
-                                                    # roots; `jinja`'s API is an external
-                                                    # boundary, and hawk.toml says why
+# Closed-world visibility over hawk.toml's roots; `jinja`'s API is an external boundary and
+# hawk.toml says why. `jals_resolve` is excluded while parts of its vocabulary await a caller.
+cargo hawk check --exclude-crate jinja --exclude-crate jals_resolve -D warnings
 ```
 
 The portable-core and feature audit (CI's `portable core and feature audit` job) — run it whenever
@@ -791,6 +818,7 @@ cargo check -p jals-build --no-default-features
 cargo check -p jals-project --no-default-features
 cargo check -p jals-frontend
 cargo check -p jals-progress
+cargo check -p jals-resolve
 cargo check -p jinja
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features --features build-script --target wasm32-unknown-unknown
@@ -799,6 +827,7 @@ cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unkn
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
 cargo check -p jals-progress --target wasm32-unknown-unknown
+cargo check -p jals-resolve --target wasm32-unknown-unknown
 cargo check -p jinja --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 cargo tree -e features -p jals-classpath --no-default-features

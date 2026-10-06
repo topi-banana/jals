@@ -374,6 +374,7 @@ classpath = ["../sibling-classes", "{absolute_class}"]
                 &NoFetch,
                 options,
                 &jals_progress::Progress::SILENT,
+                None,
             )
             .await
         })
@@ -449,4 +450,378 @@ required-features = ["1.19.4"]
             "`{expected}` is missing from the captured tree: {captured:?}"
         );
     }
+}
+
+/// A Maven repository served from memory, recording every URL that was fetched.
+struct MapFetcher {
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    seen: std::cell::RefCell<Vec<String>>,
+}
+
+impl MapFetcher {
+    const fn new() -> Self {
+        Self {
+            files: std::collections::BTreeMap::new(),
+            seen: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn add(&mut self, url: &str, body: &[u8]) {
+        self.files.insert(url.to_owned(), body.to_vec());
+    }
+}
+
+impl Fetcher for MapFetcher {
+    fn network(&self) -> jals_classpath::NetworkPolicy {
+        jals_classpath::NetworkPolicy::Online
+    }
+
+    fn retry(&self) -> jals_classpath::RetrySchedule {
+        jals_classpath::RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(
+        &self,
+        locator: &str,
+        _: &jals_progress::Task,
+    ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
+        self.seen.borrow_mut().push(locator.to_owned());
+        ready(self.files.get(locator).map_or_else(
+            || {
+                Err(jals_classpath::FetchError::permanent(format!(
+                    "no fixture for `{locator}`"
+                )))
+            },
+            |bytes| Ok(bytes.clone()),
+        ))
+    }
+}
+
+#[test]
+fn a_registry_dependency_resolves_through_poms_and_locks() {
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:lib" = { version = "1", registry = "test" }
+"#,
+    );
+    // The metadata lists one version; the POM declares one exact transitive dependency whose
+    // metadata is absent, which `pinned_base` covers.
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/maven-metadata.xml"),
+        br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom"),
+        br"<project>
+              <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></dependency>
+              </dependencies>
+            </project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/direct/2.0.0/direct-2.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.jar"),
+        b"lib-bytes",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/direct/2.0.0/direct-2.0.0.jar"),
+        b"direct-bytes",
+    );
+    let fetcher_ref = &fetcher;
+    let (inputs, registry) = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                Some(&mut registry),
+            )
+            .await;
+            (inputs, registry)
+        }
+    })
+    .unwrap();
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    let seen = fetcher.seen.borrow();
+    assert_eq!(
+        inputs.dependency_jars.len(),
+        2,
+        "resolved packages: {:?}, seen: {:?}",
+        registry.packages,
+        *seen
+    );
+    drop(seen);
+
+    let lock = registry
+        .resolved_lock
+        .as_ref()
+        .expect("resolution produced a lock");
+    let names: Vec<String> = lock
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["com.example:direct 2.0.0", "com.example:lib 1.0.0"]
+    );
+    let text = registry.resolved_text().unwrap();
+    assert_eq!(
+        jals_resolve::lock::Lockfile::parse(&text).unwrap(),
+        *lock,
+        "the rendered lock parses back"
+    );
+
+    let seen = fetcher.seen.borrow();
+    assert!(
+        seen.iter().any(|url| url.ends_with("lib-1.0.0.jar")),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|url| url.ends_with("direct-2.0.0.jar")),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn the_lock_covers_optional_and_dev_entries_the_selection_skips() {
+    const BASE: &str = "https://repo.test/maven2";
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+lib = { group = "com.example", version = "1", registry = "test" }
+opt = { group = "com.example", version = "3.0.0", registry = "test", optional = true }
+
+[dev-dependencies]
+dev = { group = "com.example", version = "4.0.0", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/maven-metadata.xml"),
+        br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+    );
+    for (artifact, version) in [("lib", "1.0.0"), ("opt", "3.0.0"), ("dev", "4.0.0")] {
+        fetcher.add(
+            &format!("{BASE}/com/example/{artifact}/{version}/{artifact}-{version}.pom"),
+            format!(
+                "<project><groupId>com.example</groupId><artifactId>{artifact}</artifactId><version>{version}</version></project>"
+            )
+            .as_bytes(),
+        );
+    }
+    let features = features(&manifest);
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve(
+            &manifest,
+            DependencyScope::Build,
+            &features,
+            &fetcher,
+            None,
+            jals_classpath::LockMode::Generate,
+        )
+        .await
+        .unwrap()
+    })
+    .unwrap();
+
+    // The classpath selection skips the unactivated optional entry and the dev table.
+    let specs: Vec<String> = graphs
+        .specs
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    assert_eq!(specs, vec!["com.example-lib"]);
+
+    // The lock covers every declared registry entry regardless of the selection.
+    let names: Vec<String> = graphs
+        .lock
+        .as_ref()
+        .unwrap()
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "com.example:dev 4.0.0",
+            "com.example:lib 1.0.0",
+            "com.example:opt 3.0.0",
+        ]
+    );
+}
+
+#[test]
+fn a_dev_only_manifest_still_generates_the_lock() {
+    // `[dev-dependencies]` under a build scope leaves the selected classpath with no registry
+    // entry at all. The lock is still supposed to cover the dev table, and the gate in
+    // `resolve_registry` used to return before the full pass that does it, so no `jals.lock` was
+    // ever written for a project whose only registry dependency is a dev one.
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dev-dependencies]
+dev = { group = "com.example", version = "4.0.0", registry = "test" }
+"#,
+    );
+    // No version index: the pinned requirement resolves to its base, and the POM is what the
+    // summary needs.
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/dev/4.0.0/dev-4.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>dev</artifactId><version>4.0.0</version></project>",
+    );
+    let fetcher_ref = &fetcher;
+    let (inputs, registry) = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                Some(&mut registry),
+            )
+            .await;
+            (inputs, registry)
+        }
+    })
+    .unwrap();
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    // Nothing is on the build classpath: the only entry is a dev one...
+    assert!(
+        inputs.dependency_jars.is_empty(),
+        "the build classpath holds only the dev entry: {:?}",
+        inputs.dependency_jars.len()
+    );
+    // ...but the full pass resolved it, so a lock-generating host has a file to write.
+    let lock = registry
+        .resolved_lock
+        .expect("the full pass generates the lock for the dev entry");
+    let names: Vec<String> = lock
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(names, vec!["com.example:dev 4.0.0"]);
+}
+
+#[test]
+fn workspace_members_share_one_lock_and_one_transitive_package() {
+    const BASE: &str = "https://repo.test/maven2";
+    let member_a: Manifest = "[package]\nname = \"a\"\n\n[registries.test]\nurl = \"https://repo.test/maven2\"\n\n[dependencies]\nlib = { group = \"com.example\", version = \"1\", registry = \"test\" }\n"
+        .parse()
+        .unwrap();
+    let member_b: Manifest = "[package]\nname = \"b\"\n\n[registries.test]\nurl = \"https://repo.test/maven2\"\n\n[dependencies]\nshared = { group = \"com.example\", version = \"2.0.0\", registry = \"test\" }\n"
+        .parse()
+        .unwrap();
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/maven-metadata.xml"),
+        br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom"),
+        br"<project>
+              <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>shared</artifactId><version>2.0.0</version></dependency>
+              </dependencies>
+            </project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/shared/2.0.0/shared-2.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>shared</artifactId><version>2.0.0</version></project>",
+    );
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve_workspace(&[&member_a, &member_b], &fetcher, None)
+            .await
+            .unwrap()
+    })
+    .unwrap();
+    assert!(
+        graphs.specs.is_empty(),
+        "a workspace lock projects no classpath"
+    );
+    let names: Vec<String> = graphs
+        .lock
+        .as_ref()
+        .unwrap()
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["com.example:lib 1.0.0", "com.example:shared 2.0.0"],
+        "`shared` is reached from both members and is one package"
+    );
+}
+
+#[test]
+fn a_workspace_without_registry_dependencies_produces_no_lock() {
+    // The CLI writes a lock whenever `RegistryGraphs::lock` is `Some`, and fails `--locked` on a
+    // byte mismatch. An empty lock here would write `version = 1` on every first build and then
+    // make `--locked` demand that file; a workspace with nothing to resolve must hand back `None`.
+    let member_a: Manifest = "[package]\nname = \"a\"\n".parse().unwrap();
+    let member_b: Manifest = "[package]\nname = \"b\"\n".parse().unwrap();
+    let fetcher = MapFetcher::new();
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve_workspace(&[&member_a, &member_b], &fetcher, None)
+            .await
+            .unwrap()
+    })
+    .unwrap();
+    assert!(
+        graphs.lock.is_none(),
+        "an empty lock is not a lock: {:?}",
+        graphs.packages
+    );
 }

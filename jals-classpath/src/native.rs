@@ -10,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -20,6 +21,11 @@ use jals_config::{
 };
 use jals_exec::tokio_rt::{on_blocking_pool, sleep_millis};
 use jals_progress::{Progress, Task};
+use jals_resolve::id::{PackageId, PackageName, RegistryId, SourceId};
+use jals_resolve::lock::Lockfile;
+use jals_resolve::resolve::{ResolveGraph, Resolver};
+use jals_resolve::summary::{RootRequest, SourceRequest};
+use jals_resolve::version::Version;
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
     NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, ProvenanceFold,
@@ -27,11 +33,374 @@ use jals_storage::{
 };
 
 use crate::io::Fetch;
+use crate::maven::{Coordinate, MavenProvider};
 use crate::{
-    ClasspathEntry, DependencyLocation, ExternalLocator, FetchError, Fetcher, LibrarySource,
-    NetworkPolicy, ProjectInputOptions, ProjectInputPlan, ProjectInputs, RetrySchedule, Warning,
-    WarningOrigin,
+    ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, FetchError, Fetcher,
+    LibrarySource, NetworkPolicy, ProjectInputOptions, ProjectInputPlan, ProjectInputs,
+    RetrySchedule, Warning, WarningOrigin,
 };
+
+/// The lock a host reads before registry resolution and receives back afterwards.
+///
+/// The host owns persistence: this crate performs the resolution and hands back the lock it
+/// produced, because writing a file beside the manifest is a host concern (`jals-cli` reads and
+/// writes `jals.lock` next to the project root; the language server passes `None` and drops the
+/// result).
+#[derive(Debug, Clone)]
+pub struct RegistryResolution {
+    /// The previous `jals.lock`, when the host has one. Pins survive resolution.
+    pub lock: Option<Lockfile>,
+    /// Whether the classpath pass also generates the lock. A host that already resolved a
+    /// workspace-wide lock (because one file covers every member) clears this, so the
+    /// member-scoped pass pins against the lock without shrinking it.
+    pub generate_lock: bool,
+    /// The lock this resolution produced, when at least one registry dependency was resolved.
+    pub resolved_lock: Option<Lockfile>,
+    /// The external packages that were resolved, id-sorted, for hosts that render a tree.
+    pub packages: Vec<PackageName>,
+    /// Warnings resolution produced without failing.
+    warnings: Vec<String>,
+}
+
+impl Default for RegistryResolution {
+    fn default() -> Self {
+        Self {
+            lock: None,
+            generate_lock: true,
+            resolved_lock: None,
+            packages: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+impl RegistryResolution {
+    /// A resolution with no lock preference and no outcome yet.
+    fn new(lock: Option<Lockfile>) -> Self {
+        Self {
+            lock,
+            ..Self::default()
+        }
+    }
+
+    /// Parse a host's `jals.lock` text, when there is one.
+    ///
+    /// # Errors
+    /// [`jals_resolve::lock::LockError`] for a malformed or unsupported lock. A host decides
+    /// whether that is fatal (it is for `jals build`) or ignorable.
+    pub fn from_lock_text(text: Option<&str>) -> Result<Self, jals_resolve::lock::LockError> {
+        match text {
+            Some(text) => Ok(Self::new(Some(Lockfile::parse(text)?))),
+            None => Ok(Self::default()),
+        }
+    }
+
+    /// The lockfile spelling of the outcome, for a host that compares before writing.
+    pub fn resolved_text(&self) -> Option<String> {
+        self.resolved_lock.as_ref().map(Lockfile::render)
+    }
+}
+
+/// Which lock pass a registry resolution performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockMode {
+    /// Also resolve with every registry entry (and every dev entry) active, so the lock is the
+    /// same whatever `--features` selects.
+    Generate,
+    /// Resolve only the selection's graph and produce no lock. The language server's case: it
+    /// needs the classpath, not the file.
+    Skip,
+}
+
+/// One manifest's registry resolution: the classpath specs for the selection and the lock over
+/// everything it declares.
+#[derive(Debug, Default)]
+pub struct RegistryGraphs {
+    /// External dependency specs for the selected classpath, in resolver order.
+    pub specs: Vec<DependencySpec>,
+    /// The feature-independent lock, when one was generated *and* carries at least one package.
+    /// An empty lock is not a lock: a project with no registry dependency has nothing to pin, and
+    /// writing `version = 1` alone would make `--locked` demand a file nothing resolves against.
+    pub lock: Option<Lockfile>,
+    /// Names in the lock (or the selected graph when no lock was generated), id-sorted.
+    pub packages: Vec<PackageName>,
+    /// Non-fatal messages from either pass.
+    warnings: Vec<String>,
+}
+
+/// Registry resolution as a standalone step.
+///
+/// `jals-classpath`'s classpath phase and `jals-cli`'s `jals update` share this: one resolves the
+/// selected graph and generates the lock alongside it; the other generates the lock alone. Both
+/// go through one [`MavenProvider`], so a two-pass resolution (selection + full lock) fetches
+/// each POM once.
+pub struct RegistryResolver;
+
+impl RegistryResolver {
+    /// Resolve `manifest`'s registry dependencies.
+    ///
+    /// # Errors
+    /// A lowering error, or any resolver failure (no matching version, conflicting requirements,
+    /// provider I/O). The caller decides whether that is fatal (`jals update`) or a warning
+    /// (a classpath phase that would otherwise compile with a silently short classpath).
+    pub async fn resolve<F: Fetcher>(
+        manifest: &Manifest,
+        scope: DependencyScope,
+        features: &ResolvedBuildFeatures,
+        fetcher: &F,
+        lock: Option<&Lockfile>,
+        mode: LockMode,
+    ) -> Result<RegistryGraphs, String> {
+        let registries = Self::registry_urls(manifest);
+        let mut provider = MavenProvider::new(fetcher, registries.clone());
+        let selected_root = Self::root_request(manifest, features, scope, false)?;
+        let selected = Resolver::new(&mut provider)
+            .resolve(&[selected_root], lock)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut warnings: Vec<String> = selected.warnings.iter().map(ToString::to_string).collect();
+        // The lock must not move with the feature selection: a run that activates an optional
+        // entry would otherwise rewrite it and every other selection would rewrite it back. So
+        // the lock is generated from a second pass with every registry entry (dev included)
+        // forced active, and the shared provider makes its extra POM reads cache hits.
+        let lockfile = if mode == LockMode::Generate {
+            if Self::needs_full_pass(manifest, scope) {
+                let full_root = Self::root_request(manifest, features, scope, true)?;
+                let full = Resolver::new(&mut provider)
+                    .resolve(&[full_root], lock)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                warnings.extend(full.warnings.iter().map(ToString::to_string));
+                Some(full.lockfile())
+            } else {
+                Some(selected.lockfile())
+            }
+        } else {
+            None
+        };
+        // An empty lock is not a lock. `RegistryGraphs::lock` gates a host's write, so a manifest
+        // with no registry package must hand back `None` rather than `version = 1` alone: a
+        // `--locked` build of such a project must not demand a file nothing resolves against.
+        let lockfile = lockfile.filter(|lock| !lock.packages.is_empty());
+        let specs = Self::specs(&selected, &registries);
+        let packages = match &lockfile {
+            Some(lock) => lock
+                .packages
+                .iter()
+                .map(|package| package.id.name.clone())
+                .collect(),
+            None => selected
+                .packages
+                .iter()
+                .map(|package| package.id.name.clone())
+                .collect(),
+        };
+        Ok(RegistryGraphs {
+            specs,
+            lock: lockfile,
+            packages,
+            warnings,
+        })
+    }
+
+    /// Whether the lock pass differs from the selected pass: an optional registry entry the
+    /// selection may not activate (in either table), or a dev entry a build-scope selection
+    /// excludes.
+    fn needs_full_pass(manifest: &Manifest, scope: DependencyScope) -> bool {
+        let optional = manifest
+            .dependencies
+            .values()
+            .chain(manifest.dev_dependencies.values())
+            .any(|entry| entry.registry_version().is_some() && entry.is_optional());
+        let dev = manifest
+            .dev_dependencies
+            .values()
+            .any(|entry| entry.registry_version().is_some());
+        optional || (dev && scope != DependencyScope::Test)
+    }
+
+    /// Resolve every workspace member into **one** lock.
+    ///
+    /// Each member is a root, so a transitive package two members share is one package — the
+    /// resolver's one-version-per-name rule makes the workspace's classpaths agree. `specs` is
+    /// empty: a workspace lock says what the members resolve to, and each member's own classpath
+    /// phase then resolves its selection against the written lock.
+    ///
+    /// # Errors
+    /// Two members with one package name, two declarations of one registry name with different
+    /// URLs, a lowering failure, or any resolver failure.
+    pub async fn resolve_workspace<F: Fetcher>(
+        members: &[&Manifest],
+        fetcher: &F,
+        lock: Option<&Lockfile>,
+    ) -> Result<RegistryGraphs, String> {
+        let registries = Self::merged_registries(members)?;
+        let mut provider = MavenProvider::new(fetcher, registries);
+        let defaults = ResolvedBuildFeatures::default();
+        let mut roots = Vec::with_capacity(members.len());
+        let mut names = BTreeSet::new();
+        for manifest in members {
+            let root = Self::root_request(manifest, &defaults, DependencyScope::Test, true)?;
+            let name = root.summary.id.name.to_string();
+            if !names.insert(name.clone()) {
+                return Err(format!(
+                    "two workspace members are named `{name}`; member names must be unique"
+                ));
+            }
+            roots.push(root);
+        }
+        let graph = Resolver::new(&mut provider)
+            .resolve(&roots, lock)
+            .await
+            .map_err(|error| error.to_string())?;
+        let packages: Vec<PackageName> = graph
+            .packages
+            .iter()
+            .map(|package| package.id.name.clone())
+            .collect();
+        Ok(RegistryGraphs {
+            specs: Vec::new(),
+            // An empty lock is not a lock, exactly as in `resolve`: a workspace with no registry
+            // package must not make its host write `version = 1` (nor fail `--locked` against it).
+            lock: (!packages.is_empty()).then(|| graph.lockfile()),
+            packages,
+            warnings: graph.warnings.iter().map(ToString::to_string).collect(),
+        })
+    }
+
+    /// Union of every member's `[registries]`, rejecting one name with two URLs.
+    fn merged_registries(members: &[&Manifest]) -> Result<BTreeMap<String, String>, String> {
+        let mut merged: BTreeMap<String, String> = BTreeMap::new();
+        for manifest in members {
+            for (name, registry) in &manifest.registries {
+                match merged.get(name) {
+                    Some(url) if url != &registry.url => {
+                        return Err(format!(
+                            "registry `{name}` is declared with two different URLs (`{url}` and \
+                             `{}`)",
+                            registry.url
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        merged.insert(name.clone(), registry.url.clone());
+                    }
+                }
+            }
+        }
+        merged
+            .entry(RegistryId::MAVEN_CENTRAL.to_owned())
+            .or_insert_with(|| "https://repo1.maven.org/maven2".to_owned());
+        Ok(merged)
+    }
+
+    /// The registry name → base URL map, with the implicit `maven-central` default.
+    fn registry_urls(manifest: &Manifest) -> BTreeMap<String, String> {
+        let mut registries: BTreeMap<String, String> = manifest
+            .registries
+            .iter()
+            .map(|(name, registry)| (name.clone(), registry.url.clone()))
+            .collect();
+        registries
+            .entry(RegistryId::MAVEN_CENTRAL.to_owned())
+            .or_insert_with(|| "https://repo1.maven.org/maven2".to_owned());
+        registries
+    }
+
+    /// The root request for one pass.
+    ///
+    /// `force_all` clears `optional` on every retained registry edge and includes the dev table,
+    /// which is what makes the lock feature-independent.
+    fn root_request(
+        manifest: &Manifest,
+        features: &ResolvedBuildFeatures,
+        scope: DependencyScope,
+        force_all: bool,
+    ) -> Result<RootRequest, String> {
+        let root_name = manifest
+            .package
+            .name
+            .clone()
+            .unwrap_or_else(|| "jals-root".to_owned());
+        let name = PackageName::new(root_name.clone()).map_err(|error| {
+            format!("project name `{root_name}` is not a package name: {error}")
+        })?;
+        let version = manifest
+            .package
+            .version
+            .as_deref()
+            .and_then(|text| Version::parse(text).ok())
+            .unwrap_or_else(|| Version::parse("0.0.0").expect("`0.0.0` parses"));
+        let id = PackageId::new(
+            name,
+            version,
+            SourceId::Workspace(jals_resolve::id::WorkspaceSource { member: root_name }),
+        );
+        let mut summary = manifest
+            .resolver_summary(id)
+            .map_err(|error| error.to_string())?;
+        // Only registry edges are this resolver's business; `git`/`path` entries are graph nodes
+        // whose provider lives in `jals-project`.
+        summary
+            .dependencies
+            .retain(|request| matches!(request.source, SourceRequest::Registry { .. }));
+        if force_all {
+            for dependency in &mut summary.dependencies {
+                dependency.optional = false;
+            }
+        }
+        Ok(RootRequest {
+            summary,
+            // The resolved selection already expanded `default`; re-asking would double-expand.
+            features: if force_all {
+                BTreeSet::default()
+            } else {
+                features.features().clone()
+            },
+            default_features: false,
+            include_dev: force_all || scope == DependencyScope::Test,
+        })
+    }
+
+    /// Map a resolved graph's packages onto external jar specs.
+    fn specs(graph: &ResolveGraph, registries: &BTreeMap<String, String>) -> Vec<DependencySpec> {
+        let mut specs = Vec::new();
+        for package in &graph.packages {
+            let SourceId::Registry(registry_name) = &package.id.source else {
+                continue;
+            };
+            let Some(coordinate) = Coordinate::parse(&package.id.name) else {
+                continue;
+            };
+            let Some(base) = registries.get(registry_name.as_str()) else {
+                continue;
+            };
+            let url = coordinate.artifact_url(base, &package.id.version, "jar");
+            // A `Name` is a portable path component: a coordinate's `:` is a Windows-reserved
+            // character, so the diagnostic label folds it to `-`. Nothing keys on this name
+            // except progress and warning text (`remap` is never set here).
+            let Ok(name) = Name::new(package.id.name.as_str().replace(':', "-")) else {
+                continue;
+            };
+            specs.push(DependencySpec {
+                name,
+                location: DependencyLocation::External {
+                    locator: ExternalLocator::new(url),
+                    // The verified cache is SHA-256 addressed; a SHA-1 sidecar checksum is kept
+                    // in the lock but cannot pin this location's cache key.
+                    expected: package.checksum.as_ref().and_then(|checksum| {
+                        (checksum.algorithm() == jals_resolve::id::ChecksumAlgorithm::Sha256)
+                            .then(|| ContentDigest::from_hex(checksum.hex()))
+                            .flatten()
+                    }),
+                },
+                remap: None,
+                recursive: false,
+            });
+        }
+        specs
+    }
+}
 
 /// A fetcher backed by `reqwest`'s async client.
 pub struct ReqwestFetcher {
@@ -280,6 +649,12 @@ pub struct NativeProjectPlan {
     /// `path` dependencies outside the project root, resolved against the host filesystem by
     /// [`materialize_path_sources`](Self::materialize_path_sources).
     path_dependencies: Vec<(Name, PathDependency)>,
+    /// Maven registry entries, resolved into classpath specs by
+    /// [`resolve_registry`](Self::resolve_registry) before the plan executes. They are not
+    /// project-graph nodes: a registry package contributes a jar, never `.java` a build script
+    /// could read. The manifest summary is the resolver's input, so the collected value carries
+    /// no name.
+    registry_dependencies: Vec<Dependency>,
     external_source_roots: Vec<PathBuf>,
     external_classpath: Vec<PathBuf>,
 }
@@ -308,6 +683,7 @@ impl NativeProjectPlan {
         fetcher: &F,
         options: ProjectInputOptions,
         progress: &Progress,
+        registry: Option<&mut RegistryResolution>,
     ) -> (ProjectInputs, Vec<DirKey>) {
         let mut native =
             Self::from_manifest(manifest, scope, features, project_root, &storage.view());
@@ -319,6 +695,15 @@ impl NativeProjectPlan {
             .materialize_git_sources(project_root, storage, fetcher)
             .await;
         native.materialize_path_sources(project_root, storage).await;
+        // Registry resolution runs after host materialization and before execution: its specs go
+        // through the same dependency resolver as explicit jars, so POM traversal is one batch of
+        // metadata/POM fetches and the jars download in parallel through the verified cache.
+        if let Some(specs) = native
+            .resolve_registry(manifest, scope, features, fetcher, registry)
+            .await
+        {
+            native.plan.dependencies.extend(specs);
+        }
         let mut inputs =
             ProjectInputs::assemble(fetcher, storage, &native.plan, options, progress).await;
         native.warnings.append(&mut inputs.warnings);
@@ -326,13 +711,76 @@ impl NativeProjectPlan {
         (inputs, native.source_roots)
     }
 
+    /// Resolve every registry entry into `DependencySpec`s and record the lock.
+    ///
+    /// Thin wrapper over [`RegistryResolver::resolve`]. Failure becomes a warning: a build whose
+    /// classpath is missing a library fails at `javac` with a missing symbol, which is worse than
+    /// the resolver's own message.
+    async fn resolve_registry<F: Fetcher>(
+        &mut self,
+        manifest: &Manifest,
+        scope: DependencyScope,
+        features: &ResolvedBuildFeatures,
+        fetcher: &F,
+        registry: Option<&mut RegistryResolution>,
+    ) -> Option<Vec<DependencySpec>> {
+        // A host without lock persistence (the language server) still gets resolution; it just
+        // has nowhere to store the outcome, and no full-lock pass to pay for. A host that already
+        // resolved the workspace lock (`generate_lock == false`) pins against it without
+        // generating it again.
+        let host_has_lock = registry.is_some();
+        let mut scratch = RegistryResolution::default();
+        let registry = registry.map_or(&mut scratch, |registry| registry);
+        let generate_lock = host_has_lock && registry.generate_lock;
+        // A selection with no active registry entry can still have work: `needs_full_pass` exists
+        // because the lock must cover the optional and dev entries a selection skips, and the
+        // full pass is the only place they resolve. Only a lock-generating host is asked to pay
+        // for that, so a classpath-only pass (the language server, a workspace member) still
+        // returns early when the selection itself is empty.
+        if self.registry_dependencies.is_empty()
+            && !(generate_lock && RegistryResolver::needs_full_pass(manifest, scope))
+        {
+            return None;
+        }
+        let graphs = match RegistryResolver::resolve(
+            manifest,
+            scope,
+            features,
+            fetcher,
+            registry.lock.as_ref(),
+            if generate_lock {
+                LockMode::Generate
+            } else {
+                LockMode::Skip
+            },
+        )
+        .await
+        {
+            Ok(graphs) => graphs,
+            Err(error) => {
+                self.warnings.push(Warning::new(
+                    WarningOrigin::External(ExternalLocator::new("registry")),
+                    format!("registry dependencies could not be resolved: {error}"),
+                ));
+                return None;
+            }
+        };
+        if let Some(lock) = graphs.lock {
+            registry.resolved_lock = Some(lock);
+        }
+        registry.packages = graphs.packages;
+        registry.warnings.extend(graphs.warnings);
+        Some(graphs.specs)
+    }
+
     /// Lower the source roots, the `[build] classpath`, and the dependency entries `scope`
     /// declares into the portable plan.
     ///
     /// `scope` is the host's, never inferred: the two callers ask different questions. The
-    /// projection path hands over a manifest whose dependency tables `ProjectScript::root_only`
-    /// already emptied — every declared entry is a graph node there — so only `jals lint`'s
-    /// graph-less fallback reaches this with entries still in place.
+    /// projection path hands over a manifest whose non-registry tables `ProjectScript::root_only`
+    /// already emptied — every such entry is a graph node there — so the registry entries it kept
+    /// are lowered under the caller's own selection, and only `jals lint`'s graph-less fallback
+    /// reaches this with the other forms still in place.
     pub fn from_manifest(
         manifest: &Manifest,
         scope: DependencyScope,
@@ -349,6 +797,7 @@ impl NativeProjectPlan {
             warnings: Vec::new(),
             git_dependencies: Vec::new(),
             path_dependencies: Vec::new(),
+            registry_dependencies: Vec::new(),
             external_source_roots: Vec::new(),
             external_classpath: Vec::new(),
         };
@@ -427,6 +876,17 @@ impl NativeProjectPlan {
             if matches!(dependency, Dependency::Jar(_)) {
                 continue;
             }
+            // Registry entries come first: their coordinate keys (`group:artifact`) are not
+            // portable `Name`s, and they are not lowered as graph input either way — the
+            // resolver reads them from the manifest summary, so the collected value carries no
+            // name.
+            if matches!(
+                dependency,
+                Dependency::Registry(_) | Dependency::RegistryVersion(_)
+            ) {
+                result.registry_dependencies.push(dependency.clone());
+                continue;
+            }
             let name = match Name::new(raw_name) {
                 Ok(name) => name,
                 Err(error) => {
@@ -442,7 +902,10 @@ impl NativeProjectPlan {
                 // classpath entry and no `.java` source either: what it needs is a link at
                 // instantiation, which is the compile's and the runner's business, not the
                 // resolver's.
-                Dependency::Jar(_) | Dependency::Wasm(_) => {}
+                Dependency::Jar(_)
+                | Dependency::Wasm(_)
+                | Dependency::Registry(_)
+                | Dependency::RegistryVersion(_) => {}
                 Dependency::Path(path) => match Self::project_path_root(path, project_root, view) {
                     Ok(Some(key)) => result.plan.source_dependency_roots.push(key),
                     // Outside the project root: scanned from the host filesystem by
@@ -541,7 +1004,9 @@ impl NativeProjectPlan {
                         scopes.push(NativeScope::all(path));
                     }
                 }
-                Dependency::Git(_) => {}
+                // Registry packages have no local bytes to snapshot; their POM and jar live in the
+                // repository, and the artifact cache captures the jar when it is downloaded.
+                Dependency::Git(_) | Dependency::Registry(_) | Dependency::RegistryVersion(_) => {}
             }
         }
         scopes

@@ -293,6 +293,10 @@ impl<H: GraphHost> GraphWalk<'_, H> {
                         }
                         continue;
                     }
+                    // A registry entry is not a graph node: it has no project to walk and no
+                    // build script to run. `jals-classpath` resolves the whole POM graph in one
+                    // place (`RegistryResolution`) and projects jars straight onto the classpath.
+                    Dependency::Registry(_) | Dependency::RegistryVersion(_) => continue,
                 };
                 match acquired {
                     Ok(acquired) => {
