@@ -852,34 +852,47 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
         &mut self,
         requests: Vec<CandidateRequest>,
     ) -> Vec<Result<Vec<Candidate>, Self::Error>> {
-        // Plan every URL first; each fetch future then borrows only the shared fetcher and its
-        // own owned locator, which is what lets `join_ordered` overlap them.
-        let plans: Vec<Result<(Coordinate, RegistryId, ExternalLocator), String>> = requests
-            .iter()
-            .map(|entry| {
-                let coordinate = Coordinate::parse(&entry.request.package).ok_or_else(|| {
-                    format!("`{}` is not a Maven coordinate", entry.request.package)
-                })?;
-                let registry = match &entry.request.source {
-                    SourceRequest::Registry { registry } => registry.clone(),
-                    other => {
-                        return Err(format!(
-                            "the Maven provider cannot answer a request from `{other}`"
-                        ));
+        // Plan every request first. A list an earlier call already memoized names no URL, so the
+        // second resolver pass over one provider (selection, then the full lock) does not refetch
+        // `maven-metadata.xml`; every remaining fetch future borrows only the shared fetcher and
+        // its own owned locator, which is what lets `join_ordered` overlap them.
+        let plans: Vec<Result<(Coordinate, RegistryId, Option<ExternalLocator>), String>> =
+            requests
+                .iter()
+                .map(|entry| {
+                    let coordinate =
+                        Coordinate::parse(&entry.request.package).ok_or_else(|| {
+                            format!("`{}` is not a Maven coordinate", entry.request.package)
+                        })?;
+                    let registry = match &entry.request.source {
+                        SourceRequest::Registry { registry } => registry.clone(),
+                        other => {
+                            return Err(format!(
+                                "the Maven provider cannot answer a request from `{other}`"
+                            ));
+                        }
+                    };
+                    if self
+                        .metadata
+                        .contains_key(&(coordinate.clone(), registry.clone()))
+                    {
+                        return Ok((coordinate, registry, None));
                     }
-                };
-                let base = self.base_url(&registry)?.to_owned();
-                let url = Self::join(
-                    &base,
-                    &format!("{}/maven-metadata.xml", coordinate.directory()),
-                );
-                Ok((coordinate, registry, Self::locator(&url)))
-            })
-            .collect();
+                    let base = self.base_url(&registry)?.to_owned();
+                    let url = Self::join(
+                        &base,
+                        &format!("{}/maven-metadata.xml", coordinate.directory()),
+                    );
+                    Ok((coordinate, registry, Some(Self::locator(&url))))
+                })
+                .collect();
         let fetchable: Vec<usize> = plans
             .iter()
             .enumerate()
-            .filter_map(|(index, plan)| plan.as_ref().ok().map(|_| index))
+            .filter_map(|(index, plan)| match plan {
+                Ok((_, _, Some(_))) => Some(index),
+                _ => None,
+            })
             .collect();
         let tasks: Vec<Task> = fetchable.iter().map(|_| Task::silent()).collect();
         let fetcher = self.fetcher;
@@ -887,11 +900,11 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
             .iter()
             .zip(&tasks)
             .map(|(index, task)| match &plans[*index] {
-                Ok((_, _, locator)) => {
+                Ok((_, _, Some(locator))) => {
                     let locator = locator.clone();
                     async move { Fetch::bounded(fetcher, &locator, MAX_METADATA_BYTES, task).await }
                 }
-                Err(_) => unreachable!("only planned entries are fetched"),
+                _ => unreachable!("only planned entries are fetched"),
             });
         let fetched = jals_exec::join_ordered(futures).await;
         let mut bodies: BTreeMap<usize, Result<Vec<u8>, String>> = BTreeMap::new();
@@ -902,30 +915,37 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
         for (index, plan) in plans.into_iter().enumerate() {
             let result = match plan {
                 Err(error) => Err(error),
-                Ok((coordinate, registry, _)) => {
-                    let versions = match bodies.remove(&index) {
-                        Some(Ok(bytes)) => match Self::parse_versions(&bytes) {
-                            Ok(versions) => versions,
-                            Err(error) => {
-                                results.push(Err(error));
-                                continue;
-                            }
-                        },
-                        Some(Err(error)) => {
-                            match (
-                                requests[index].request.version.pinned_base().cloned(),
-                                requests[index].locked.as_ref(),
-                            ) {
-                                (Some(version), _) => vec![version],
-                                (None, Some(locked)) => vec![locked.id.version.clone()],
-                                (None, None) => {
+                Ok((coordinate, registry, locator)) => {
+                    let versions = if locator.is_some() {
+                        match bodies.remove(&index) {
+                            Some(Ok(bytes)) => match Self::parse_versions(&bytes) {
+                                Ok(versions) => versions,
+                                Err(error) => {
                                     results.push(Err(error));
                                     continue;
                                 }
+                            },
+                            Some(Err(error)) => {
+                                match (
+                                    requests[index].request.version.pinned_base().cloned(),
+                                    requests[index].locked.as_ref(),
+                                ) {
+                                    (Some(version), _) => vec![version],
+                                    (None, Some(locked)) => vec![locked.id.version.clone()],
+                                    (None, None) => {
+                                        results.push(Err(error));
+                                        continue;
+                                    }
+                                }
                             }
+                            // A planned fetch always has a body; an empty list is honest.
+                            None => Vec::new(),
                         }
-                        // A plan that named no URL cannot happen; an empty list is honest.
-                        None => Vec::new(),
+                    } else {
+                        self.metadata
+                            .get(&(coordinate.clone(), registry.clone()))
+                            .cloned()
+                            .unwrap_or_default()
                     };
                     self.metadata
                         .insert((coordinate.clone(), registry.clone()), versions.clone());
@@ -944,10 +964,12 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
     }
 
     async fn summaries_batch(&mut self, ids: &[PackageId]) -> Vec<Result<Summary, Self::Error>> {
-        // Fetch every direct POM concurrently, memoize the parsed documents, then build
-        // effective POMs in input order. Parents and BOM imports hit the memo, so shared
-        // ancestry is fetched once even across a wide batch.
-        let plans: Vec<Result<(Coordinate, RegistryId, ExternalLocator), String>> = ids
+        // Plan the POM fetches first. A POM an earlier call already memoized — including one
+        // fetched as a parent or BOM import while expanding an earlier summary — names no URL, so
+        // the second resolver pass over one provider does not refetch it. The rest are fetched
+        // concurrently, then parsed and expanded in input order; ancestry hits the memo, so shared
+        // POMs are fetched once even across a wide batch.
+        let plans: Vec<Result<(Coordinate, RegistryId, Option<ExternalLocator>), String>> = ids
             .iter()
             .map(|id| {
                 let coordinate = Coordinate::parse(&id.name)
@@ -956,15 +978,26 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
                     SourceId::Registry(registry) => registry.clone(),
                     other => return Err(format!("the Maven provider cannot answer `{other}`")),
                 };
+                let key = (
+                    coordinate.clone(),
+                    id.version.as_str().to_owned(),
+                    registry.clone(),
+                );
+                if self.poms.contains_key(&key) {
+                    return Ok((coordinate, registry, None));
+                }
                 let base = self.base_url(&registry)?.to_owned();
                 let url = Self::pom_url(&coordinate, &id.version, &base);
-                Ok((coordinate, registry, Self::locator(&url)))
+                Ok((coordinate, registry, Some(Self::locator(&url))))
             })
             .collect();
         let fetchable: Vec<usize> = plans
             .iter()
             .enumerate()
-            .filter_map(|(index, plan)| plan.as_ref().ok().map(|_| index))
+            .filter_map(|(index, plan)| match plan {
+                Ok((_, _, Some(_))) => Some(index),
+                _ => None,
+            })
             .collect();
         let tasks: Vec<Task> = fetchable.iter().map(|_| Task::silent()).collect();
         let fetcher = self.fetcher;
@@ -972,11 +1005,11 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
             .iter()
             .zip(&tasks)
             .map(|(index, task)| match &plans[*index] {
-                Ok((_, _, locator)) => {
+                Ok((_, _, Some(locator))) => {
                     let locator = locator.clone();
                     async move { Fetch::bounded(fetcher, &locator, MAX_POM_BYTES, task).await }
                 }
-                Err(_) => unreachable!("only planned entries are fetched"),
+                _ => unreachable!("only planned entries are fetched"),
             });
         let fetched = jals_exec::join_ordered(futures).await;
         let mut bodies: BTreeMap<usize, Result<Vec<u8>, String>> = BTreeMap::new();
@@ -985,33 +1018,39 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
         }
         let mut results = Vec::with_capacity(ids.len());
         for (index, plan) in plans.into_iter().enumerate() {
-            let (coordinate, registry) = match plan {
-                Ok((coordinate, registry, _)) => (coordinate, registry),
+            let (coordinate, registry, locator) = match plan {
+                Ok(plan) => plan,
                 Err(error) => {
                     results.push(Err(error));
                     continue;
                 }
             };
-            if let Some(Ok(bytes)) = bodies.remove(&index) {
-                match Xml::pom(&bytes) {
-                    Ok(raw) => {
-                        self.poms.insert(
-                            (
-                                coordinate.clone(),
-                                ids[index].version.as_str().to_owned(),
-                                registry.clone(),
-                            ),
-                            raw,
-                        );
-                    }
-                    Err(error) => {
+            if locator.is_some() {
+                // One `remove` per index, so an `Err` body is reported rather than consumed by a
+                // first `if let Some(Ok(..))` and then silently refetched below.
+                match bodies.remove(&index) {
+                    Some(Ok(bytes)) => match Xml::pom(&bytes) {
+                        Ok(raw) => {
+                            self.poms.insert(
+                                (
+                                    coordinate.clone(),
+                                    ids[index].version.as_str().to_owned(),
+                                    registry.clone(),
+                                ),
+                                raw,
+                            );
+                        }
+                        Err(error) => {
+                            results.push(Err(error));
+                            continue;
+                        }
+                    },
+                    Some(Err(error)) => {
                         results.push(Err(error));
                         continue;
                     }
+                    None => {}
                 }
-            } else if let Some(Err(error)) = bodies.remove(&index) {
-                results.push(Err(error));
-                continue;
             }
             let effective =
                 Box::pin(self.effective(coordinate, ids[index].version.clone(), registry, 0)).await;
@@ -1030,6 +1069,7 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
 mod tests {
     use super::*;
     use alloc::vec;
+    use core::cell::Cell;
     use jals_resolve::summary::RootRequest;
 
     const BASE: &str = "https://repo.test/maven2";
@@ -1037,18 +1077,24 @@ mod tests {
     /// A repository served from memory: path (below `BASE`) → bytes.
     struct MapFetcher {
         files: BTreeMap<String, Vec<u8>>,
+        fetches: Cell<usize>,
     }
 
     impl MapFetcher {
         fn new() -> Self {
             Self {
                 files: BTreeMap::new(),
+                fetches: Cell::new(0),
             }
         }
 
         fn add(&mut self, path: &str, body: &str) {
             self.files
                 .insert(format!("{BASE}/{path}"), body.as_bytes().to_vec());
+        }
+
+        fn fetches(&self) -> usize {
+            self.fetches.get()
         }
     }
 
@@ -1070,6 +1116,7 @@ mod tests {
             locator: &str,
             _report: &Task,
         ) -> Result<Vec<u8>, crate::FetchError> {
+            self.fetches.set(self.fetches.get() + 1);
             self.files
                 .get(locator)
                 .cloned()
@@ -1345,6 +1392,45 @@ mod tests {
         assert!(
             candidates.iter().any(|candidate| candidate.id == locked.id),
             "a pin the index no longer lists is still a candidate"
+        );
+    }
+
+    #[test]
+    fn batch_fetches_are_memoized_across_calls() {
+        let mut fetcher = MapFetcher::new();
+        add_lib_repository(&mut fetcher);
+        let mut provider = provider(&fetcher);
+        let candidates = CandidateRequest {
+            request: request("com.example:lib", "1"),
+            locked: None,
+        };
+        let first = jals_exec::block_on_inline(provider.candidates_batch(vec![candidates.clone()]));
+        assert_eq!(first.len(), 1);
+        assert!(first[0].is_ok(), "{:?}", first[0]);
+        let after_candidates = fetcher.fetches();
+        let second = jals_exec::block_on_inline(provider.candidates_batch(vec![candidates]));
+        assert_eq!(second.len(), 1);
+        assert!(second[0].is_ok(), "{:?}", second[0]);
+        assert_eq!(
+            fetcher.fetches(),
+            after_candidates,
+            "a memoized version list is not refetched"
+        );
+
+        let id = PackageId::new(
+            PackageName::new("com.example:lib").unwrap(),
+            Version::parse("1.1.0").unwrap(),
+            SourceId::Registry(registry()),
+        );
+        let first = jals_exec::block_on_inline(provider.summaries_batch(std::slice::from_ref(&id)));
+        assert!(first[0].is_ok(), "{:?}", first[0]);
+        let after_summaries = fetcher.fetches();
+        let second = jals_exec::block_on_inline(provider.summaries_batch(&[id]));
+        assert!(second[0].is_ok(), "{:?}", second[0]);
+        assert_eq!(
+            fetcher.fetches(),
+            after_summaries,
+            "a memoized POM is not refetched"
         );
     }
 
