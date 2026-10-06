@@ -207,7 +207,8 @@ Linux, macOS and Windows runners are all supported, on `x64` and `arm64`.
 ## Usage
 
 `jals` is invoked through subcommands: `fmt` (format source), `lint` (lint source), `lsp`
-(language server), and a Cargo-style build front end — `init`, `build`, `run`, and `clean`.
+(language server), a Cargo-style build front end — `init`, `build`, `run`, and `clean` — and
+`toolchain` (install and manage project-local JDKs under `target/jdk`).
 
 ### Global options
 
@@ -231,7 +232,7 @@ there, so they are refused alongside `json` rather than interleaving a second sc
 lines.
 
 A run narrates itself the way `cargo` does — `Preparing`, `Resolving`, `Downloaded`, `Extracting`,
-`Remapping`, `Decompiling`, `Indexing`, `Compiling`, `Packaging`, `Fresh`, `Finished` — attributing
+`Installed`, `Remapping`, `Decompiling`, `Indexing`, `Compiling`, `Packaging`, `Fresh`, `Finished` — attributing
 each line to the package it is about, with a progress bar per unit of work when stderr is a
 terminal. Downloads are aggregated into one line per phase rather than announced individually,
 which `-v` turns back into a line each:
@@ -374,7 +375,21 @@ jals run --invoke f -- 7    # for a `jals-wasm` project: call an exported static
 jals test                   # run every `#[test]` method, one JVM per test
 jals test --list            # list the tests without running them
 jals clean                  # remove the build output (target/classes, target/test-classes)
+
+jals toolchain install temurin@21  # download a JDK into target/jdk (rustup/jabba style)
+jals toolchain list                # what this project has installed
+jals toolchain which temurin@21    # print the JDK home a selector resolves to
+jals toolchain default temurin@21  # make it what plain `system` selections use
+jals toolchain link my-jdk /opt/jdk-21   # register a JDK that lives elsewhere
+jals toolchain uninstall temurin@21      # remove it again
 ```
+
+`[toolchain] compiler = { distribution = { name = "temurin", version = 21 } }` (and the same for
+`runtime`) makes `jals build`/`run`/`test` use — and, when it is missing, install — that JDK, so a
+fresh checkout builds without touching the host's Java installation. Everything lands under the
+project's `target/jdk`, `--offline` refuses the download, and `install` also accepts an archive URL
+(`--url`, `file://` works offline) for a vendor build the providers do not serve. Downloaded JDKs
+outlive `jals clean` — removing one is `jals toolchain uninstall`, not a build-output sweep.
 
 A minimal `jals.toml` — every key is optional and defaults to the Maven-style
 `src/main/java` → `target/classes` layout:

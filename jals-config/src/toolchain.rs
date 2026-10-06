@@ -23,12 +23,27 @@
 //! (pure, `no_std`). Turning a [`ToolSpec`] into an actual program path — discovering an installed
 //! JDK, honoring `$JAVA_HOME`/`$PATH` — is the host's job and lives in `jals-build`'s `native`
 //! feature (`SubprocessToolchain`), which keeps the filesystem and process I/O out of the pure
-//! model. Automatic download of a missing JDK is future work; today an unresolvable
-//! [`Distribution`] falls back to the system tools.
+//! model.
+//!
+//! [`Distribution`] resolves against the project-local store [`MANAGED_TOOLCHAIN_ROOT`] first and
+//! the host's installs second, and `jals build`/`run`/`test` install a selected distribution that
+//! is not present yet (`jals toolchain`; refused under `--offline`). The manifest therefore names
+//! a JDK without changing the machine it is built on.
 
 use alloc::string::String;
 
 use serde::{Deserialize, Serialize};
+
+/// The project-local toolchain store, relative to the project root.
+///
+/// `jals toolchain` installs JDKs here rather than into a user-level directory, so a project's
+/// toolchains are self-contained, travel with its `target/` under the usual ignore rules, and
+/// never touch the host environment. It is a *managed* root in the sense [`MANAGED_REMAP_ROOT`] is:
+/// this crate names where jals puts output it owns, and every consumer that lowers, discovers,
+/// cleans, or snapshots one reads the name from here rather than restating it.
+///
+/// [`MANAGED_REMAP_ROOT`]: crate::MANAGED_REMAP_ROOT
+pub const MANAGED_TOOLCHAIN_ROOT: &str = "target/jdk";
 
 /// Toolchain selection (`[toolchain]`).
 ///

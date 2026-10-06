@@ -1309,12 +1309,30 @@ impl ProjectStorage<NativeSource, NativeCache> {
         scopes: impl IntoIterator<Item = NativeScope>,
         exec: Exec,
     ) -> Result<Self> {
+        Self::for_project_scoped_excluding(root, scopes, [], exec).await
+    }
+
+    /// [`for_project_scoped`](Self::for_project_scoped) with extra native subtrees excluded.
+    ///
+    /// For a host-owned subtree that is a build *input* but not a project file to capture:
+    /// `jals toolchain`'s `target/jdk` is the case, and a `link`ed toolchain is a symlink out of
+    /// the root that a root-wide scope would otherwise diagnose on every build. The cache root and
+    /// `.git` are excluded here exactly as in the sibling above; naming them again is impossible,
+    /// because a caller appends to the same exclusion list.
+    pub async fn for_project_scoped_excluding(
+        root: impl AsRef<Path>,
+        scopes: impl IntoIterator<Item = NativeScope>,
+        excluding: impl IntoIterator<Item = RelativePath>,
+        exec: Exec,
+    ) -> Result<Self> {
         let root = root.as_ref();
         let cache_root = root.join(Self::PROJECT_CACHE_DIR);
-        let source = Self::source_excluding_cache(root, &cache_root)?
-            .excluding(RelativePath::parse(".git").expect(".git is a portable path"))
-            .scoped(scopes);
-        Self::open(source, NativeCache::new(cache_root), exec).await
+        let mut source = Self::source_excluding_cache(root, &cache_root)?
+            .excluding(RelativePath::parse(".git").expect(".git is a portable path"));
+        for path in excluding {
+            source = source.excluding(path);
+        }
+        Self::open(source.scoped(scopes), NativeCache::new(cache_root), exec).await
     }
 
     pub async fn native(

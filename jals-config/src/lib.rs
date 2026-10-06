@@ -49,4 +49,4 @@ pub use manifest::{
     ValidationError, Workspace,
 };
 pub use resolution::ResolveLowerError;
-pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};
+pub use toolchain::{Compiler, Distribution, MANAGED_TOOLCHAIN_ROOT, Runtime, ToolSpec, Toolchain};

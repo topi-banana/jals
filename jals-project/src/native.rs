@@ -483,6 +483,14 @@ impl NativeHost {
                         RelativePath::parse(NativeStorage::PROJECT_CACHE_DIR)
                             .expect("constant is portable"),
                     )
+                    // `jals toolchain`'s downloaded JDKs are `[toolchain]` *inputs*, not project
+                    // files: capturing them would read hundreds of megabytes per discovery, and a
+                    // `link`ed one is a symlink out of the root that would be diagnosed on every
+                    // build.
+                    .excluding(
+                        RelativePath::parse(jals_config::MANAGED_TOOLCHAIN_ROOT)
+                            .expect("constant is portable"),
+                    )
             })
         })
         .await

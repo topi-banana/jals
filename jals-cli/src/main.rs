@@ -7,6 +7,7 @@ mod session;
 mod shell;
 mod testrun;
 mod timings;
+mod toolchain;
 mod ui;
 mod workspace;
 
@@ -70,6 +71,8 @@ enum Commands {
     Update(UpdateArgs),
     /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
     Init(InitArgs),
+    /// Install and manage project-local JDKs under `target/jdk` (rustup/jabba style).
+    Toolchain(toolchain::ToolchainArgs),
 }
 
 #[derive(Args)]
@@ -605,6 +608,7 @@ fn main() -> ExitCode {
             Commands::Clean(args) => args.run(&session).await,
             Commands::Update(args) => args.run(&session).await,
             Commands::Init(args) => args.run(&session).await,
+            Commands::Toolchain(args) => args.run(&session).await,
         };
         session.finish_display();
         session.shell().clear_progress();
@@ -1098,16 +1102,33 @@ impl BuildArgs {
         if let Some(name) = &self.bin {
             jals_build::RunTarget::resolve(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
         }
-        // Assemble the root script outputs and complete transitive dependency graph. Structural graph
-        // and dependency-script failures abort before javac; lower-level classpath misses remain
-        // warnings so the resolver can report all deterministic diagnostics.
         // One fetch capability for the whole command. It carries `--offline`, so every phase that
-        // can fetch is handed the same answer instead of being told it separately.
+        // can fetch — the toolchain below included — is handed the same answer instead of being
+        // told it separately.
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
             jals_classpath::NetworkPolicy::when_offline(self.lock.policy().offline(self.offline)),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
+        // A `[toolchain] compiler` naming a distribution makes this compile depend on a JDK the
+        // project may not have yet; acquire it before the build asks for it. A `--dry-run` previews
+        // and installs nothing, which is what "prints without compiling" promises.
+        if !self.dry_run {
+            toolchain::Toolchain::ensure(
+                &manifest,
+                &root,
+                &fetcher,
+                session,
+                toolchain::Needs {
+                    compiler: matches!(manifest.build.backend, jals_config::BackendKind::Javac {}),
+                    runtime: false,
+                },
+            )
+            .await?;
+        }
+        // Assemble the root script outputs and complete transitive dependency graph. Structural graph
+        // and dependency-script failures abort before javac; lower-level classpath misses remain
+        // warnings so the resolver can report all deterministic diagnostics.
         let (sources, tree, inputs, _) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
@@ -1274,6 +1295,22 @@ impl RunArgs {
             jals_classpath::NetworkPolicy::when_offline(self.lock.policy().offline(self.offline)),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
+        // Acquire whatever this run will actually reach. `compiler` follows the same `[build]
+        // backend` rule as `jals build`; `runtime` is exactly the JVM arm, because a module is
+        // executed by the engine compiled into this binary and resolves no `java`.
+        if !self.dry_run {
+            toolchain::Toolchain::ensure(
+                &manifest,
+                &root,
+                &fetcher,
+                session,
+                toolchain::Needs {
+                    compiler: matches!(manifest.build.backend, jals_config::BackendKind::Javac {}),
+                    runtime: main_class.is_some(),
+                },
+            )
+            .await?;
+        }
         let (sources, tree, inputs, _) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
@@ -1331,7 +1368,7 @@ impl RunArgs {
         // produces no main class — so it cannot reach a `Some(run_request)`, and collapsing the
         // two `None`s keeps one absent runtime rather than two spellings of it.
         let runtime = match &run_request {
-            Some(_) => <dyn Runtime>::select(&manifest, exec).await,
+            Some(_) => <dyn Runtime>::select(&manifest, &root, exec).await,
             None => None,
         };
         let compile_request = plan.request();
@@ -1549,6 +1586,21 @@ impl TestArgs {
             jals_classpath::NetworkPolicy::when_offline(self.lock.policy().offline(self.offline)),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
+        // The compile half follows `[build] backend` exactly as `jals build` does, and the JVM
+        // runner is the only half that spawns `java`. A wasm lowering reaches no JDK at all: its
+        // backend is the in-process one and its engine is compiled into this binary. `--no-run`
+        // still compiles, so only the runtime half stands down under it.
+        toolchain::Toolchain::ensure(
+            &manifest,
+            &root,
+            &fetcher,
+            session,
+            toolchain::Needs {
+                compiler: matches!(manifest.build.backend, jals_config::BackendKind::Javac {}),
+                runtime: matches!(lowering, Lowering::Test) && !self.no_run,
+            },
+        )
+        .await?;
         let (sources, tree, inputs, discovered_tests) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
@@ -1933,9 +1985,10 @@ impl CleanArgs {
         }
         let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
-        let storage = NativeStorage::for_project_scoped(
+        let storage = NativeStorage::for_project_scoped_excluding(
             &root,
             [NativeScope::all(RelativePath::ROOT)],
+            App::toolchain_exclusion(),
             exec.clone(),
         )
         .await
@@ -2406,6 +2459,18 @@ impl App {
             .build
             .release
             .map_or_else(|| "default".to_owned(), |release| format!("java{release}"))
+    }
+
+    /// The project-local toolchain store, as a native-snapshot exclusion.
+    ///
+    /// A `[toolchain] compiler` distribution is resolved to one of these directories, so a
+    /// `target/jdk` JDK is a build input the manifest names — and still not a project file to
+    /// capture: it is tens to hundreds of megabytes of vendored runtime, and a `jals toolchain
+    /// link` entry is a symlink out of the root that a root-wide snapshot would diagnose on every
+    /// build. The two root-scoped snapshots (`clean`'s and the build script's) exclude it.
+    fn toolchain_exclusion() -> [RelativePath; 1] {
+        [RelativePath::parse(jals_config::MANAGED_TOOLCHAIN_ROOT)
+            .expect("the toolchain root is a portable path")]
     }
 
     /// How a project is named wherever this run mentions one: cargo's `name v0.1.0`.
@@ -3148,9 +3213,10 @@ impl App {
         let shell = session.shell();
         // The root's own script and task plan are the root package's work.
         let progress = session.for_package(Self::package_ref(manifest));
-        let mut storage = NativeStorage::for_project_scoped(
+        let mut storage = NativeStorage::for_project_scoped_excluding(
             root,
             [NativeScope::all(RelativePath::ROOT)],
+            Self::toolchain_exclusion(),
             exec.clone(),
         )
         .await

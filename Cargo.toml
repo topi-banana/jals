@@ -46,6 +46,10 @@ clap = { version = "4.6.1", features = ["derive"] }
 # Raw-deflate decompression and crc32 for jals-classpath's in-house zip reader; both stay
 # `default-features = false` so the archive path is `no_std + alloc` and wasm-safe.
 crc32fast = { version = "1", default-features = false }
+# Host-only gzip/tar decoding for `jals toolchain`'s JDK archives. The in-house zip reader remains
+# the only archive decoder portable code uses; a JDK tarball is read once on the host and never
+# crosses a `no_std` seam, so the battle-tested decoders are the right side of that line.
+flate2 = { version = "1" }
 futures = { version = "0.3" }
 hashbrown = { version = "0.17" }
 # Host-only progress rendering. Confined to `jals-cli`: portable crates report *what* they are
@@ -124,6 +128,8 @@ serde = { version = "1.0.219", default-features = false, features = [
 ] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 similar = { version = "3" }
+# Host-only tar decoding for `jals toolchain`; see `flate2` above.
+tar = { version = "0.4" }
 text-size = { version = "1.1.1" }
 # The engine that runs what the `jals-wasm` backend emits, behind `jals-build`'s `wasm-run`.
 # Pinned to a `next` revision rather than a published release because the GC proposal is

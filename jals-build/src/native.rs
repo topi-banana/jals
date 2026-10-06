@@ -5,11 +5,12 @@
 //! filesystem or spawns a process, so the rest of the crate stays pure/`wasm32`-buildable.
 //! Selection is entirely the pure [`ToolResolver`] policy — an `$JAVAC`/`$JAVA` env override wins,
 //! then the manifest's `[toolchain]` selection (its [`ToolSpec`](jals_config::ToolSpec) view),
-//! then `$JAVA_HOME`, then the bare name on `PATH` — this module only reads the env vars, scans
-//! the common install
-//! locations (SDKMAN, `~/.jdks`, `~/.jdk`, `/usr/lib/jvm`, the macOS JVM bundle directory) when a
-//! distribution selector needs them, probes which candidate exists, and spawns. Downloading a
-//! missing JDK is future work.
+//! then the project default, then `$JAVA_HOME`, then the bare name on `PATH` — this module only
+//! reads the env vars, scans the common install
+//! locations (the project's `target/jdk` store first, then SDKMAN, `~/.jdks`, `~/.jdk`,
+//! `/usr/lib/jvm`, the macOS JVM bundle directory) when a distribution selector needs them,
+//! probes which candidate exists, and spawns. *Installing* a missing JDK is `jals toolchain`'s job
+//! (the CLI runs it before a build that names one); this module only discovers what is there.
 //!
 //! Spawning is also where a planned command line meets the host's limit on one. A project whose
 //! sources (its own plus every source dependency's) outgrow that limit would otherwise fail at
@@ -48,11 +49,18 @@ impl dyn Compiler {
     /// Crate-internal: the compile step's public entry point is
     /// [`BackendSelection::for_host`](crate::BackendSelection), which selects a
     /// [`Backend`](crate::Backend) and — for `javac` — wraps this beneath it.
-    pub(crate) async fn select(manifest: &Manifest, exec: &Exec) -> Box<dyn Compiler> {
+    ///
+    /// `project_root` reaches discovery: a [`ToolSpec::Distribution`] selector matches the
+    /// project-local `target/jdk` store as well as the host's installs.
+    pub(crate) async fn select(
+        manifest: &Manifest,
+        project_root: &Path,
+        exec: &Exec,
+    ) -> Box<dyn Compiler> {
         match &manifest.toolchain.compiler {
             CompilerSpec::Builtin => Box::new(BuiltinToolchain::host(exec.clone())),
             CompilerSpec::System | CompilerSpec::Path(_) | CompilerSpec::Distribution(_) => {
-                Box::new(SubprocessToolchain::from_manifest(manifest).await)
+                Box::new(SubprocessToolchain::from_manifest(manifest, project_root).await)
             }
         }
     }
@@ -70,13 +78,17 @@ impl dyn Runtime {
     /// through `WasmRunner` instead, which takes bytes and an export name. A caller that has a
     /// `RunRequest` to hand therefore always gets a `Some` here: `Manifest::validate` admits the
     /// wasm runtime only alongside the backend that emits no main class.
-    pub async fn select(manifest: &Manifest, exec: &Exec) -> Option<Box<dyn Runtime>> {
+    pub async fn select(
+        manifest: &Manifest,
+        project_root: &Path,
+        exec: &Exec,
+    ) -> Option<Box<dyn Runtime>> {
         match &manifest.toolchain.runtime {
             RuntimeSpec::Wasm => None,
             RuntimeSpec::Builtin => Some(Box::new(BuiltinToolchain::host(exec.clone()))),
-            RuntimeSpec::System | RuntimeSpec::Path(_) | RuntimeSpec::Distribution(_) => {
-                Some(Box::new(SubprocessToolchain::from_manifest(manifest).await))
-            }
+            RuntimeSpec::System | RuntimeSpec::Path(_) | RuntimeSpec::Distribution(_) => Some(
+                Box::new(SubprocessToolchain::from_manifest(manifest, project_root).await),
+            ),
         }
     }
 }
@@ -100,11 +112,80 @@ pub struct SubprocessToolchain {
     compiler: CompilerSpec,
     /// The `java` selection (`[toolchain] runtime`).
     runtime: RuntimeSpec,
-    /// The installed JDKs discovered on this host (empty when no distribution selector needs them).
+    /// The installed JDKs discovered on this host and under the project's `target/jdk` (empty when
+    /// no distribution selector needs them).
     installs: Vec<JdkInstall>,
     /// The platform classpath separator (`:` on Unix, `;` on Windows) — a command-line encoding
     /// detail this backend owns, injected into the pure [`Invocation`] planners.
     path_sep: char,
+}
+
+impl JdkInstall {
+    /// Every JDK this host can find, for distribution matching.
+    ///
+    /// Scans the common install locations and, when `project_root` is given, the project-local
+    /// `target/jdk` store `jals toolchain` fills — local first, because "this project installed it"
+    /// is the more specific answer than "the host happens to have one". Entries are sorted by
+    /// directory name, so a selector with several matches resolves the same way on every run;
+    /// `read_dir` order is not a policy. Staging directories of an interrupted install (`.tmp-…`)
+    /// and the `default` marker are not installs.
+    pub fn discover(project_root: Option<&Path>) -> Vec<Self> {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if let Some(root) = project_root {
+            roots.push(root.join(jals_config::MANAGED_TOOLCHAIN_ROOT));
+        }
+        roots.extend(Self::install_roots());
+        let mut installs = Vec::new();
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                continue;
+            };
+            let mut named: Vec<(String, PathBuf)> = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let dir = entry.path();
+                    if !dir.is_dir() || name.starts_with(".tmp-") || name == "default" {
+                        return None;
+                    }
+                    Some((name, dir))
+                })
+                .collect();
+            named.sort();
+            for (name, dir) in named {
+                // The entry is normally the JDK home itself; macOS bundles it under
+                // `<entry>/Contents/Home`.
+                let home = if dir.join("bin").is_dir() {
+                    dir
+                } else {
+                    let bundled = dir.join("Contents/Home");
+                    if !bundled.join("bin").is_dir() {
+                        continue;
+                    }
+                    bundled
+                };
+                installs.push(Self::from_install_name(home, &name));
+            }
+        }
+        installs
+    }
+
+    /// The directories that contain per-JDK subdirectories, across the common install managers/OSes.
+    fn install_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            roots.push(home.join(".sdkman/candidates/java")); // SDKMAN
+            roots.push(home.join(".jdks")); // IntelliJ IDEA
+            roots.push(home.join(".jdk")); // common manual / per-user install dir
+        }
+        if let Some(sdkman) = std::env::var_os("SDKMAN_CANDIDATES_DIR") {
+            roots.push(PathBuf::from(sdkman).join("java"));
+        }
+        roots.push(PathBuf::from("/usr/lib/jvm")); // Debian/Ubuntu/Fedora
+        roots.push(PathBuf::from("/Library/Java/JavaVirtualMachines")); // macOS
+        roots
+    }
 }
 
 impl SubprocessToolchain {
@@ -112,15 +193,16 @@ impl SubprocessToolchain {
     ///
     /// Discovers installed JDKs only when a [`ToolSpec::Distribution`] selector is present (the
     /// common no-`[toolchain]` project pays no discovery cost).
-    pub(crate) async fn from_manifest(manifest: &Manifest) -> Self {
+    pub(crate) async fn from_manifest(manifest: &Manifest, project_root: &Path) -> Self {
         let tc = &manifest.toolchain;
         let needs_discovery = matches!(tc.compiler.spec(), Some(ToolSpec::Distribution { .. }))
             || matches!(tc.runtime.spec(), Some(ToolSpec::Distribution { .. }));
+        let root = project_root.to_path_buf();
         Self {
             compiler: tc.compiler.clone(),
             runtime: tc.runtime.clone(),
             installs: if needs_discovery {
-                on_blocking_pool(Self::discover_installs).await
+                on_blocking_pool(move || JdkInstall::discover(Some(&root))).await
             } else {
                 Vec::new()
             },
@@ -139,10 +221,18 @@ impl SubprocessToolchain {
     }
 
     /// The [`Candidates`](crate::Candidates) for `tool`: the environment (`$JAVAC`/`$JAVA`,
-    /// `$JAVA_HOME`, `$HOME`) read into the pure [`ToolResolver`] policy.
+    /// `$JAVA_HOME`, `$HOME`) and the project's own default read into the pure [`ToolResolver`]
+    /// policy.
+    ///
+    /// A `system` selection is "the system tool", and a project that ran
+    /// `jals toolchain default <name>` stated which one that is: the local default takes the
+    /// `$JAVA_HOME` slot, because a project's own choice beats the host's, while `$JAVAC`/`$JAVA`
+    /// still win above both (the resolver's env override, for CI/back-compat).
     fn candidates(&self, tool: Tool, project_root: &Path) -> crate::Candidates {
         let env_override = std::env::var_os(tool.env_var()).map(PathBuf::from);
-        let java_home = std::env::var_os("JAVA_HOME").map(PathBuf::from);
+        let project_default = Self::project_default(project_root);
+        let java_home =
+            project_default.or_else(|| std::env::var_os("JAVA_HOME").map(PathBuf::from));
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let resolver = ToolResolver {
             installs: &self.installs,
@@ -151,6 +241,24 @@ impl SubprocessToolchain {
             project_root,
         };
         resolver.resolve(tool, self.spec(tool), env_override)
+    }
+
+    /// The project's default toolchain home (`target/jdk/default`), when `jals toolchain default`
+    /// set one and the install it names is still there.
+    ///
+    /// The marker is a text file holding one install name; it is read as data and never joined
+    /// blindly: a value carrying a path separator, `.`, or `..` is ignored, so a marker can only
+    /// ever name a direct child of the store. A dangling name (the install was uninstalled) reads
+    /// as no default rather than as a broken path.
+    fn project_default(project_root: &Path) -> Option<PathBuf> {
+        let store = project_root.join(jals_config::MANAGED_TOOLCHAIN_ROOT);
+        let name = std::fs::read_to_string(store.join("default")).ok()?;
+        let name = name.trim();
+        if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+            return None;
+        }
+        let home = store.join(name);
+        home.join("bin").is_dir().then_some(home)
     }
 
     /// Resolve `tool` to a concrete program path, probing candidate existence off the executor.
@@ -230,53 +338,6 @@ impl SubprocessToolchain {
         })
         .await
     }
-
-    /// Scan the common JDK install locations and describe each install for [`ToolResolver`].
-    fn discover_installs() -> Vec<JdkInstall> {
-        let mut installs = Vec::new();
-        for root in Self::install_roots() {
-            let Ok(entries) = std::fs::read_dir(&root) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let dir = entry.path();
-                if !dir.is_dir() {
-                    continue;
-                }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                // The entry is normally the JDK home itself; macOS bundles it under
-                // `<entry>/Contents/Home`.
-                let home = if dir.join("bin").is_dir() {
-                    dir
-                } else {
-                    let bundled = dir.join("Contents/Home");
-                    if !bundled.join("bin").is_dir() {
-                        continue;
-                    }
-                    bundled
-                };
-                installs.push(JdkInstall::from_install_name(home, &name));
-            }
-        }
-        installs
-    }
-
-    /// The directories that contain per-JDK subdirectories, across the common install managers/OSes.
-    fn install_roots() -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = PathBuf::from(home);
-            roots.push(home.join(".sdkman/candidates/java")); // SDKMAN
-            roots.push(home.join(".jdks")); // IntelliJ IDEA
-            roots.push(home.join(".jdk")); // common manual / per-user install dir
-        }
-        if let Some(sdkman) = std::env::var_os("SDKMAN_CANDIDATES_DIR") {
-            roots.push(PathBuf::from(sdkman).join("java"));
-        }
-        roots.push(PathBuf::from("/usr/lib/jvm")); // Debian/Ubuntu/Fedora
-        roots.push(PathBuf::from("/Library/Java/JavaVirtualMachines")); // macOS
-        roots
-    }
 }
 
 impl Compiler for SubprocessToolchain {
@@ -345,13 +406,13 @@ mod tests {
             extra_classpath: &[],
             run_env: &BTreeMap::new(),
         };
-        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
+        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, root, &exec));
         assert!(
             compiler
                 .describe_compile(&compile_req)
                 .starts_with("builtin:")
         );
-        let run_description = block_on_inline(<dyn Runtime>::select(&manifest, &exec))
+        let run_description = block_on_inline(<dyn Runtime>::select(&manifest, root, &exec))
             .expect("a JDK selector always resolves a runtime")
             .describe_run(&run_req);
         assert!(run_description.contains("java"));
@@ -368,7 +429,7 @@ mod tests {
             extra_javac_args: &[],
             compile_env: &BTreeMap::new(),
         };
-        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
+        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, root, &exec));
         assert!(compiler.describe_compile(&compile_req).contains("javac"));
 
         // runtime = "builtin" alone: the dummy run next to a real `javac` compile.
@@ -382,7 +443,7 @@ mod tests {
             extra_classpath: &[],
             run_env: &BTreeMap::new(),
         };
-        let runtime = block_on_inline(<dyn Runtime>::select(&manifest, &exec))
+        let runtime = block_on_inline(<dyn Runtime>::select(&manifest, root, &exec))
             .expect("`builtin` resolves the in-process runtime");
         assert!(runtime.describe_run(&run_req).starts_with("builtin:"));
         let compile_req = CompileRequest {
@@ -394,8 +455,62 @@ mod tests {
             extra_javac_args: &[],
             compile_env: &BTreeMap::new(),
         };
-        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, &exec));
+        let compiler = block_on_inline(<dyn Compiler>::select(&manifest, root, &exec));
         assert!(compiler.describe_compile(&compile_req).contains("javac"));
+    }
+
+    /// A JDK under the project's `target/jdk` store is discovered and matched by the same
+    /// distribution/version rule as any host install, with the local one coming first.
+    #[test]
+    fn a_project_local_toolchain_is_discovered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("target/jdk/temurin-21");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join("javac"), b"").unwrap();
+
+        // The store is the first root [`JdkInstall::discover`] scans, so the local install is the
+        // first one it describes; asserting on that rather than on *any* match keeps a host
+        // temurin-21 from making the test pass.
+        let installs = JdkInstall::discover(Some(temp_dir.path()));
+        assert!(
+            installs
+                .first()
+                .is_some_and(|install| install.satisfies(Some("temurin"), Some(21))),
+            "the store's install must be discovered: {installs:?}"
+        );
+    }
+
+    /// `jals toolchain default` writes `target/jdk/default`; for a manifest with no `[toolchain]`
+    /// table that install takes the `$JAVA_HOME` slot, so `system` means what the project said.
+    #[test]
+    fn the_projects_default_takes_the_system_selection() {
+        // `$JAVAC` wins above every selection by design; a test process that has one must not
+        // pretend it is testing the default.
+        if std::env::var_os("JAVAC").is_some() {
+            return;
+        }
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("target/jdk/custom-21");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join("javac"), b"").unwrap();
+        std::fs::write(temp_dir.path().join("target/jdk/default"), "custom-21\n").unwrap();
+
+        let manifest = Manifest::default();
+        let toolchain = block_on_inline(SubprocessToolchain::from_manifest(
+            &manifest,
+            temp_dir.path(),
+        ));
+        let request = CompileRequest {
+            manifest: &manifest,
+            project_root: temp_dir.path(),
+            sources: &[],
+            extra_sources: &[],
+            extra_classpath: &[],
+            extra_javac_args: &[],
+            compile_env: &BTreeMap::new(),
+        };
+        let program = block_on_inline(toolchain.plan_compile(&request)).program;
+        assert_eq!(Path::new(&program), home.join("bin").join("javac"));
     }
 
     #[test]
@@ -403,8 +518,8 @@ mod tests {
         // A manifest with no `[toolchain]` and no env override resolves to the system tools; whatever
         // path is chosen, it ends in the tool's binary name.
         let manifest = Manifest::default();
-        let toolchain = block_on_inline(SubprocessToolchain::from_manifest(&manifest));
         let root = Path::new("/proj");
+        let toolchain = block_on_inline(SubprocessToolchain::from_manifest(&manifest, root));
 
         let compile_req = CompileRequest {
             manifest: &manifest,

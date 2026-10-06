@@ -276,14 +276,16 @@ enum Request {
     Bounded(usize),
 }
 
-/// The crate's only door onto a [`Fetcher`]: apply the capability's own [`NetworkPolicy`], then
-/// call it, retrying while the capability's own [`RetrySchedule`] still allows one and the
-/// failure says another attempt could succeed.
+/// The crate's only door onto a [`Fetcher`]: apply the capability's own [`NetworkPolicy`] and
+/// call it, retrying per its [`RetrySchedule`].
 ///
 /// Not a provided method on the trait. Rust has no final trait method, so a gate written as one is
-/// advisory — an implementor overrides it and the policy is gone. Nothing outside this crate calls
-/// a `Fetcher` at all, so a `pub(crate)` namespace really is the only path a fetch can take.
-pub(crate) struct Fetch;
+/// advisory — an implementor overrides it and the policy is gone. Nothing calls a `Fetcher`
+/// except through this door. It is public for the one capability whose content is not a classpath
+/// artifact — `jals toolchain`'s JDK archives — and only [`bounded`](Self::bounded) is: the
+/// internal fetches keep their `pub(crate)` names, so the public surface is the gate and not a
+/// second way around it.
+pub struct Fetch;
 
 impl Fetch {
     /// Fetch `locator` in full, reporting into `report`.
@@ -295,8 +297,18 @@ impl Fetch {
         Self::run(fetcher, locator, Request::Full, report).await
     }
 
-    /// Fetch `locator` under a byte ceiling, reporting into `report`.
-    pub(crate) async fn bounded<F: Fetcher>(
+    /// Fetch `locator` under a byte ceiling, through the gate.
+    ///
+    /// The one public entry point of this type, for a host capability outside the crate whose
+    /// content is not a classpath artifact — today `jals toolchain` downloading a JDK archive. It
+    /// applies exactly what every internal fetch applies: the capability's [`NetworkPolicy`] (so
+    /// an `--offline` host refuses a network locator before any attempt) and its [`RetrySchedule`]
+    /// for transient failures.
+    ///
+    /// Buffers the whole body. A caller with a genuinely stream-sized payload should grow that
+    /// seam rather than this door: a download nobody can hold is a different problem from one
+    /// nobody can gate.
+    pub async fn bounded<F: Fetcher>(
         fetcher: &F,
         locator: &ExternalLocator,
         max_bytes: usize,

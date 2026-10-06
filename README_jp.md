@@ -197,8 +197,9 @@ Linux・macOS・Windows の `x64` / `arm64` ランナーに対応しています
 
 ## 使い方
 
-`jals` はサブコマンド方式で、`fmt`（ソース整形）・`lint`（ソース lint）・`lsp`（language server）
-に加え、Cargo 風のビルドフロントエンド（`init` / `build` / `run` / `clean`）があります。
+`jals` はサブコマンド方式で、`fmt`（ソース整形）・`lint`（ソース lint）・`lsp`（language server）・
+Cargo 風のビルドフロントエンド（`init` / `build` / `run` / `clean`）に加え、JDK をプロジェクト
+ローカルに導入・管理する `toolchain`（`target/jdk` 以下に展開）があります。
 
 ### グローバルオプション
 
@@ -358,7 +359,20 @@ jals run --invoke f -- 7    # jals-wasm プロジェクトで export された s
 jals test                   # `#[test]` メソッドを 1 テスト 1 JVM で実行
 jals test --list            # 実行せずにテスト一覧を表示
 jals clean                  # ビルド出力（target/classes・target/test-classes）を削除
+
+jals toolchain install temurin@21  # JDK を target/jdk へダウンロード（rustup/jabba 風）
+jals toolchain list                # このプロジェクトに導入済みの JDK 一覧
+jals toolchain which temurin@21    # セレクタが解決する JDK home を表示
+jals toolchain default temurin@21  # 素の `system` 選択が使う JDK に設定
+jals toolchain link my-jdk /opt/jdk-21   # 別の場所にある JDK を登録
+jals toolchain uninstall temurin@21      # 削除
 ```
+
+`[toolchain] compiler = { distribution = { name = "temurin", version = 21 } }`（`runtime` も同様）
+を書くと、`jals build`/`run`/`test` はその JDK を使い、未導入なら自動で導入します。ホストの Java
+環境には一切触れず、すべてプロジェクトの `target/jdk` 以下に収まります（`--offline` はダウンロード
+を拒否し、`install --url` は provider が配布していないアーカイブを `file://` でオフライン導入できます）。
+導入した JDK は `jals clean` では消えません。削除は `jals toolchain uninstall` です。
 
 最小の `jals.toml`（すべてのキーは任意で、省略時は Maven 風の `src/main/java` → `target/classes`
 レイアウトになります）:

@@ -89,9 +89,13 @@ impl JdkInstall {
     /// Handles the layouts the common install roots produce: SDKMAN vendor-suffixed names
     /// (`21.0.2-tem`), distro-prefixed names (`temurin-21.0.2`, `java-17-openjdk-amd64`), and legacy
     /// `1.8`-style versions (`jdk1.8.0_292` → 8). The distribution is canonicalized to the same
-    /// lowercase vocabulary [`matches`](Self::matches) compares against, so classification and
+    /// lowercase vocabulary [`satisfies`](Self::satisfies) compares against, so classification and
     /// matching stay one scheme; an unrecognized vendor or version is `None` (matched leniently).
-    pub(crate) fn from_install_name(home: PathBuf, name: &str) -> Self {
+    ///
+    /// Public because the classifier is also what a host outside this crate matches a
+    /// project-local install with — `jals toolchain uninstall`/`which` name one by the same
+    /// directory scheme discovery parses. A second parser there would be a second vocabulary.
+    pub fn from_install_name(home: PathBuf, name: &str) -> Self {
         Self {
             home,
             distribution: Self::parse_distribution(name),
@@ -102,7 +106,11 @@ impl JdkInstall {
     /// Whether this install satisfies a `distribution`/`version` selector. A `None` half of the
     /// selector matches anything; a named distribution matches case-insensitively as a substring
     /// (so `openjdk` matches an `openjdk-21` install directory), and a named version matches exactly.
-    fn matches(&self, distribution: Option<&str>, version: Option<u32>) -> bool {
+    ///
+    /// Public for the same reason as [`from_install_name`](Self::from_install_name): "would this
+    /// selection resolve here" is the question a host that must decide whether to download asks,
+    /// and answering it with its own substring test would let two answers drift apart.
+    pub fn satisfies(&self, distribution: Option<&str>, version: Option<u32>) -> bool {
         let dist_ok = distribution.is_none_or(|want| {
             self.distribution.as_deref().is_some_and(|have| {
                 have.to_ascii_lowercase()
@@ -280,7 +288,7 @@ impl ToolResolver<'_> {
                 let mut preferred: Vec<PathBuf> = self
                     .installs
                     .iter()
-                    .filter(|install| install.matches(name, version))
+                    .filter(|install| install.satisfies(name, version))
                     .map(|install| tool.path_in(&install.home))
                     .collect();
                 preferred.extend(self.java_home_bin(tool));
