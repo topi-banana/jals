@@ -69,9 +69,11 @@ concurrency:
 # - Two `cargo` steps of one job do **not** overlap. Cargo takes an exclusive lock on the target
 #   directory for the whole of a build, so a second invocation waits rather than runs. The `test`
 #   job is the one place a pair is grouped anyway, and the comment there says why that one is safe.
-# - Nothing runs beside `actions/checkout`. It removes and recreates the workspace, so only a step
-#   writing somewhere else — a toolchain into `~/.rustup`, a JDK into the tool cache — may share a
-#   group with it. Anything that writes into the workspace stays after it.
+# - `actions/checkout` is never one of a `parallel:` group's members. Checkout under `parallel`
+#   fails probabilistically with "Unexpected end of JSON input" (actions/checkout#2484), so every
+#   job below checks out in a step of its own before opening the group the checkout used to share
+#   with a toolchain into `~/.rustup` or a JDK into the tool cache. Because checkout removes and
+#   recreates the workspace, anything that writes into the workspace still stays after it.
 # - `taiki-e/install-action` stays after `Swatinem/rust-cache`. rust-cache restores `~/.cargo/bin`
 #   (its `cache-bin` input is on by default), which is exactly where install-action puts its
 #   binaries; overlapping the two is a restore racing the install it would overwrite.
@@ -84,11 +86,10 @@ jobs:
   ast-grep:
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: taiki-e/install-action@v2.87.23
-            with:
-              tool: ast-grep
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2.87.23
+        with:
+          tool: ast-grep
       # Both gates only read the tree — the rule tests their fixtures, the scan the workspace — so
       # they are one group rather than two steps.
       - parallel:
@@ -103,22 +104,20 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              components: rustfmt
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - run: cargo fmt --all --check
 
   codegen:
     name: generated code up to date
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              components: rustfmt
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p xtask -- codegen --check
 
@@ -157,12 +156,11 @@ jobs:
             target: wasm32-unknown-unknown
             args: --target wasm32-unknown-unknown $WASM_BROWSER_PACKAGES
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              components: clippy
-              targets: ${{ matrix.target }}
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           # Keyed by cell, not by target: with three host platforms in one matrix a target-only key
@@ -186,12 +184,12 @@ jobs:
           - name: windows
             runner: windows-latest
     steps:
+      - uses: actions/checkout@v7
+      # On every host, not only linux: the JDK-backed tests stand themselves down when `javac` /
+      # `java` is absent (`javac_available()` and friends), so a cell without a JDK is a cell
+      # that passes by checking less — the same failure mode the `wasm-tools` note below guards
+      # against.
       - parallel:
-          - uses: actions/checkout@v7
-          # On every host, not only linux: the JDK-backed tests stand themselves down when `javac` /
-          # `java` is absent (`javac_available()` and friends), so a cell without a JDK is a cell
-          # that passes by checking less — the same failure mode the `wasm-tools` note below guards
-          # against.
           - name: Set up JDK (for generated-source type checks)
             uses: actions/setup-java@v6
             with:
@@ -231,11 +229,10 @@ jobs:
     name: test (wasm)
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              targets: wasm32-wasip1
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-wasm
@@ -260,10 +257,9 @@ jobs:
     name: taplo fmt
     runs-on: ubuntu-latest
     steps:
-      # The installer writes `/usr/local/bin`, not the workspace the checkout replaces.
-      - parallel:
-          - uses: actions/checkout@v7
-          - run: curl -fsSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz | gzip -d - | install -m 755 /dev/stdin /usr/local/bin/taplo
+      # The installer writes `/usr/local/bin`, not the workspace.
+      - uses: actions/checkout@v7
+      - run: curl -fsSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz | gzip -d - | install -m 755 /dev/stdin /usr/local/bin/taplo
       - run: taplo fmt --check --diff
 
   machete:
@@ -271,22 +267,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # No `Swatinem/rust-cache` here, so install-action has no `~/.cargo/bin` restore to race.
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: taiki-e/install-action@v2.87.23
-            with:
-              tool: cargo-machete
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2.87.23
+        with:
+          tool: cargo-machete
       - run: cargo machete
 
   unused-allow:
     name: cargo unused-allow
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              components: clippy
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       # Not in taiki-e/install-action's prebuilt set, so it is compiled from source (cached above).
       # Version-pinned to match the rest of the workflow's tool pins.
@@ -338,16 +332,15 @@ jobs:
       HAWK_VERSION: "0.1.13"
       HAWK_RUSTC: "1.98.0"
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          # The plain `HAWK_RUSTC` toolchain (minimal profile) is all a prebuilt hawk needs — it
-          # runs an instrumented workspace build under this exact compiler. The compiler is
-          # selected by the `toolchain` input, never by pinning the action ref to it: dependabot
-          # reads a `@1.97.1` ref as the *action's* version and would keep opening PRs bumping it
-          # off hawk's rustc.
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              toolchain: ${{ env.HAWK_RUSTC }}
+      - uses: actions/checkout@v7
+      # The plain `HAWK_RUSTC` toolchain (minimal profile) is all a prebuilt hawk needs — it
+      # runs an instrumented workspace build under this exact compiler. The compiler is
+      # selected by the `toolchain` input, never by pinning the action ref to it: dependabot
+      # reads a `@1.97.1` ref as the *action's* version and would keep opening PRs bumping it
+      # off hawk's rustc.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.HAWK_RUSTC }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: hawk-${{ matrix.name }}
@@ -379,24 +372,22 @@ jobs:
     name: typos
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: taiki-e/install-action@v2.87.23
-            with:
-              tool: typos
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2.87.23
+        with:
+          tool: typos
       - run: typos
 
   biome:
     name: biome
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: biomejs/setup-biome@v2
-            with:
-              # Version-pinned like the rest of the workflow's tools; keep it in sync with the
-              # `$schema` pin in `biome.json` so the CLI and the config schema never drift.
-              version: 2.5.5
+      - uses: actions/checkout@v7
+      - uses: biomejs/setup-biome@v2
+        with:
+          # Version-pinned like the rest of the workflow's tools; keep it in sync with the
+          # `$schema` pin in `biome.json` so the CLI and the config schema never drift.
+          version: 2.5.5
       # `biome ci` format- and lint-checks the JS sources (scoped by `biome.json`) without writing.
       # `--error-on-warnings` promotes every lint warning to a hard failure, so the gate is strict:
       # a plain `biome ci` exits 0 on warnings and would let a lint regression through silently.
@@ -452,11 +443,10 @@ jobs:
             target: wasm32-unknown-unknown
             packages: $WASM_CORE_PACKAGES
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              targets: ${{ matrix.platform.target }}
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-${{ matrix.profile }}-${{ matrix.platform.name }}
@@ -470,11 +460,10 @@ jobs:
     name: portable core and feature audit
     runs-on: ubuntu-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              targets: wasm32-unknown-unknown
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # The fifteen checks below stay sequential, and deliberately so: they share one target
       # directory, whose lock cargo holds for a whole build, and they select deliberately different
@@ -659,12 +648,12 @@ jobs:
             headless_gl: true
             test_flags: -j 1 --timeout 1800
     steps:
+      - uses: actions/checkout@v7
+      # `hello_world` pins `release = 21`; the rest compile against the toolchain's own
+      # release, and `minecraft_mod` compiles against class files from the game jar it
+      # selected. A current JDK reads all of them, so one version serves every cell — the same
+      # one the `test` job installs.
       - parallel:
-          - uses: actions/checkout@v7
-          # `hello_world` pins `release = 21`; the rest compile against the toolchain's own
-          # release, and `minecraft_mod` compiles against class files from the game jar it
-          # selected. A current JDK reads all of them, so one version serves every cell — the same
-          # one the `test` job installs.
           - name: Set up JDK (the examples compile and run with javac/java)
             uses: actions/setup-java@v6
             with:
@@ -821,9 +810,8 @@ jobs:
     outputs:
       versions: ${{ steps.versions.outputs.versions }}
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: mod-jar
@@ -876,19 +864,19 @@ jobs:
       matrix:
         minecraft: ${{ fromJSON(needs.mod-jar-setup.outputs.versions) }}
     steps:
+      - uses: actions/checkout@v7
+      # One JDK for all 43 cells. `javac` accepts any `--release` between the oldest it still
+      # supports and its own version, and reads a *classpath* class newer than that release
+      # without complaint, so 25 covers the whole range — `--release 8` against 1.14.4's Java 8
+      # class files through the Java 25 ones 26.x ships.
       - parallel:
-          - uses: actions/checkout@v7
-          # One JDK for all 43 cells. `javac` accepts any `--release` between the oldest it still
-          # supports and its own version, and reads a *classpath* class newer than that release
-          # without complaint, so 25 covers the whole range — `--release 8` against 1.14.4's Java 8
-          # class files through the Java 25 ones 26.x ships.
           - name: Set up JDK (the mod compiles against the game's class files)
             uses: actions/setup-java@v6
             with:
               distribution: temurin
               java-version: "25"
-          # Into the runner temp rather than the workspace, which is what lets it share this group
-          # with the checkout that recreates the workspace.
+          # Into the runner temp rather than the workspace, so the artifact never lands among the
+          # checked-out sources.
           - name: Download the jals binary built once for this matrix
             uses: actions/download-artifact@v8
             with:
@@ -958,9 +946,8 @@ jobs:
     outputs:
       versions: ${{ steps.versions.outputs.versions }}
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-harness
@@ -1001,11 +988,11 @@ jobs:
       matrix:
         minecraft: ${{ fromJSON(needs.client-harness-setup.outputs.versions) }}
     steps:
+      - uses: actions/checkout@v7
+      # One JDK for all 43, for the reason `mod-jar` gives: `javac` compiles at any `--release`
+      # it still supports and reads a newer classpath class without complaint. The harness's
+      # own `build.java` derives `--release` from the release's era, 8 through 21.
       - parallel:
-          - uses: actions/checkout@v7
-          # One JDK for all 43, for the reason `mod-jar` gives: `javac` compiles at any `--release`
-          # it still supports and reads a newer classpath class without complaint. The harness's
-          # own `build.java` derives `--release` from the release's era, 8 through 21.
           - name: Set up JDK (the harness compiles against the game's class files)
             uses: actions/setup-java@v6
             with:
@@ -1063,9 +1050,8 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: setup-action-${{ matrix.platform.name }}
@@ -1175,11 +1161,10 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              targets: ${{ matrix.target }}
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: lsp-binary-${{ matrix.target }}
@@ -1209,11 +1194,10 @@ jobs:
       # the artifact loads. Bump this when Zed bumps its wasmtime.
       WASMTIME_VERSION: "36.0.0"
     steps:
-      - parallel:
-          - uses: actions/checkout@v7
-          - uses: dtolnay/rust-toolchain@stable
-            with:
-              targets: wasm32-wasip1
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
       # The extension (`editors/zed`) is its own workspace root (excluded from the outer one), so
       # its target dir is `editors/zed/target`.
       - uses: Swatinem/rust-cache@v2
@@ -1283,13 +1267,13 @@ jobs:
       CORPUS_WASM_TOOLS_VERSION: "1.258.0"
       CORPUS_WASMTIME_VERSION: "48.0.1"
     steps:
+      - uses: actions/checkout@v7
+        with:
+          # Every corpus: OpenJDK (parse soundness) plus the google-java-format and
+          # palantir-java-format regression suites (fidelity).
+          submodules: true
+          fetch-depth: 1
       - parallel:
-          - uses: actions/checkout@v7
-            with:
-              # Every corpus: OpenJDK (parse soundness) plus the google-java-format and
-              # palantir-java-format regression suites (fidelity).
-              submodules: true
-              fetch-depth: 1
           - uses: dtolnay/rust-toolchain@stable
           - name: Set up JDK (for google-java-format, Eclipse JDT and the javac corpus)
             uses: actions/setup-java@v6
