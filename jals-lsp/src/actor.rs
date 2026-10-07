@@ -1684,19 +1684,24 @@ impl AssembledWorkspace {
             ));
             scopes
         };
-        let mut storage = NativeStorage::for_project_scoped(root, scopes, exec.clone())
-            .await
-            .map_err(|error| {
-                let message = format!("opening project storage failed: {error}");
-                WorkspaceAssemblyFailure {
-                    project_diagnostics: vec![Self::host_diagnostic(
-                        ProjectDiagnosticCode::ProjectStorage,
-                        message.clone(),
-                    )],
-                    message,
-                    fallback: None,
-                }
-            })?;
+        let mut storage = NativeStorage::for_project_scoped_excluding(
+            root,
+            scopes,
+            [crate::toolchain_exclusion()],
+            exec.clone(),
+        )
+        .await
+        .map_err(|error| {
+            let message = format!("opening project storage failed: {error}");
+            WorkspaceAssemblyFailure {
+                project_diagnostics: vec![Self::host_diagnostic(
+                    ProjectDiagnosticCode::ProjectStorage,
+                    message.clone(),
+                )],
+                message,
+                fallback: None,
+            }
+        })?;
         let mut effective_manifest = manifest.clone();
         let mut build_script_watch = configured_script.clone().map(|script| BuildWatchPolicy {
             script,
@@ -3362,6 +3367,41 @@ mod tests {
                     .await
                     .is_none(),
                 "an unselected generated sibling is not a project source"
+            );
+        });
+    }
+
+    /// A configured build script makes the assembly capture the whole project root. The
+    /// `jals toolchain` store is a `[toolchain]` input, not project bytes: a real JDK under it is
+    /// hundreds of megabytes read on every assembly, and a `link`ed entry is a symlink out of the
+    /// root.
+    #[test]
+    fn a_root_scoped_assembly_excludes_the_toolchain_store() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[build]\nscript = { type = \"java\", file = \"build.java\" }\n",
+            );
+            write(
+                dir.path(),
+                "build.java",
+                "class build { public static void main() {} }\n",
+            );
+            write(dir.path(), "target/jdk/temurin-21/bin/javac", "#!/bin/sh\n");
+            let manifest: Manifest = std::fs::read_to_string(dir.path().join("jals.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+
+            let assembled = AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline())
+                .await
+                .unwrap();
+            let key = FileKey::parse("target/jdk/temurin-21/bin/javac").unwrap();
+            assert!(
+                assembled.storage.view().tree().lookup_file(&key).is_none(),
+                "the toolchain store is a build input, not project bytes"
             );
         });
     }
