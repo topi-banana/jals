@@ -697,19 +697,29 @@ impl Store {
     ///
     /// Only this project's store: `which` and `uninstall` are about what was installed *here*,
     /// while distribution *matching* is the wider question [`Toolchain::ensure`] and the build
-    /// resolver ask.
+    /// resolver ask. A directory and a link both count as an install, a *dangling* link included:
+    /// the link is what `list` shows and `uninstall` removes, so a target that moved or was
+    /// deleted must not make the entry vanish with no way to clean it up.
     fn entries(&self) -> Vec<Entry> {
         let Ok(read) = std::fs::read_dir(self.dir()) else {
             return Vec::new();
         };
         let mut names: Vec<String> = read
             .flatten()
-            .filter(|entry| entry.path().is_dir())
+            .filter(|entry| Self::is_install_entry(&entry.path()))
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| !name.starts_with(".tmp-") && name != Self::DEFAULT_FILE)
             .collect();
         names.sort();
         names.into_iter().map(|name| self.entry(name)).collect()
+    }
+
+    /// Whether a store entry names an install: a directory (an unpacked JDK), or a symlink
+    /// `link` created. `symlink_metadata` is deliberate — `is_dir` follows the link, which would
+    /// hide a *broken* one and leave it unremovable by `uninstall`.
+    fn is_install_entry(path: &Path) -> bool {
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir() || metadata.file_type().is_symlink())
     }
 
     /// Describe one install directory that is already known to exist.

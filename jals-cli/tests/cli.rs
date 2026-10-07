@@ -4361,6 +4361,60 @@ fn a_linked_toolchain_can_become_the_projects_default() {
     );
 }
 
+/// A link whose target moved or was deleted is still an entry this store owns: `list` has to show
+/// it and `uninstall` has to remove it, or the dangling link can only be cleaned up by
+/// `link --force` (or by hand).
+#[test]
+fn a_dangling_linked_toolchain_is_listed_and_uninstallable() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let external = tempdir().unwrap();
+    let external_home = external.path().join("some-jdk");
+    write_fake_jdk(&external_home);
+
+    let output = jals()
+        .args(["toolchain", "link", "gone-21", "--manifest-path"])
+        .arg(&manifest)
+        .arg(&external_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(&external_home).unwrap();
+    let link = dir.path().join("target/jdk/gone-21");
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "the link itself survives its target"
+    );
+
+    let output = jals()
+        .args(["toolchain", "list", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{listed}");
+    assert!(listed.contains("gone-21"), "{listed}");
+
+    let output = jals()
+        .args(["toolchain", "uninstall", "gone-21", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "the dangling link is removed as the link it is"
+    );
+}
+
 /// With no install and a refused network, the failure says how to proceed rather than falling
 /// back to the host's tools — the silent fallback an explicit `distribution` selector must not
 /// get.
