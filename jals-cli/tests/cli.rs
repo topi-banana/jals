@@ -4211,6 +4211,58 @@ fn a_toolchain_installs_lists_resolves_and_uninstalls_offline() {
     assert!(!home.exists(), "the install is removed recursively");
 }
 
+/// A manifest may spell the vendor with an alias (`adoptium`) that `install` accepts. The
+/// selection has to resolve the canonical install (`temurin-21`) that alias produced — otherwise
+/// the JDK is downloaded and then silently ignored in favor of the host's tools.
+#[test]
+fn a_manifest_vendor_alias_selects_the_install_it_downloaded() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let archive = dir.path().join("fake-jdk.tar.gz");
+    write_jdk_tarball(&archive, "jdk-21.0.5+11");
+    let url = format!("file://{}", archive.display());
+
+    let output = jals()
+        .args([
+            "toolchain",
+            "install",
+            "adoptium@21",
+            "--url",
+            &url,
+            "--offline",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    // The alias installs under the canonical name, which is what a selector matches.
+    let home = dir.path().join("target/jdk/temurin-21");
+    assert!(
+        home.join("bin").join(java_binary_name()).is_file(),
+        "{stderr}"
+    );
+
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"demo\"\n\
+         [toolchain]\ncompiler = { distribution = { name = \"adoptium\", version = 21 } }\n",
+    )
+    .unwrap();
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        command_targets(&stdout, &home.join("bin").join(javac_binary_name())),
+        "the alias selector resolves the canonical install: {stdout}"
+    );
+}
+
 /// The zip lane: a provider that answers with a zip must install exactly like a tarball, on every
 /// platform (some vendors ship one for Unix too).
 #[test]

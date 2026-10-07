@@ -545,11 +545,13 @@ impl Spec {
         })
     }
 
-    /// A distribution name in the one spelling the providers and discovery share.
+    /// A distribution name in the one spelling the providers, discovery, and selection share.
     ///
-    /// The vendor's own aliases collapse onto the canonical name (`adoptium`/`adoptopenjdk`/
-    /// `eclipse` are all Temurin), and an empty name is the default. The result is lowercased so
-    /// `Temurin@21` and `temurin@21` are one install.
+    /// The vendor's own aliases collapse onto the canonical name — the same rule
+    /// [`JdkInstall::canonical_distribution`] gives the resolver, so a spec parsed here resolves
+    /// the install it names (`adoptium`/`adoptopenjdk`/`eclipse` are all Temurin). An empty name
+    /// is the default, and the result is lowercased so `Temurin@21` and `temurin@21` are one
+    /// install.
     fn canonical_distribution(raw: &str) -> Result<String, String> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -558,10 +560,7 @@ impl Spec {
         if raw.contains(['/', '\\', '@', ' ']) {
             return Err(format!("`{raw}` is not a distribution name"));
         }
-        Ok(match raw.to_ascii_lowercase().as_str() {
-            "adoptium" | "adoptopenjdk" | "eclipse" => "temurin".to_owned(),
-            lower => lower.to_owned(),
-        })
+        Ok(JdkInstall::canonical_distribution(raw))
     }
 
     /// The directory name an install of this spec gets.

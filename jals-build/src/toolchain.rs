@@ -135,21 +135,37 @@ impl JdkInstall {
     }
 
     /// Whether this install satisfies a `distribution`/`version` selector. A `None` half of the
-    /// selector matches anything; a named distribution matches case-insensitively as a substring
-    /// (so `openjdk` matches an `openjdk-21` install directory), and a named version matches exactly.
+    /// selector matches anything; a named distribution is canonicalized
+    /// ([`canonical_distribution`](Self::canonical_distribution)) and then matched
+    /// case-insensitively as a substring (so `openjdk` matches an `openjdk-21` install directory,
+    /// and `adoptium` matches the `temurin-21` an alias install produced), and a named version
+    /// matches exactly.
     ///
     /// Public for the same reason as [`from_install_name`](Self::from_install_name): "would this
     /// selection resolve here" is the question a host that must decide whether to download asks,
     /// and answering it with its own substring test would let two answers drift apart.
     pub fn satisfies(&self, distribution: Option<&str>, version: Option<u32>) -> bool {
         let dist_ok = distribution.is_none_or(|want| {
-            self.distribution.as_deref().is_some_and(|have| {
-                have.to_ascii_lowercase()
-                    .contains(&want.to_ascii_lowercase())
-            })
+            let want = Self::canonical_distribution(want);
+            self.distribution
+                .as_deref()
+                .is_some_and(|have| have.to_ascii_lowercase().contains(&want))
         });
         let version_ok = version.is_none_or(|want| self.version == Some(want));
         dist_ok && version_ok
+    }
+
+    /// A distribution name in the one spelling discovery and selection share.
+    ///
+    /// The vendor's own aliases collapse onto the canonical name an install directory is
+    /// classified with (`adoptium`/`adoptopenjdk`/`eclipse` are all Temurin), so a manifest that
+    /// spells the vendor the way `jals toolchain install` accepts it resolves the install that
+    /// command produced. Lowercasing is part of it: `Temurin` and `temurin` are one distribution.
+    pub fn canonical_distribution(name: &str) -> String {
+        match name.to_ascii_lowercase().as_str() {
+            "adoptium" | "adoptopenjdk" | "eclipse" => "temurin".to_owned(),
+            lower => lower.to_owned(),
+        }
     }
 
     /// The major Java version embedded in an install name, or `None`.
@@ -704,6 +720,37 @@ mod tests {
             ]
         );
         assert_eq!(out.fallback, PathBuf::from("java"));
+    }
+
+    #[test]
+    fn vendor_aliases_match_the_canonical_install() {
+        let installs = [install("/jvm/temurin-21", Some("temurin"), Some(21))];
+        // A manifest may spell the vendor the way `jals toolchain install` accepts it; every
+        // alias has to match the canonical install the alias command produced.
+        for alias in ["temurin", "adoptium", "adoptopenjdk", "eclipse", "Temurin"] {
+            let out = resolver(&installs, None).resolve(
+                Tool::Javac,
+                Some(ToolSpec::Distribution {
+                    name: Some(alias),
+                    version: Some(21),
+                }),
+                None,
+            );
+            assert_eq!(
+                out.preferred,
+                vec![bin_path("/jvm/temurin-21", Tool::Javac)],
+                "`{alias}` must match the temurin install"
+            );
+        }
+        // The alias does not loosen matching: another vendor and another version still miss.
+        assert!(!installs[0].satisfies(Some("zulu"), Some(21)));
+        assert!(!installs[0].satisfies(Some("adoptium"), Some(17)));
+        // Matching and classification agree on an install name the alias path wrote.
+        let local = JdkInstall::from_install_name(
+            PathBuf::from("/proj/target/jdk/temurin-21"),
+            "temurin-21",
+        );
+        assert!(local.satisfies(Some("adoptium"), Some(21)));
     }
 
     #[test]
