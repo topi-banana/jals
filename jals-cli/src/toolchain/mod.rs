@@ -499,15 +499,18 @@ impl Spec {
         let raw = raw.trim();
         let (distribution, version) = match raw.split_once('@') {
             Some((distribution, version)) => (distribution, version),
-            // An install name (`temurin-21`) is what `list` prints and what a user copies, so it
-            // parses too. The split is at the first `-` that starts a version-like tail and only
-            // when the head looks like a distribution, which keeps an exact version that happens
-            // to carry a build suffix (`8u422-b05`) whole.
+            // An install name is what `list` prints and what a user copies, so it parses too:
+            // `temurin-21` from a major install, and `temurin-lts`/`temurin-latest` from the two
+            // keyword ones. The split is at the first `-` that starts a version-like tail (a
+            // digit, or one of those keywords) and only when the head looks like a distribution,
+            // which keeps an exact version that happens to carry a build suffix (`8u422-b05`)
+            // whole.
             None => match raw.split_once('-') {
                 Some((distribution, version))
                     if !distribution.is_empty()
                         && !distribution.chars().any(|c| c.is_ascii_digit())
-                        && version.starts_with(|c: char| c.is_ascii_digit()) =>
+                        && (version.starts_with(|c: char| c.is_ascii_digit())
+                            || matches!(version, "lts" | "latest")) =>
                 {
                     (distribution, version)
                 }
@@ -971,6 +974,15 @@ mod tests {
         assert_eq!(
             Spec::parse("zulu-17.0.13").unwrap(),
             Spec::parse("zulu@17.0.13").unwrap()
+        );
+        // ...the keyword install names too, which is what `list` prints for `@lts`/`@latest`.
+        assert_eq!(
+            Spec::parse("temurin-lts").unwrap(),
+            Spec::parse("temurin@lts").unwrap()
+        );
+        assert_eq!(
+            Spec::parse("zulu-latest").unwrap(),
+            Spec::parse("zulu@latest").unwrap()
         );
         // ...while an exact version with a build suffix stays whole.
         assert_eq!(
