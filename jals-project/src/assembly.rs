@@ -233,8 +233,8 @@ impl ProjectScript {
         // hierarchy of what it reobfuscates against these, and a member inherited from a jar that is
         // missing keeps its original name in an otherwise remapped archive. Concatenated and not
         // deduplicated here — the set a host finally hands to the remap also carries the resolved
-        // `[dependencies]` jars, which never pass through this function, so the one place all of it
-        // is in hand is the host, and that is where the duplicates are dropped.
+        // `[dependencies]` jars, which are not part of either group here, so the one place all of
+        // it is in hand is the host, and that is where the duplicates are dropped.
         let mut task_classpath = self.task_classpath.clone();
         task_classpath.extend(graph_assembly.task_classpath.iter().cloned());
 
@@ -251,22 +251,26 @@ impl ProjectScript {
             .filter(|node| matches!(node.body, NodeBody::Binary(_)))
             .map(|node| node.id.clone())
             .collect();
-        let mut compile_classpath = graph_assembly.compile_classpath;
+        // The root plan's own resolved jars lead the graph's. A registry dependency is not a graph
+        // node, so `graph_assembly` never carries one and `root_inputs.dependency_jars` is their
+        // only carrier into what a host materializes for `javac`: `inputs` feeds the analysis
+        // index, and a compile classpath that stopped there would let the project lint clean and
+        // fail to compile. They take the position the root's authored `[build] classpath` and task
+        // terminals already hold relative to the graph's entries.
+        let mut compile_classpath: Vec<CompileClasspathEntry> = root_inputs
+            .dependency_jars
+            .iter()
+            .map(Self::resolved_jar_entry)
+            .collect();
+        compile_classpath.append(&mut graph_assembly.compile_classpath);
         compile_classpath
             .retain(|entry| entry.node().is_none_or(|node| !binary_nodes.contains(node)));
-        for key in &graph_inputs.dependency_jars {
-            let path = RelativePath::new([
-                Name::new("dependencies").expect("constant is portable"),
-                Name::new("resolved").expect("constant is portable"),
-                Name::new(format!("{}.jar", key.content().to_hex()))
-                    .expect("digest-derived file name is portable"),
-            ]);
-            compile_classpath.push(CompileClasspathEntry::File(CompileClasspathFile {
-                node: None,
-                path,
-                key: key.clone(),
-            }));
-        }
+        compile_classpath.extend(
+            graph_inputs
+                .dependency_jars
+                .iter()
+                .map(Self::resolved_jar_entry),
+        );
 
         let mut inputs = root_inputs;
         inputs.dependency_jars.extend(graph_inputs.dependency_jars);
@@ -289,6 +293,24 @@ impl ProjectScript {
             warnings: graph_assembly.warnings,
             errors: graph_assembly.errors,
         }
+    }
+
+    /// The compile-classpath entry for one verified resolved jar.
+    ///
+    /// Digest-derived and shared by every producer of one: the same bytes reached by any route
+    /// publish under the same `dependencies/resolved/<digest>.jar`, so two spellings of one archive
+    /// collide in the materialized classpath instead of duplicating it.
+    fn resolved_jar_entry(key: &CacheKey) -> CompileClasspathEntry {
+        CompileClasspathEntry::File(CompileClasspathFile {
+            node: None,
+            path: RelativePath::new([
+                Name::new("dependencies").expect("constant is portable"),
+                Name::new("resolved").expect("constant is portable"),
+                Name::new(format!("{}.jar", key.content().to_hex()))
+                    .expect("digest-derived file name is portable"),
+            ]),
+            key: key.clone(),
+        })
     }
 }
 
