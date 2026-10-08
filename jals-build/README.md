@@ -762,8 +762,9 @@ project-local store (`target/jdk`, first) and the common install locations (SDKM
 `jals build`, `jals run`, and `jals test` **auto-install** a selected distribution that no
 discovered install satisfies (rust-toolchain.toml style), unless `--offline` refuses the network —
 then the failure names the `jals toolchain install <distribution>@<version>` command that fixes it.
-A selector with no `version` cannot be downloaded and is refused the same way rather than silently
-falling back to the host's tools. The installed store, `link`ed JDKs, and the project default are
+A selector with no `version` can still be satisfied by an installed JDK, but cannot be downloaded:
+one that no install matches is refused the same way rather than silently falling back to the host's
+tools. The installed store, `link`ed JDKs, and the project default are
 managed by `jals toolchain` (see [`jals-cli`](../jals-cli) `--help`, and
 `jals toolchain list --available` for what each distribution publishes). A `"builtin"` selector
 skips program resolution entirely — no process is spawned for that step; the two selectors are

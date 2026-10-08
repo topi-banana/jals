@@ -411,8 +411,9 @@ impl Toolchain {
     /// A selection that matches any discovered install — the project store or one of the host's
     /// SDKMAN/IntelliJ/`/usr/lib/jvm` JDKs — is left alone: the point is to make an explicit
     /// `distribution` selector resolvable, not to prefer this crate's copy of a JDK the machine
-    /// already has. A selector with no `version` cannot be downloaded (there is no build to pick),
-    /// so it is refused by name rather than silently falling back to the host's tools.
+    /// already has. A selector with no `version` can be satisfied by discovery but cannot be
+    /// downloaded (there is no build to pick), so one that no install matches is refused by name
+    /// rather than silently falling back to the host's tools.
     pub(crate) async fn ensure(
         manifest: &Manifest,
         root: &Path,
@@ -420,38 +421,45 @@ impl Toolchain {
         session: &Session,
         needs: Needs,
     ) -> Result<()> {
-        let mut wanted: Vec<Spec> = Vec::new();
+        // The distribution selections this command reaches, as (label, name, version); the label
+        // attributes a refusal to the half of `[toolchain]` that asked.
+        let mut selections: Vec<(&str, Option<&str>, Option<u32>)> = Vec::new();
         if needs.compiler
             && let Some(ToolSpec::Distribution { name, version }) =
                 manifest.toolchain.compiler.spec()
         {
-            wanted.push(
-                Spec::from_selector(name, version)
-                    .map_err(|error| anyhow!("`[toolchain] compiler`: {error}"))?,
-            );
+            selections.push(("`[toolchain] compiler`", name, version));
         }
         if needs.runtime
             && let Some(ToolSpec::Distribution { name, version }) =
                 manifest.toolchain.runtime.spec()
         {
-            wanted.push(
-                Spec::from_selector(name, version)
-                    .map_err(|error| anyhow!("`[toolchain] runtime`: {error}"))?,
-            );
+            selections.push(("`[toolchain] runtime`", name, version));
         }
-        wanted.dedup();
-        if wanted.is_empty() {
+        if selections.is_empty() {
             return Ok(());
         }
-        let store = Store::new(root);
         let installed = JdkInstall::discover(Some(root));
-        for spec in wanted {
+        let mut wanted: Vec<Spec> = Vec::new();
+        for (label, name, version) in selections {
+            // Discovery is checked first, version-less selectors included: the install that is
+            // already there — by the same distribution/version rule the build resolver applies —
+            // is the answer, not something to download.
             if installed
                 .iter()
-                .any(|install| install.satisfies(Some(&spec.distribution), spec.major()))
+                .any(|install| install.satisfies(name, version))
             {
                 continue;
             }
+            // Nothing satisfies it, and picking a build to download needs a version; refuse an
+            // unversioned selector by name rather than silently falling back to the host's tools.
+            wanted.push(
+                Spec::from_selector(name, version).map_err(|error| anyhow!("{label}: {error}"))?,
+            );
+        }
+        wanted.dedup();
+        let store = Store::new(root);
+        for spec in wanted {
             store
                 .install(&spec, None, fetcher, session, false)
                 .await
@@ -534,16 +542,16 @@ impl Spec {
     /// A selector's `version` is a major (`21`), which is enough: the install is named for the
     /// request and the provider picks the newest GA build of it.
     fn from_selector(name: Option<&str>, version: Option<u32>) -> Result<Self, String> {
+        let distribution = Self::canonical_distribution(name.unwrap_or(""))?;
         let Some(version) = version else {
-            return Err(
+            return Err(format!(
                 "the selector names no `version`, and an unversioned one matches whatever is \
                  installed — there is no build to download. Add `version = 21`, or run `jals \
-                 toolchain install <distribution>@<version>` first."
-                    .to_owned(),
-            );
+                 toolchain install {distribution}@<version>` first."
+            ));
         };
         Ok(Self {
-            distribution: Self::canonical_distribution(name.unwrap_or(""))?,
+            distribution,
             version: Version::Major(version),
         })
     }

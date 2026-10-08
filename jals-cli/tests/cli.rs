@@ -4263,6 +4263,70 @@ fn a_manifest_vendor_alias_selects_the_install_it_downloaded() {
     );
 }
 
+/// A distribution selector with no `version` is discovery-only, not a download: a matching install
+/// must satisfy it and the build must proceed (this used to be refused before discovery was even
+/// consulted), while nothing matching is refused — and the install the refusal names makes the
+/// selector resolvable on the next run.
+#[test]
+fn a_version_less_distribution_selector_resolves_an_installed_jdk() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let external = tempdir().unwrap();
+    let external_home = external.path().join("a-jdk");
+    write_fake_jdk(&external_home);
+
+    // A linked JDK is enough: the selector is a discovery question, and the fake tools run the
+    // real build lane (`--dry-run` would skip `ensure`, which is the code under test).
+    let output = jals()
+        .args(["toolchain", "link", "temurin-21", "--manifest-path"])
+        .arg(&manifest)
+        .arg(&external_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"demo\"\n\
+         [toolchain]\ncompiler = { distribution = { name = \"temurin\" } }\n",
+    )
+    .unwrap();
+    let output = jals()
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a version-less selector resolves the installed JDK: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A vendor nothing on this host provides: there is no install to discover and no version to
+    // download, so the selector is refused by name.
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"demo\"\n\
+         [toolchain]\ncompiler = { distribution = { name = \"no-such-vendor\" } }\n",
+    )
+    .unwrap();
+    let output = jals()
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("jals toolchain install no-such-vendor@<version>"),
+        "the refusal names the install that resolves it: {stderr}"
+    );
+}
+
 /// The zip lane: a provider that answers with a zip must install exactly like a tarball, on every
 /// platform (some vendors ship one for Unix too).
 #[test]
