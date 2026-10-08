@@ -1440,6 +1440,17 @@ fn resolve_native_lowers_registry_dependencies_under_the_roots_selection() {
             "fetched: {:?}",
             fetcher.calls()
         );
+        // ...and on the *compile* classpath, which is what a host materializes for `javac`. A jar
+        // only in `inputs` feeds the analysis index and is then compiled against nothing: the
+        // project lints clean and fails to compile. This project declares no graph dependency, so
+        // the resolved jar is the whole compile classpath.
+        let [CompileClasspathEntry::File(file)] = assembly.compile_classpath.as_slice() else {
+            panic!(
+                "the registry jar must be on the compile classpath: {:?}",
+                assembly.compile_classpath
+            );
+        };
+        assert_eq!(file.key, assembly.inputs.dependency_jars[0]);
     })
     .unwrap();
 }
