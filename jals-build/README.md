@@ -705,7 +705,7 @@ or other JDK features, so root build scripts remain trusted project code rather 
 boundary for the subsequent compiler process. Dependency process directives do not propagate. The
 LSP and playground never spawn that process.
 
-Default limits include 1 MiB script source, 1,000,000 operations, 1 MiB strings, 65,536-item
+Default limits include 1 MiB script source, 8,000,000 operations, 1 MiB strings, 65,536-item
 arrays, 4,096-entry maps, 4 KiB/128-segment paths, 1 MiB aggregate directives, 256 output files,
 4 MiB per output, 16 MiB total output, 4 MiB cached state, 4,096 task nodes, 16,384 task edges,
 1 MiB task literals, 256 task terminals, and 32 publication roots. Hosts may supply stricter
