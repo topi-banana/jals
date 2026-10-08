@@ -786,16 +786,22 @@ impl Store {
     ///
     /// A spec matches its own install directory exactly, or any installed toolchain the same
     /// distribution/version rule a manifest selector uses would match — so `which temurin@21`
-    /// finds an install named `temurin-21.0.12.1+1` too.
+    /// finds an install named `temurin-21.0.12.1+1` too. A keyword spec (`lts`/`latest`) states no
+    /// major, so it names exactly the install `install <spec>` creates: matching "any version of
+    /// the distribution" would let `which temurin@lts` answer with `temurin-17` beside
+    /// `temurin-21`, and `uninstall temurin@lts` remove both.
     fn find(&self, spec: &Spec) -> Vec<Entry> {
         let exact = spec.install_name();
+        let major = spec.major();
         let mut matches: Vec<Entry> = self
             .entries()
             .into_iter()
             .filter(|entry| {
                 entry.name == exact
-                    || JdkInstall::from_install_name(entry.home.clone(), &entry.name)
-                        .satisfies(Some(&spec.distribution), spec.major())
+                    || major.is_some_and(|major| {
+                        JdkInstall::from_install_name(entry.home.clone(), &entry.name)
+                            .satisfies(Some(&spec.distribution), Some(major))
+                    })
             })
             .collect();
         matches.sort_by(|left, right| left.name.cmp(&right.name));
@@ -1078,5 +1084,39 @@ mod tests {
                 "`{name}` must be allowed"
             );
         }
+    }
+
+    /// `lts`/`latest` state no major, so they name exactly the install they create — not every
+    /// version of the distribution, which would let `which` answer with an arbitrary one and
+    /// `uninstall` delete other releases.
+    #[test]
+    fn keyword_specs_match_only_their_own_install_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        for name in ["temurin-17", "temurin-21", "temurin-lts"] {
+            std::fs::create_dir_all(store.dir().join(name).join("bin")).unwrap();
+        }
+        let names = |spec: &Spec| -> Vec<String> {
+            store
+                .find(spec)
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect()
+        };
+        assert_eq!(names(&Spec::parse("temurin@lts").unwrap()), ["temurin-lts"]);
+        assert_eq!(
+            names(&Spec::parse("temurin@latest").unwrap()),
+            Vec::<String>::new()
+        );
+        // A versioned spec keeps matching by major, its exact directory first.
+        assert_eq!(names(&Spec::parse("temurin@21").unwrap()), ["temurin-21"]);
+        assert_eq!(
+            names(&Spec::parse("temurin@17.0.9").unwrap()),
+            ["temurin-17"]
+        );
+        assert_eq!(
+            names(&Spec::parse("zulu@21").unwrap()),
+            Vec::<String>::new()
+        );
     }
 }
