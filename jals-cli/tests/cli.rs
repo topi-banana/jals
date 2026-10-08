@@ -4425,6 +4425,87 @@ fn a_linked_toolchain_can_become_the_projects_default() {
     );
 }
 
+/// A `link`ed toolchain may be called anything the store accepts. `list` shows the literal name, so
+/// `which`, `default`, and `uninstall` have to take it too — not only names that happen to parse as
+/// `distribution-version` specs.
+#[test]
+fn a_linked_toolchain_is_named_by_its_literal_name() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let external = tempdir().unwrap();
+    let external_home = external.path().join("some-jdk");
+    write_fake_jdk(&external_home);
+
+    let output = jals()
+        .args(["toolchain", "link", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .arg(&external_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `which` answers for the literal name, the one `list` prints.
+    let output = jals()
+        .args(["toolchain", "which", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let which = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{which}");
+    assert!(
+        Path::new(which.trim()).ends_with(Path::new("target").join("jdk").join("my-jdk")),
+        "`which` answers with the linked home: {which}"
+    );
+
+    // `default` accepts it, so a plain `system` selection resolves it.
+    let output = jals()
+        .args(["toolchain", "default", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        command_targets(
+            &stdout,
+            &dir.path()
+                .join("target/jdk/my-jdk/bin")
+                .join(javac_binary_name())
+        ),
+        "the literal name is resolved: {stdout}"
+    );
+
+    // `uninstall` takes it back out.
+    let output = jals()
+        .args(["toolchain", "uninstall", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::fs::symlink_metadata(dir.path().join("target/jdk/my-jdk")).is_err(),
+        "the linked entry is removed"
+    );
+}
+
 /// A link whose target moved or was deleted is still an entry this store owns: `list` has to show
 /// it and `uninstall` has to remove it, or the dangling link can only be cleaned up by
 /// `link --force` (or by hand).

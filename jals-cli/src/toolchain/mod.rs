@@ -248,10 +248,17 @@ impl ListArgs {
 
 impl UninstallArgs {
     async fn run(&self, args: &ToolchainArgs, session: &Session) -> Result<ExitCode> {
-        let spec = Spec::parse(&self.spec)
-            .map_err(|error| anyhow!("invalid toolchain `{}`: {error}", self.spec))?;
         let (_, _root, store) = args.project(session).await?;
-        let entries = store.find(&spec);
+        let entries = match Spec::parse(&self.spec) {
+            Ok(spec) => store.find(&spec),
+            // A `link`ed toolchain may be called anything the store accepts (`my-jdk`), which is
+            // not a spec; the literal name is the entry `list` shows. Anything else is the parse
+            // error.
+            Err(error) => match store.named(&self.spec) {
+                Some(entry) => vec![entry],
+                None => return Err(anyhow!("invalid toolchain `{}`: {error}", self.spec)),
+            },
+        };
         if entries.is_empty() {
             bail!(
                 "no installed toolchain matches `{}`; run `jals toolchain list`",
@@ -275,16 +282,23 @@ impl UninstallArgs {
 
 impl WhichArgs {
     async fn run(&self, args: &ToolchainArgs, session: &Session) -> Result<ExitCode> {
-        let spec = Spec::parse(&self.spec)
-            .map_err(|error| anyhow!("invalid toolchain `{}`: {error}", self.spec))?;
         let (_, _root, store) = args.project(session).await?;
-        let entries = store.find(&spec);
-        let Some(entry) = entries.first() else {
-            bail!(
-                "`{}` is not installed; run `jals toolchain install {}`",
-                self.spec,
-                spec.request()
-            );
+        let entry = if let Some(entry) = store.named(&self.spec) {
+            // A `link`ed toolchain may be called anything the store accepts (`my-jdk`), which is
+            // not a [`Spec`]; the literal name is the one `list` shows. A spec that would also
+            // match names the same entry (`temurin-21`), which `find` puts first anyway.
+            entry
+        } else {
+            let spec = Spec::parse(&self.spec)
+                .map_err(|error| anyhow!("invalid toolchain `{}`: {error}", self.spec))?;
+            let Some(entry) = store.find(&spec).into_iter().next() else {
+                bail!(
+                    "`{}` is not installed; run `jals toolchain install {}`",
+                    self.spec,
+                    spec.request()
+                );
+            };
+            entry
         };
         session.stdout_is_free("`jals toolchain which`")?;
         session.shell().machine(entry.home.display());
@@ -362,21 +376,27 @@ impl DefaultArgs {
             session.shell().machine(line);
             return Ok(ExitCode::SUCCESS);
         };
-        let spec =
-            Spec::parse(raw).map_err(|error| anyhow!("invalid toolchain `{raw}`: {error}"))?;
-        let entry = if let Some(entry) = store.find(&spec).into_iter().next() {
+        let entry = if let Some(entry) = store.named(raw) {
+            // A `link`ed toolchain may be called anything the store accepts (`my-jdk`), which is
+            // not a [`Spec`]; the literal name is the one `list` shows.
             entry
         } else {
-            // rustup's `default` installs what it names; so does this one, so pointing a fresh
-            // checkout at a toolchain is one command rather than two.
-            let fetcher = args.fetcher(&store.root);
-            store.install(&spec, None, &fetcher, session, false).await?;
-            store.find(&spec).into_iter().next().ok_or_else(|| {
-                anyhow!(
-                    "the install of `{}` did not publish it",
-                    spec.install_name()
-                )
-            })?
+            let spec =
+                Spec::parse(raw).map_err(|error| anyhow!("invalid toolchain `{raw}`: {error}"))?;
+            if let Some(entry) = store.find(&spec).into_iter().next() {
+                entry
+            } else {
+                // rustup's `default` installs what it names; so does this one, so pointing a fresh
+                // checkout at a toolchain is one command rather than two.
+                let fetcher = args.fetcher(&store.root);
+                store.install(&spec, None, &fetcher, session, false).await?;
+                store.find(&spec).into_iter().next().ok_or_else(|| {
+                    anyhow!(
+                        "the install of `{}` did not publish it",
+                        spec.install_name()
+                    )
+                })?
+            }
         };
         store
             .set_default(&entry.name)
@@ -751,6 +771,15 @@ impl Store {
         let bytes = std::fs::read(home.join(Self::METADATA_FILE)).ok()?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         value["release"].as_str().map(str::to_owned)
+    }
+
+    /// The installed entry named exactly `name`, when the store holds one.
+    ///
+    /// The literal-name door for a `link`ed toolchain, which may be called anything (`my-jdk`):
+    /// such a name is not a [`Spec`], so `which`/`uninstall`/`default` could not name an entry
+    /// back that `list` shows.
+    fn named(&self, name: &str) -> Option<Entry> {
+        self.entries().into_iter().find(|entry| entry.name == name)
     }
 
     /// The installed entries `spec` names, exact name first.
