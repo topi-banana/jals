@@ -188,6 +188,18 @@ impl Provider {
             versions.join(", ")
         }
     }
+
+    /// A release name with Adoptium's `jdk` prefix removed.
+    ///
+    /// Java 9+ is spelled `jdk-21.0.12.1+1` and Java 8 `jdk8u422-b05`, so both prefixes come off:
+    /// an exact request spelled the version's own way has to match the release either way, and
+    /// the version this reports back is the version, not the archive's name.
+    fn release_version(release: &str) -> &str {
+        release
+            .strip_prefix("jdk-")
+            .or_else(|| release.strip_prefix("jdk"))
+            .unwrap_or(release)
+    }
 }
 
 /// Adoptium (`api.adoptium.net`), serving Temurin.
@@ -205,7 +217,7 @@ impl Provider {
         let release = match &spec.version {
             Version::Exact(want) => releases
                 .iter()
-                .find(|release| release.trim_start_matches("jdk-") == *want)
+                .find(|release| Self::release_version(release) == *want)
                 .cloned()
                 .ok_or_else(|| {
                     anyhow!(
@@ -218,7 +230,7 @@ impl Provider {
                 .cloned()
                 .ok_or_else(|| anyhow!("temurin has no GA release for java {major}"))?,
         };
-        let version = release.trim_start_matches("jdk-").to_owned();
+        let version = Self::release_version(&release).to_owned();
         let url = format!(
             "https://api.adoptium.net/v3/binary/version/{}/{}/{}/jdk/hotspot/normal/eclipse",
             Self::encode(&release),
@@ -419,4 +431,18 @@ impl Provider {
     /// Every response is a small JSON document; the ceiling exists so a misrouted URL answering
     /// with an archive cannot fill memory before the parser notices.
     const METADATA_MAX_BYTES: usize = 4 * 1024 * 1024;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Adoptium prefixes a release name with `jdk-` (Java 9+) or `jdk` (Java 8); both strip back
+    /// to the version an exact request spells.
+    #[test]
+    fn strips_both_adoptium_release_prefixes() {
+        assert_eq!(Provider::release_version("jdk-21.0.12.1+1"), "21.0.12.1+1");
+        assert_eq!(Provider::release_version("jdk8u422-b05"), "8u422-b05");
+        assert_eq!(Provider::release_version("21.0.12.1+1"), "21.0.12.1+1");
+    }
 }
