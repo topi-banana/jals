@@ -537,11 +537,11 @@ impl Fetcher for ReqwestFetcher {
         report: &Task,
     ) -> Result<Vec<u8>, FetchError> {
         if let Some(path) = locator.strip_prefix("file://") {
-            return Self::read_file_bounded(PathBuf::from(path), max_bytes).await;
+            return Self::read_file_bounded(PathBuf::from(path), max_bytes, report).await;
         }
         if !ExternalLocator::is_url(locator) {
             let path = self.project_root.join(locator);
-            return Self::read_file_bounded(path, max_bytes).await;
+            return Self::read_file_bounded(path, max_bytes, report).await;
         }
         let response = self
             .client
@@ -615,8 +615,12 @@ impl ReqwestFetcher {
         Ok(bytes)
     }
 
-    async fn read_file_bounded(path: PathBuf, max_bytes: usize) -> Result<Vec<u8>, FetchError> {
-        on_blocking_pool(move || {
+    async fn read_file_bounded(
+        path: PathBuf,
+        max_bytes: usize,
+        report: &Task,
+    ) -> Result<Vec<u8>, FetchError> {
+        let bytes = on_blocking_pool(move || {
             let file = fs::File::open(&path).map_err(|error| {
                 FetchError::permanent(format!("opening {}: {error}", path.display()))
             })?;
@@ -635,7 +639,12 @@ impl ReqwestFetcher {
             }
             Ok(bytes)
         })
-        .await
+        .await?;
+        // A local file has its length in hand before it is read, so unlike a streamed response it
+        // reports a completed transfer rather than a fetch that moved nothing.
+        report.set_total(bytes.len() as u64);
+        report.set_done(bytes.len() as u64);
+        Ok(bytes)
     }
 }
 

@@ -81,7 +81,7 @@ impl JavacBackend {
         exec: &Exec,
     ) -> Self {
         Self {
-            compiler: <dyn Compiler>::select(manifest, exec).await,
+            compiler: <dyn Compiler>::select(manifest, project_root, exec).await,
             manifest: manifest.clone(),
             project_root: project_root.to_path_buf(),
             staging_root: staged.root().to_path_buf(),

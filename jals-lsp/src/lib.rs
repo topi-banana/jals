@@ -24,3 +24,21 @@ mod server;
 mod state;
 
 pub use server::Server;
+
+pub(crate) use detail::toolchain_exclusion;
+
+/// The toolchain-store exclusion, grouped per the repository's no-free-functions layout;
+/// re-exported at the crate root.
+mod detail {
+    /// The project-local toolchain store, as a native-snapshot exclusion.
+    ///
+    /// `target/jdk` holds `[toolchain]` *inputs*, not project bytes: capturing it would read hundreds
+    /// of megabytes per workspace assembly, and a `link`ed entry is a symlink out of the root that a
+    /// root-wide scope would diagnose every time. The CLI applies the same exclusion to its
+    /// root-scoped snapshots (`App::toolchain_exclusion`); both name the directory through
+    /// [`jals_config::MANAGED_TOOLCHAIN_ROOT`].
+    pub(crate) fn toolchain_exclusion() -> jals_storage::RelativePath {
+        jals_storage::RelativePath::parse(jals_config::MANAGED_TOOLCHAIN_ROOT)
+            .expect("the toolchain root is a portable path")
+    }
+}

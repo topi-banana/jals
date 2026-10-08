@@ -530,8 +530,14 @@ fn run_dry_run_prints_javac_and_java_commands() {
         manifest.to_str().unwrap(),
     ]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("javac "), "got: {stdout}");
-    assert!(stdout.contains("java -cp "), "got: {stdout}");
+    assert!(
+        stdout.contains(&format!("{} ", javac_binary_name())),
+        "got: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{} -cp ", java_binary_name())),
+        "got: {stdout}"
+    );
     assert!(stdout.contains("com.example.Main"), "got: {stdout}");
 }
 
@@ -1588,7 +1594,10 @@ fn run_bin_flag_selects_main_class() {
         manifest.to_str().unwrap(),
     ]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("java -cp "), "got: {stdout}");
+    assert!(
+        stdout.contains(&format!("{} -cp ", java_binary_name())),
+        "got: {stdout}"
+    );
     assert!(stdout.contains("com.example.Two"), "got: {stdout}");
     assert!(!stdout.contains("com.example.One"), "got: {stdout}");
 }
@@ -4026,6 +4035,490 @@ fn a_wasm_backend_with_a_jvm_runtime_is_refused_by_jals_test() {
     assert!(
         stderr.contains("runtime = \"wasm\""),
         "the refusal names the selector that works: {stderr}"
+    );
+}
+
+/// The platform's `java` executable name, for fixtures that have to look like a JDK home.
+const fn java_binary_name() -> &'static str {
+    if cfg!(windows) { "java.exe" } else { "java" }
+}
+
+/// The platform's `javac` executable name, for the same reason as [`java_binary_name`].
+const fn javac_binary_name() -> &'static str {
+    if cfg!(windows) { "javac.exe" } else { "javac" }
+}
+
+/// Whether a printed command's program is `expected`.
+///
+/// Component-wise (`Path::ends_with`) rather than a substring: a host path is spelled with the
+/// platform's separators, so a literal `target/jdk/…` comparison holds on Unix and fails on
+/// Windows for a reason that has nothing to do with what the command resolves.
+fn command_targets(cmd_line: &str, expected: &Path) -> bool {
+    cmd_line
+        .split_whitespace()
+        .next()
+        .map(|program| program.trim_matches('"'))
+        .is_some_and(|program| Path::new(program).ends_with(expected))
+}
+
+/// Write a fake JDK home (`bin/java`, `bin/javac`) under `directory`, ready to be archived or
+/// linked. The tools are no-op scripts: every toolchain test asserts *which* path was selected,
+/// never what the selected `java` would compute.
+fn write_fake_jdk(home: &Path) {
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["java", "javac"] {
+        let path = bin.join(if cfg!(windows) {
+            format!("{tool}.exe")
+        } else {
+            tool.to_owned()
+        });
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+    }
+}
+
+/// Package a fake JDK as a gzip-compressed tar with one top-level directory named for the release
+/// — the layout a real Temurin tarball has, so the installer's home-location rule is exercised
+/// rather than bypassed.
+fn write_jdk_tarball(archive: &Path, release: &str) {
+    let staging = tempdir().unwrap();
+    write_fake_jdk(&staging.path().join(release));
+    let file = std::fs::File::create(archive).unwrap();
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder
+        .append_dir_all(release, staging.path().join(release))
+        .unwrap();
+    builder.into_inner().unwrap().finish().unwrap();
+}
+
+/// Package a fake JDK as a zip — what Windows builds (and some vendors' Unix builds) ship, and
+/// therefore the other decoder the installer must own.
+fn write_jdk_zip(archive: &Path, release: &str) {
+    let staging = tempdir().unwrap();
+    write_fake_jdk(&staging.path().join(release));
+    let file = std::fs::File::create(archive).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    let bin = staging.path().join(release).join("bin");
+    for tool in ["java", "javac"] {
+        let name = if cfg!(windows) {
+            format!("{tool}.exe")
+        } else {
+            tool.to_owned()
+        };
+        writer
+            .start_file(format!("{release}/bin/{name}"), options)
+            .unwrap();
+        writer
+            .write_all(&std::fs::read(bin.join(&name)).unwrap())
+            .unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+/// Install, list, resolve, and remove one toolchain, entirely offline: the `--url` lane is what a
+/// vendor page or an already-downloaded archive uses, and it exercises the same fetch gate,
+/// archive sniffing, home location, and store layout the provider lane does.
+#[test]
+fn a_toolchain_installs_lists_resolves_and_uninstalls_offline() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let archive = dir.path().join("fake-jdk.tar.gz");
+    write_jdk_tarball(&archive, "jdk-21.0.5+11");
+    let url = format!("file://{}", archive.display());
+
+    let output = jals()
+        .args([
+            "toolchain",
+            "install",
+            "temurin@21",
+            "--url",
+            &url,
+            "--offline",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let home = dir.path().join("target/jdk/temurin-21");
+    assert!(
+        home.join("bin").join(java_binary_name()).is_file(),
+        "the extracted home lands under the requested install name: {stderr}"
+    );
+
+    let output = jals()
+        .args(["toolchain", "list", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{listed}");
+    assert!(listed.contains("temurin-21"), "{listed}");
+
+    let output = jals()
+        .args(["toolchain", "which", "temurin@21", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let which = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        Path::new(which.trim()).ends_with(Path::new("target").join("jdk").join("temurin-21")),
+        "`which` answers with the JDK home: {which}"
+    );
+
+    // A selector in the manifest resolves to the project-local install, not the host's tools.
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"demo\"\n\
+         [toolchain]\ncompiler = { distribution = { name = \"temurin\", version = 21 } }\n",
+    )
+    .unwrap();
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        command_targets(
+            &stdout,
+            &dir.path()
+                .join("target/jdk/temurin-21/bin")
+                .join(javac_binary_name())
+        ),
+        "the compile resolves the installed toolchain: {stdout}"
+    );
+
+    let output = jals()
+        .args(["toolchain", "uninstall", "temurin@21", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!home.exists(), "the install is removed recursively");
+}
+
+/// A manifest may spell the vendor with an alias (`adoptium`) that `install` accepts. The
+/// selection has to resolve the canonical install (`temurin-21`) that alias produced — otherwise
+/// the JDK is downloaded and then silently ignored in favor of the host's tools.
+#[test]
+fn a_manifest_vendor_alias_selects_the_install_it_downloaded() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let archive = dir.path().join("fake-jdk.tar.gz");
+    write_jdk_tarball(&archive, "jdk-21.0.5+11");
+    let url = format!("file://{}", archive.display());
+
+    let output = jals()
+        .args([
+            "toolchain",
+            "install",
+            "adoptium@21",
+            "--url",
+            &url,
+            "--offline",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    // The alias installs under the canonical name, which is what a selector matches.
+    let home = dir.path().join("target/jdk/temurin-21");
+    assert!(
+        home.join("bin").join(java_binary_name()).is_file(),
+        "{stderr}"
+    );
+
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"demo\"\n\
+         [toolchain]\ncompiler = { distribution = { name = \"adoptium\", version = 21 } }\n",
+    )
+    .unwrap();
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        command_targets(&stdout, &home.join("bin").join(javac_binary_name())),
+        "the alias selector resolves the canonical install: {stdout}"
+    );
+}
+
+/// The zip lane: a provider that answers with a zip must install exactly like a tarball, on every
+/// platform (some vendors ship one for Unix too).
+#[test]
+fn a_zip_archive_installs_like_a_tarball() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let archive = dir.path().join("fake-jdk.zip");
+    write_jdk_zip(&archive, "jdk-17.0.9");
+    let url = format!("file://{}", archive.display());
+
+    let output = jals()
+        .args([
+            "toolchain",
+            "install",
+            "temurin@17",
+            "--url",
+            &url,
+            "--offline",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        dir.path()
+            .join("target/jdk/temurin-17/bin")
+            .join(java_binary_name())
+            .is_file(),
+        "{stderr}"
+    );
+}
+
+/// `link` registers a JDK that lives elsewhere, and `default` makes it what a plain `system`
+/// selection — every manifest with no `[toolchain]` table — resolves to for this project.
+#[test]
+fn a_linked_toolchain_can_become_the_projects_default() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let external = tempdir().unwrap();
+    let external_home = external.path().join("some-jdk");
+    write_fake_jdk(&external_home);
+    let canonical = std::fs::canonicalize(&external_home).unwrap();
+
+    let output = jals()
+        .args(["toolchain", "link", "custom-21", "--manifest-path"])
+        .arg(&manifest)
+        .arg(&external_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::canonicalize(dir.path().join("target/jdk/custom-21")).unwrap(),
+        canonical,
+        "the registered name is a link to the JDK the user pointed at"
+    );
+
+    let output = jals()
+        .args(["toolchain", "default", "custom-21", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        command_targets(
+            &stdout,
+            &dir.path()
+                .join("target/jdk/custom-21/bin")
+                .join(javac_binary_name())
+        ),
+        "a `system` selection prefers the project's default: {stdout}"
+    );
+
+    let output = jals()
+        .args(["toolchain", "list", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        listed.contains("[linked]") && listed.contains("[default]"),
+        "{listed}"
+    );
+}
+
+/// A `link`ed toolchain may be called anything the store accepts. `list` shows the literal name, so
+/// `which`, `default`, and `uninstall` have to take it too — not only names that happen to parse as
+/// `distribution-version` specs.
+#[test]
+fn a_linked_toolchain_is_named_by_its_literal_name() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let external = tempdir().unwrap();
+    let external_home = external.path().join("some-jdk");
+    write_fake_jdk(&external_home);
+
+    let output = jals()
+        .args(["toolchain", "link", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .arg(&external_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `which` answers for the literal name, the one `list` prints.
+    let output = jals()
+        .args(["toolchain", "which", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let which = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{which}");
+    assert!(
+        Path::new(which.trim()).ends_with(Path::new("target").join("jdk").join("my-jdk")),
+        "`which` answers with the linked home: {which}"
+    );
+
+    // `default` accepts it, so a plain `system` selection resolves it.
+    let output = jals()
+        .args(["toolchain", "default", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        command_targets(
+            &stdout,
+            &dir.path()
+                .join("target/jdk/my-jdk/bin")
+                .join(javac_binary_name())
+        ),
+        "the literal name is resolved: {stdout}"
+    );
+
+    // `uninstall` takes it back out.
+    let output = jals()
+        .args(["toolchain", "uninstall", "my-jdk", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::fs::symlink_metadata(dir.path().join("target/jdk/my-jdk")).is_err(),
+        "the linked entry is removed"
+    );
+}
+
+/// A link whose target moved or was deleted is still an entry this store owns: `list` has to show
+/// it and `uninstall` has to remove it, or the dangling link can only be cleaned up by
+/// `link --force` (or by hand).
+#[test]
+fn a_dangling_linked_toolchain_is_listed_and_uninstallable() {
+    let dir = project("[package]\nname = \"demo\"\n");
+    let manifest = dir.path().join("jals.toml");
+    let external = tempdir().unwrap();
+    let external_home = external.path().join("some-jdk");
+    write_fake_jdk(&external_home);
+
+    let output = jals()
+        .args(["toolchain", "link", "gone-21", "--manifest-path"])
+        .arg(&manifest)
+        .arg(&external_home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(&external_home).unwrap();
+    let link = dir.path().join("target/jdk/gone-21");
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "the link itself survives its target"
+    );
+
+    let output = jals()
+        .args(["toolchain", "list", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{listed}");
+    assert!(listed.contains("gone-21"), "{listed}");
+
+    let output = jals()
+        .args(["toolchain", "uninstall", "gone-21", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "the dangling link is removed as the link it is"
+    );
+}
+
+/// With no install and a refused network, the failure says how to proceed rather than falling
+/// back to the host's tools — the silent fallback an explicit `distribution` selector must not
+/// get.
+#[test]
+fn a_missing_distribution_offline_names_the_install_command() {
+    let dir = project(
+        "[package]\nname = \"demo\"\n\
+         [toolchain]\ncompiler = { distribution = { name = \"no-such-vendor\", version = 17 } }\n",
+    );
+    let output = jals()
+        .args(["build", "--offline", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("jals toolchain install no-such-vendor@17"),
+        "the refusal names the way out: {stderr}"
+    );
+    assert!(
+        stderr.contains("not fetched while offline"),
+        "and the reason: {stderr}"
     );
 }
 

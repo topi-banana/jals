@@ -755,13 +755,25 @@ plain serde representation; nothing is classified from a free-form string):
 
 A JDK tool is resolved in this order: the `$JAVAC`/`$JAVA` environment override (wins
 unconditionally, for CI/back-compat) → the `[toolchain]` selection above → `$JAVA_HOME/bin/<tool>` →
-the bare name on `PATH`. A distribution selector is matched against the JDKs found under the common
-install locations (SDKMAN, IntelliJ `~/.jdks`, `~/.jdk`, `/usr/lib/jvm`, the macOS JVM bundle
-directory) — **discovery only**; automatically downloading a missing JDK (rust-toolchain style) is
-future work, and an un-discovered distribution falls back to the system tools. A `"builtin"`
-selector skips program resolution entirely — no process is spawned for that step; the two selectors
-are independent (each is its own enum, matched by its own `select` factory), so e.g.
+the bare name on `PATH`. A distribution selector is matched against the JDKs found under the
+project-local store (`target/jdk`, first) and the common install locations (SDKMAN, IntelliJ
+`~/.jdks`, `~/.jdk`, `/usr/lib/jvm`, the macOS JVM bundle directory).
+
+`jals build`, `jals run`, and `jals test` **auto-install** a selected distribution that no
+discovered install satisfies (rust-toolchain.toml style), unless `--offline` refuses the network —
+then the failure names the `jals toolchain install <distribution>@<version>` command that fixes it.
+A selector with no `version` can still be satisfied by an installed JDK, but cannot be downloaded:
+one that no install matches is refused the same way rather than silently falling back to the host's
+tools. The installed store, `link`ed JDKs, and the project default are
+managed by `jals toolchain` (see [`jals-cli`](../jals-cli) `--help`, and
+`jals toolchain list --available` for what each distribution publishes). A `"builtin"` selector
+skips program resolution entirely — no process is spawned for that step; the two selectors are
+independent (each is its own enum, matched by its own `select` factory), so e.g.
 `compiler = "builtin"` with the runtime unset dummy-"compiles" but still runs with the real `java`.
+
+`jals toolchain default <name>` additionally claims the `system` selection for this project: the
+store's `default` entry takes the `$JAVA_HOME` slot (below `$JAVAC`/`$JAVA`), so a project says
+which local JDK plain `system` means.
 
 **`runtime = "wasm"` is the one exception to that independence.** Every other value answers *which
 `java`* and pairs with any backend; that one answers *not a `java` at all* — it runs a WebAssembly
@@ -1091,7 +1103,7 @@ Making a `features` release preset also imply a default `javac --release` is sti
 | ------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[dev-dependencies]`                  | `[dev-dependencies]`  | **done** — see [§5](#5-testing). Same entry shapes as `[dependencies]`, resolved by `jals test` and by the analysis hosts and by nothing that produces output, and **not transitive**.                                                                                                                                                                                                                                                                                                    |
 | `[dependencies]`                      | `[dependencies]`      | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources), and `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation. Maven coordinates, POM/version resolution, transitive Maven download, and a lockfile remain §3.                                                                            |
-| `[toolchain]`                         | `rust-toolchain.toml` | **partly done**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). Still to come: **automatic download** of a missing JDK (rust-toolchain style, e.g. via the foojay disco API) into a per-user cache, and letting a `[package] features` release preset default `[build] release`. |
+| `[toolchain]`                         | `rust-toolchain.toml` | **done for JDK selection**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the project-local `target/jdk` store (installed by `jals toolchain`, Adoptium or foojay Disco providers) and the host's installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). A missing distribution is auto-installed rust-toolchain style, and `jals toolchain default` claims the `system` selection. Still to come: letting a `[package] features` release preset default `[build] release`. |
 | `[repositories]`                      | (registries)          | Maven repository URLs; default Maven Central                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]`         | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels)                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `[workspace]` / `[[module]]`          | `[workspace]`         | multi-module builds with a shared lockfile                                                                                                                                                                                                                                                                                                                                                                                                                                                    |

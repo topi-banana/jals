@@ -41,12 +41,43 @@ pub enum Tool {
 }
 
 impl Tool {
-    /// The bare executable name (`"javac"` / `"java"`), used both as the `bin/` leaf of a JDK home
-    /// and as the ultimate `PATH`-resolved fallback.
+    /// The bare executable name (`"javac"` / `"java"`), used as the ultimate `PATH`-resolved
+    /// fallback and as the stem of a spilled argument file.
+    ///
+    /// Deliberately extension-less on every platform: `CreateProcess` appends `.exe` when it
+    /// searches `PATH`, and the argument file a run spills is named for the *tool*, not for the
+    /// host's executable spelling. The name a JDK home actually holds is
+    /// [`executable_name`](Self::executable_name).
     pub(crate) const fn binary_name(self) -> &'static str {
         match self {
             Self::Javac => "javac",
             Self::Java => "java",
+        }
+    }
+
+    /// The file name a JDK `home` holds this tool under (`javac.exe` on Windows, `javac`
+    /// elsewhere).
+    ///
+    /// Distinct from [`binary_name`](Self::binary_name) because a Windows JDK stores `javac.exe`
+    /// and a filesystem probe of `bin/javac` does **not** append the extension — so a discovered
+    /// install, a `$JAVA_HOME`, and a project-local toolchain were all invisible there and every
+    /// selection silently fell through to `PATH`.
+    pub(crate) const fn executable_name(self) -> &'static str {
+        match self {
+            Self::Javac => {
+                if cfg!(windows) {
+                    "javac.exe"
+                } else {
+                    "javac"
+                }
+            }
+            Self::Java => {
+                if cfg!(windows) {
+                    "java.exe"
+                } else {
+                    "java"
+                }
+            }
         }
     }
 
@@ -62,7 +93,7 @@ impl Tool {
     /// Where this tool lives inside a JDK `home` (`<home>/bin/<tool>`) — the one place the JDK
     /// layout rule is encoded.
     fn path_in(self, home: &Path) -> PathBuf {
-        home.join("bin").join(self.binary_name())
+        home.join("bin").join(self.executable_name())
     }
 }
 
@@ -89,9 +120,13 @@ impl JdkInstall {
     /// Handles the layouts the common install roots produce: SDKMAN vendor-suffixed names
     /// (`21.0.2-tem`), distro-prefixed names (`temurin-21.0.2`, `java-17-openjdk-amd64`), and legacy
     /// `1.8`-style versions (`jdk1.8.0_292` → 8). The distribution is canonicalized to the same
-    /// lowercase vocabulary [`matches`](Self::matches) compares against, so classification and
+    /// lowercase vocabulary [`satisfies`](Self::satisfies) compares against, so classification and
     /// matching stay one scheme; an unrecognized vendor or version is `None` (matched leniently).
-    pub(crate) fn from_install_name(home: PathBuf, name: &str) -> Self {
+    ///
+    /// Public because the classifier is also what a host outside this crate matches a
+    /// project-local install with — `jals toolchain uninstall`/`which` name one by the same
+    /// directory scheme discovery parses. A second parser there would be a second vocabulary.
+    pub fn from_install_name(home: PathBuf, name: &str) -> Self {
         Self {
             home,
             distribution: Self::parse_distribution(name),
@@ -100,17 +135,37 @@ impl JdkInstall {
     }
 
     /// Whether this install satisfies a `distribution`/`version` selector. A `None` half of the
-    /// selector matches anything; a named distribution matches case-insensitively as a substring
-    /// (so `openjdk` matches an `openjdk-21` install directory), and a named version matches exactly.
-    fn matches(&self, distribution: Option<&str>, version: Option<u32>) -> bool {
+    /// selector matches anything; a named distribution is canonicalized
+    /// ([`canonical_distribution`](Self::canonical_distribution)) and then matched
+    /// case-insensitively as a substring (so `openjdk` matches an `openjdk-21` install directory,
+    /// and `adoptium` matches the `temurin-21` an alias install produced), and a named version
+    /// matches exactly.
+    ///
+    /// Public for the same reason as [`from_install_name`](Self::from_install_name): "would this
+    /// selection resolve here" is the question a host that must decide whether to download asks,
+    /// and answering it with its own substring test would let two answers drift apart.
+    pub fn satisfies(&self, distribution: Option<&str>, version: Option<u32>) -> bool {
         let dist_ok = distribution.is_none_or(|want| {
-            self.distribution.as_deref().is_some_and(|have| {
-                have.to_ascii_lowercase()
-                    .contains(&want.to_ascii_lowercase())
-            })
+            let want = Self::canonical_distribution(want);
+            self.distribution
+                .as_deref()
+                .is_some_and(|have| have.to_ascii_lowercase().contains(&want))
         });
         let version_ok = version.is_none_or(|want| self.version == Some(want));
         dist_ok && version_ok
+    }
+
+    /// A distribution name in the one spelling discovery and selection share.
+    ///
+    /// The vendor's own aliases collapse onto the canonical name an install directory is
+    /// classified with (`adoptium`/`adoptopenjdk`/`eclipse` are all Temurin), so a manifest that
+    /// spells the vendor the way `jals toolchain install` accepts it resolves the install that
+    /// command produced. Lowercasing is part of it: `Temurin` and `temurin` are one distribution.
+    pub fn canonical_distribution(name: &str) -> String {
+        match name.to_ascii_lowercase().as_str() {
+            "adoptium" | "adoptopenjdk" | "eclipse" => "temurin".to_owned(),
+            lower => lower.to_owned(),
+        }
     }
 
     /// The major Java version embedded in an install name, or `None`.
@@ -280,7 +335,7 @@ impl ToolResolver<'_> {
                 let mut preferred: Vec<PathBuf> = self
                     .installs
                     .iter()
-                    .filter(|install| install.matches(name, version))
+                    .filter(|install| install.satisfies(name, version))
                     .map(|install| tool.path_in(&install.home))
                     .collect();
                 preferred.extend(self.java_home_bin(tool));
@@ -522,6 +577,14 @@ mod tests {
         }
     }
 
+    /// `home`'s `bin/<tool>` as [`Tool::path_in`] spells it on this platform.
+    ///
+    /// These tests spell homes POSIX-style on every platform, so the expected `bin/` leaf comes
+    /// from the resolver's own name rule (`javac.exe` on Windows) rather than a literal.
+    fn bin_path(home: &str, tool: Tool) -> PathBuf {
+        Path::new(home).join("bin").join(tool.executable_name())
+    }
+
     #[test]
     fn env_override_wins_unconditionally() {
         let installs = [install("/jvm/temurin-21", Some("temurin"), Some(21))];
@@ -542,10 +605,7 @@ mod tests {
             Some(ToolSpec::System),
             None,
         );
-        assert_eq!(
-            out.preferred,
-            vec![PathBuf::from("/opt/java-home/bin/javac")]
-        );
+        assert_eq!(out.preferred, vec![bin_path("/opt/java-home", Tool::Javac)]);
         assert_eq!(out.fallback, PathBuf::from("javac"));
     }
 
@@ -567,7 +627,7 @@ mod tests {
             None,
         );
         assert_eq!(out.preferred, vec![PathBuf::from(JDK_HOME)]);
-        assert_eq!(out.fallback, Path::new(JDK_HOME).join("bin").join("javac"));
+        assert_eq!(out.fallback, bin_path(JDK_HOME, Tool::Javac));
     }
 
     #[test]
@@ -586,11 +646,13 @@ mod tests {
 
     #[test]
     fn relative_path_resolves_against_project_root() {
-        // "jdk/bin/javac" ends in the tool name → the binary itself, resolved against the root.
+        // "jdk/bin/javac" ends in the tool name → the binary itself, resolved against the root and
+        // used verbatim: an explicit binary path keeps the spelling the configuration gave, so the
+        // `bin/` leaf is not run through `executable_name` here.
         let out =
             resolver(&[], None).resolve(Tool::Javac, Some(ToolSpec::Path("jdk/bin/javac")), None);
         assert!(out.preferred.is_empty(), "{:?}", out.preferred);
-        assert_eq!(out.fallback, PathBuf::from("/proj/jdk/bin/javac"));
+        assert_eq!(out.fallback, Path::new("/proj").join("jdk/bin/javac"));
     }
 
     #[test]
@@ -604,7 +666,7 @@ mod tests {
         };
         let out = resolver.resolve(Tool::Javac, Some(ToolSpec::Path("~/jdks/21")), None);
         assert_eq!(out.preferred, vec![PathBuf::from("/home/dev/jdks/21")]);
-        assert_eq!(out.fallback, PathBuf::from("/home/dev/jdks/21/bin/javac"));
+        assert_eq!(out.fallback, bin_path("/home/dev/jdks/21", Tool::Javac));
     }
 
     #[test]
@@ -631,7 +693,7 @@ mod tests {
         // Only the temurin-21 install matches; bare name is the fallback.
         assert_eq!(
             out.preferred,
-            vec![PathBuf::from("/jvm/temurin-21/bin/javac")]
+            vec![bin_path("/jvm/temurin-21", Tool::Javac)]
         );
         assert_eq!(out.fallback, PathBuf::from("javac"));
     }
@@ -653,11 +715,42 @@ mod tests {
         assert_eq!(
             out.preferred,
             vec![
-                PathBuf::from("/jvm/openjdk-17/bin/java"),
-                PathBuf::from("/jvm/temurin-17/bin/java"),
+                bin_path("/jvm/openjdk-17", Tool::Java),
+                bin_path("/jvm/temurin-17", Tool::Java),
             ]
         );
         assert_eq!(out.fallback, PathBuf::from("java"));
+    }
+
+    #[test]
+    fn vendor_aliases_match_the_canonical_install() {
+        let installs = [install("/jvm/temurin-21", Some("temurin"), Some(21))];
+        // A manifest may spell the vendor the way `jals toolchain install` accepts it; every
+        // alias has to match the canonical install the alias command produced.
+        for alias in ["temurin", "adoptium", "adoptopenjdk", "eclipse", "Temurin"] {
+            let out = resolver(&installs, None).resolve(
+                Tool::Javac,
+                Some(ToolSpec::Distribution {
+                    name: Some(alias),
+                    version: Some(21),
+                }),
+                None,
+            );
+            assert_eq!(
+                out.preferred,
+                vec![bin_path("/jvm/temurin-21", Tool::Javac)],
+                "`{alias}` must match the temurin install"
+            );
+        }
+        // The alias does not loosen matching: another vendor and another version still miss.
+        assert!(!installs[0].satisfies(Some("zulu"), Some(21)));
+        assert!(!installs[0].satisfies(Some("adoptium"), Some(17)));
+        // Matching and classification agree on an install name the alias path wrote.
+        let local = JdkInstall::from_install_name(
+            PathBuf::from("/proj/target/jdk/temurin-21"),
+            "temurin-21",
+        );
+        assert!(local.satisfies(Some("adoptium"), Some(21)));
     }
 
     #[test]
@@ -672,7 +765,7 @@ mod tests {
             None,
         );
         // No install matches, so only the system + bare-name fallbacks remain.
-        assert_eq!(out.preferred, vec![PathBuf::from("/sys/jdk/bin/javac")]);
+        assert_eq!(out.preferred, vec![bin_path("/sys/jdk", Tool::Javac)]);
         assert_eq!(out.fallback, PathBuf::from("javac"));
     }
 

@@ -200,7 +200,8 @@ impl TestLauncher {
         request: &RunRequest<'_>,
         contract: HarnessContract,
     ) -> Result<Self, ToolchainError> {
-        let toolchain = crate::native::SubprocessToolchain::from_manifest(manifest).await;
+        let toolchain =
+            crate::native::SubprocessToolchain::from_manifest(manifest, request.project_root).await;
         // Assertions on, ahead of anything the project asked for, so a project that sets its own
         // `-da` still has the last word.
         let mut jvm_args = vec![
