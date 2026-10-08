@@ -441,43 +441,12 @@ impl Toolchain {
         session: &Session,
         needs: Needs,
     ) -> Result<()> {
-        // The distribution selections this command reaches, as (label, name, version); the label
-        // attributes a refusal to the half of `[toolchain]` that asked.
-        let mut selections: Vec<(&str, Option<&str>, Option<u32>)> = Vec::new();
-        if needs.compiler
-            && let Some(ToolSpec::Distribution { name, version }) =
-                manifest.toolchain.compiler.spec()
-        {
-            selections.push(("`[toolchain] compiler`", name, version));
-        }
-        if needs.runtime
-            && let Some(ToolSpec::Distribution { name, version }) =
-                manifest.toolchain.runtime.spec()
-        {
-            selections.push(("`[toolchain] runtime`", name, version));
-        }
+        let selections = Self::selections(manifest, needs);
         if selections.is_empty() {
             return Ok(());
         }
         let installed = JdkInstall::discover(Some(root));
-        let mut wanted: Vec<Spec> = Vec::new();
-        for (label, name, version) in selections {
-            // Discovery is checked first, version-less selectors included: the install that is
-            // already there — by the same distribution/version rule the build resolver applies —
-            // is the answer, not something to download.
-            if installed
-                .iter()
-                .any(|install| install.satisfies(name, version))
-            {
-                continue;
-            }
-            // Nothing satisfies it, and picking a build to download needs a version; refuse an
-            // unversioned selector by name rather than silently falling back to the host's tools.
-            wanted.push(
-                Spec::from_selector(name, version).map_err(|error| anyhow!("{label}: {error}"))?,
-            );
-        }
-        wanted.dedup();
+        let wanted = Self::missing(selections, &installed).map_err(|error| anyhow!("{error}"))?;
         let store = Store::new(root);
         for spec in wanted {
             store
@@ -493,6 +462,61 @@ impl Toolchain {
                 })?;
         }
         Ok(())
+    }
+
+    /// The distribution selections this command reaches, as (label, name, version); the label
+    /// attributes a refusal to the half of `[toolchain]` that asked.
+    ///
+    /// A selector the command will not use is not a selection: `jals build` never spawns `java`,
+    /// so a `runtime` distribution it would have downloaded is not this command's business.
+    fn selections(
+        manifest: &Manifest,
+        needs: Needs,
+    ) -> Vec<(&'static str, Option<&str>, Option<u32>)> {
+        let mut selections: Vec<(&str, Option<&str>, Option<u32>)> = Vec::new();
+        if needs.compiler
+            && let Some(ToolSpec::Distribution { name, version }) =
+                manifest.toolchain.compiler.spec()
+        {
+            selections.push(("`[toolchain] compiler`", name, version));
+        }
+        if needs.runtime
+            && let Some(ToolSpec::Distribution { name, version }) =
+                manifest.toolchain.runtime.spec()
+        {
+            selections.push(("`[toolchain] runtime`", name, version));
+        }
+        selections
+    }
+
+    /// The selections `installed` does not satisfy, in order — what has to be downloaded, and
+    /// the refusal when one cannot be.
+    ///
+    /// Split from [`ensure`](Self::ensure), which discovers and installs, so the decision can be
+    /// tested with injected installs and no session. Discovery is checked first, version-less
+    /// selectors included: the install that is already there — by the same distribution/version
+    /// rule the build resolver applies — is the answer, not something to download. Only a
+    /// selection nothing satisfies reaches `from_selector`, which refuses one that names no
+    /// `version`: there is no build to download, so the selector is refused by name rather than
+    /// silently falling back to the host's tools.
+    fn missing(
+        selections: Vec<(&str, Option<&str>, Option<u32>)>,
+        installed: &[JdkInstall],
+    ) -> Result<Vec<Spec>, String> {
+        let mut wanted: Vec<Spec> = Vec::new();
+        for (label, name, version) in selections {
+            if installed
+                .iter()
+                .any(|install| install.satisfies(name, version))
+            {
+                continue;
+            }
+            wanted.push(
+                Spec::from_selector(name, version).map_err(|error| format!("{label}: {error}"))?,
+            );
+        }
+        wanted.dedup();
+        Ok(wanted)
     }
 }
 
@@ -1117,6 +1141,51 @@ mod tests {
         assert_eq!(
             names(&Spec::parse("zulu@21").unwrap()),
             Vec::<String>::new()
+        );
+    }
+
+    /// The version-less-selector regression: a selection an installed JDK satisfies must need no
+    /// download — the refusal used to fire before discovery and fail a build that resolved fine —
+    /// while one nothing satisfies is refused with the install that would resolve it.
+    #[test]
+    fn version_less_selections_are_satisfied_by_discovery_or_refused() {
+        let installed = [JdkInstall::from_install_name(
+            PathBuf::from("/proj/target/jdk/temurin-21"),
+            "temurin-21",
+        )];
+        let needs = Needs {
+            compiler: true,
+            runtime: false,
+        };
+        let wanted = |toml: &str| {
+            let manifest: Manifest = toml.parse().unwrap();
+            Toolchain::missing(Toolchain::selections(&manifest, needs), &installed)
+        };
+
+        // An installed JDK answers a version-less selector: nothing to download.
+        assert_eq!(
+            wanted("[toolchain]\ncompiler = { distribution = { name = \"temurin\" } }\n"),
+            Ok(Vec::<Spec>::new())
+        );
+        // Nothing installed answers it, and without a version there is no build to download.
+        let error =
+            wanted("[toolchain]\ncompiler = { distribution = { name = \"no-such-vendor\" } }\n")
+                .unwrap_err();
+        assert!(
+            error.contains("jals toolchain install no-such-vendor@<version>"),
+            "{error}"
+        );
+        // A versioned selection nothing satisfies is the one thing to download.
+        assert_eq!(
+            wanted(
+                "[toolchain]\ncompiler = { distribution = { name = \"zulu\", version = 17 } }\n"
+            ),
+            Ok(vec![Spec::parse("zulu@17").unwrap()])
+        );
+        // A selection this command does not reach is not even considered.
+        assert_eq!(
+            wanted("[toolchain]\nruntime = { distribution = { name = \"no-such-vendor\" } }\n"),
+            Ok(Vec::<Spec>::new())
         );
     }
 }
