@@ -1,7 +1,7 @@
 [package]
 name = "mc-client-test"
 version = "0.1.0"
-# `#[cfg]` is what lets one source tree be written against 43 releases of a moving client API. The
+# `#[cfg]` is what lets one source tree be written against 44 releases of a moving client API. The
 # game's API moved at fourteen points across them, and a `cfg`-disabled declaration is blanked
 # before anything tries to resolve it — so one file carries every spelling and each release
 # compiles the one it named. Without the dialect feature those attributes would be a syntax error
@@ -17,10 +17,10 @@ default = []
 
 # The threshold chain. A release names exactly one of these and inherits the rest, so `#[cfg]` in
 # `GameClient.java` and the `--release` cascade in `build.java` never name a version — which is what
-# makes a 44th release an edit to this file alone.
+# makes a 45th release an edit to this file alone.
 #
 # A threshold exists only where something here actually branches, and the set is *this project's*.
-# `examples/minecraft_mod` reads the same 43 releases through a different chain, because it branches
+# `examples/minecraft_mod` reads the same 44 releases through a different chain, because it branches
 # on different things; that two consumers of one catalog disagree about where the interesting lines
 # are is the point of the thresholds being per-project rather than published by the SDK.
 #
@@ -69,7 +69,7 @@ default = []
 "since-26.1" = ["since-1.21.11"]
 "since-26.2" = ["since-26.1"]
 
-# The 43 releases. Each routes its release into the SDK and names its threshold, and that is the
+# The 44 releases. Each routes its release into the SDK and names its threshold, and that is the
 # whole of what selects this harness: there is no second feature asking whether it is wanted.
 # `minecraft` is reached from both sides of a diamond and a `path` dependency's node identity is its
 # canonicalized directory, so `minecraft/1.20.1` written here and written by the consumer are one
@@ -78,6 +78,7 @@ default = []
 # "At most one release" is not restated here: `[features]` resolution is additive and cannot express
 # exclusivity, so the rule lives where it can be enforced — the SDK's own build script, which the
 # forwarded selection reaches.
+"26.3" = ["since-26.2", "minecraft/26.3"]
 "26.2" = ["since-26.2", "minecraft/26.2"]
 "26.1.2" = ["since-26.1", "minecraft/26.1.2"]
 "26.1.1" = ["since-26.1", "minecraft/26.1.1"]
@@ -136,7 +137,7 @@ default = []
 # agreeing on "the defaults" is the cheapest way to do that.
 #
 # `client` rides the edge rather than a feature of this project's own, because there is no selection
-# here that wants a harness with no client jar to compile it against. The 43 release features name
+# here that wants a harness with no client jar to compile it against. The 44 release features name
 # the *release*; which side of the game is not a question anyone asks this project.
 minecraft = { path = "../minecraft", features = ["client"] }
 

@@ -450,11 +450,11 @@ The source-archive task shape is shown in
 [`examples/task_source_archive`](examples/task_source_archive); a full remapped-Minecraft example is
 [`examples/minecraft`](examples/minecraft), and
 [`examples/minecraft_mod`](examples/minecraft_mod) builds a Mixin mod on top of it — declarative
-`[mappings]` alternatives plus `[build] remap`, packaging a jar for all 43 releases and
-reobfuscating it for the 39 that ship obfuscated. One source tree covers all 43: the dialect's
+`[mappings]` alternatives plus `[build] remap`, packaging a jar for all 44 releases and
+reobfuscating it for the 39 that ship obfuscated. One source tree covers all 44: the dialect's
 `#[cfg]` carries the one API Mojang renamed inside that range, over a chain of threshold features
 that a build script and a resource template read too. That mod's `jals test` boots a real Minecraft
-client and asserts against it, on any of the same 43 releases, through a harness it names in one
+client and asserts against it, on any of the same 44 releases, through a harness it names in one
 `[dev-dependencies]` line — [`examples/minecraft_client_test`](examples/minecraft_client_test), a
 test-only dependency that no build resolves and no jar carries. That harness pins each release's
 ~60 runtime jars and carries a threshold chain of its own for the client API, so nothing the mod's

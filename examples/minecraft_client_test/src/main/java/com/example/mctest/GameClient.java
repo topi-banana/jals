@@ -1,7 +1,7 @@
 package com.example.mctest;
 
-// One file, 43 releases. Every attribute here names a *threshold* — `since-1.16`, never `1.16.5` —
-// so a release names one threshold in `jals.toml`, inherits the rest, and a 44th release is a row
+// One file, 44 releases. Every attribute here names a *threshold* — `since-1.16`, never `1.16.5` —
+// so a release names one threshold in `jals.toml`, inherits the rest, and a 45th release is a row
 // in that file and no edit to this one. Nothing asks whether the harness is wanted: naming a
 // release is the whole of how it is selected, and `build.java` rejects a selection that names none.
 //
@@ -431,7 +431,7 @@ public final class GameClient implements AutoCloseable {
      * <p>Creative, peaceful, no structures, one fixed seed: a world that generates quickly and then
      * holds still, which is what a test wants to assert against.
      *
-     * <p><b>Superflat on 35 of the 43 releases, and the default generator on 1.16–1.17.1.</b>
+     * <p><b>Superflat on 36 of the 44 releases, and the default generator on 1.16–1.17.1.</b>
      * 1.14.4–1.15.2 name flat with a {@code LevelType} constant and 1.19 onwards with a world-preset
      * registry key, but 1.16–1.18.2 keep the flat preset in a <em>private</em> field of the client's
      * own {@code WorldPreset}: the only public route is to assemble the generator, and its pieces
@@ -445,7 +445,7 @@ public final class GameClient implements AutoCloseable {
      * the method for what it always does costs nothing.
      *
      * <p>This is where the game's API actually moved, and the nine {@code createWorld} bodies below
-     * are the whole of it. The public method is one method on all 43 releases because they are.
+     * are the whole of it. The public method is one method on all 44 releases because they are.
      */
     public void openWorld(String levelName) {
         runOnClient(client -> createWorld(client, levelName), WORLD_DEADLINE);
@@ -1035,13 +1035,13 @@ public final class GameClient implements AutoCloseable {
 
     // --- what moved between releases -------------------------------------------------------------
     //
-    // Everything above is written once for 43 releases because the four things that actually moved
+    // Everything above is written once for 44 releases because the four things that actually moved
     // are named here and nowhere else. A branch inlined at its use is a branch to find again the
     // next time the API turns over; a branch behind a name is a line in the table in `jals.toml`.
     //
     // Note what is *not* here. `Minecraft.getInstance`, `getSingleplayerServer`, `getWindow`, the
     // `level` and `player` fields, `MinecraftServer.isReady` / `getPlayerList`, `Screen.children`
-    // and `net.minecraft.client.main.Main.main` are the same on all 43, and the two places the
+    // and `net.minecraft.client.main.Main.main` are the same on all 44, and the two places the
     // source could have named a type that moved — the client level's class, the value
     // `SharedConstants` hands back — it chains through instead.
 

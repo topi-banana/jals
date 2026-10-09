@@ -2,7 +2,7 @@
 
 This project is one Java class — `com.example.mctest.GameClient` — that boots a real Minecraft
 client inside the test JVM and hands a `#[test]` method a typed handle on it, plus the runtime
-libraries that boot needs, for **every release the SDK carries: 1.14.4 through 26.2, 43 of them**.
+libraries that boot needs, for **every release the SDK carries: 1.14.4 through 26.3, 44 of them**.
 It has no `main`, produces no jar anybody ships, and is never compiled into a consumer's output. It
 exists to be named in one line of somebody else's manifest:
 
@@ -48,7 +48,7 @@ if (Build.feature("client-test")) {
 Leaving it out does not fail cleanly — the boot dies inside the resource reload with an
 `OutOfMemoryError`, which reads as a harness bug and is not one.
 
-## 43 releases, and where the lines are
+## 44 releases, and where the lines are
 
 One name selects this harness, and it answers one question: **which release**. A release feature
 (`1.20.1`) routes `minecraft/1.20.1` into the SDK and names one *threshold*. `build.java` rejects a
@@ -72,9 +72,9 @@ unaffected: it never resolves a `[dev-dependencies]` entry at all.
 ### The threshold chain
 
 `#[cfg]` in `GameClient.java` never names a release. It names a threshold; a release names exactly
-one threshold and inherits the rest, so a 44th release is one row in `jals.toml` and no change to
+one threshold and inherits the rest, so a 45th release is one row in `jals.toml` and no change to
 any source file. A threshold exists only where the game's API actually moved, which is why there are
-fourteen and not forty-three:
+fourteen and not forty-four:
 
 | threshold       | what moves at it                                                                                             |
 | --------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -93,7 +93,7 @@ fourteen and not forty-three:
 | `since-26.1`    | `LevelSettings` becomes a record carrying a `DifficultySettings` and no game rules                             |
 | `since-26.2`    | the showing screen and the overlay move onto `Minecraft.gui`; the flat preset helper is renamed                |
 
-The set is *this project's*. `examples/minecraft_mod` reads the same 43 releases through five
+The set is *this project's*. `examples/minecraft_mod` reads the same 44 releases through five
 thresholds of its own, because it branches on different things — that two consumers of one catalog
 disagree about where the interesting lines are is why the SDK publishes no chain for them to share.
 
@@ -101,7 +101,7 @@ disagree about where the interesting lines are is why the SDK publishes no chain
 
 One file. The whole of the drift is eight short private methods and 25 bodies between them:
 `showing`, `show`, `overlay`, `label`, `windowWidth` and `overworld` have two each, `settings` has
-four and `createWorld` has nine. Everything a consumer calls is one method on all 43, and
+four and `createWorld` has nine. Everything a consumer calls is one method on all 44, and
 everything that could be avoided was — `runCommand` dispatches through the server's own Brigadier
 dispatcher, because the three calls that takes are identical on every release, while the
 client-side spelling moved four times.
@@ -111,7 +111,7 @@ carries names and descriptors and no access flags: 1.15's window accessor and 1.
 flat preset were both found by compiling.
 
 One thing the harness does *not* hide, because hiding it would be a lie: `openWorld` opens a
-**superflat** world on 35 of the 43 releases and the **default** generator on 1.16–1.17.1. Those
+**superflat** world on 36 of the 44 releases and the **default** generator on 1.16–1.17.1. Those
 eight keep the flat preset in a private field of the client's own `WorldPreset`, and the only public
 route to it is to assemble the generator out of a `FlatLevelGeneratorSettings`, a `FlatLevelSource`
 and `DimensionType.defaultDimensions` whose spellings differ again on each of 1.16–1.17.1,
@@ -128,8 +128,8 @@ oldest releases run on Java 8.
 
 ### The library pins
 
-The ~60 jars a client loads at boot are per release and per platform, so all 43 sets are pinned in
-`runtime.tsv` — 2287 rows, 379 distinct jars, linux/x86_64 — as data the script parses. A
+The ~60 jars a client loads at boot are per release and per platform, so all 44 sets are pinned in
+`runtime.tsv` — 2352 rows, 417 distinct jars, linux/x86_64 — as data the script parses. A
 generator writes them:
 
 ```sh
@@ -154,7 +154,7 @@ has to be able to *read* the game's class files; the runtime has to be one the r
 | 1.20.5 – 1.21.11 | 21+           | 21       |
 | 26.x             | 25+           | 25       |
 
-One JDK 25 compiles all 43 — `javac` accepts any `--release` from 8 up and reads a newer classpath
+One JDK 25 compiles all 44 — `javac` accepts any `--release` from 8 up and reads a newer classpath
 class without complaint — which is why CI installs exactly that one, and why the harness's
 `--release` cascade tops out at 21 rather than following 26.x to 25. Booting an older release wants
 its own JVM, and the `boots on` column is not advice: 1.17 asks for 16 and means it.
@@ -171,13 +171,13 @@ JAVAC=$JDK25/bin/javac JAVA=$JDK8/bin/java jals test --features 1.14.4,client-te
 
 Two claims, verified two ways, because they cost two very different amounts.
 
-**All 43 compile.** `jals build --features <release>`, every release, checking that a class file
+**All 44 compile.** `jals build --features <release>`, every release, checking that a class file
 comes out rather than trusting the exit status — the same way the `minecraft` cell checks its
-publication roots are not empty. CI runs this as a 43-cell matrix, which is also what verifies all
-2287 pinned library digests: a build script's fetches execute.
+publication roots are not empty. CI runs this as a 44-cell matrix, which is also what verifies all
+2352 pinned library digests: a build script's fetches execute.
 
 **Every branch boots.** A client boot costs a minute or two and a GL context, so the boot matrix is
-run locally rather than in CI. 32 of the 43 have been booted, three tests each, zero failures — and
+run locally rather than in CI. 32 of the 44 have been booted, three tests each, zero failures — and
 between them they cover **every one of the fourteen threshold bands**, which is the property that
 matters: two releases in the same band compile the same source and differ only in the game jar. The
 JVM is the one the release asks for, from the table above.
@@ -282,11 +282,11 @@ cd ../minecraft_mod
 jals test --features 1.21.11,client-test -j 1
 ```
 
-Any of the 43 releases goes in place of `1.21.11`.
+Any of the 44 releases goes in place of `1.21.11`.
 
 Here, `jals build --features <release>` is the whole of what this project does on its own:
-it proves the harness compiles against the release it claims. CI runs that for all 43, which is also
-what verifies all 2287 pinned digests — a build script's fetches execute.
+it proves the harness compiles against the release it claims. CI runs that for all 44, which is also
+what verifies all 2352 pinned digests — a build script's fetches execute.
 
 ## Legal note
 

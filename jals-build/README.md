@@ -726,7 +726,7 @@ cargo check -p jals-build --no-default-features --features build-script --target
 See [`examples/build_script`](../examples/build_script) for a runnable project.
 [`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
 publication. [`examples/minecraft`](../examples/minecraft)
-fetches, remaps, and decompiles a Minecraft release — selected from 43 mutually exclusive version
+fetches, remaps, and decompiles a Minecraft release — selected from 44 mutually exclusive version
 `[features]` — through the task DAG, and
 [`examples/minecraft_mod`](../examples/minecraft_mod) consumes it: a Mixin mod whose `[build] remap`
 reobfuscates the compiled classes with whichever of 39 `[[mappings.mojmap]]` alternatives the

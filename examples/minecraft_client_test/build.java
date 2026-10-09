@@ -32,7 +32,7 @@ class build {
         // in `[dev-dependencies]` precisely because its tests boot a client, and every version
         // feature it owns routes itself here the same way it routes itself to the SDK.
         //
-        // `since-1.14.4` is the bottom of the threshold chain and every one of the 43 releases
+        // `since-1.14.4` is the bottom of the threshold chain and every one of the 44 releases
         // reaches it, so it is the one question the chain can answer that no single release can:
         // was a release selected at all? Without one the SDK still falls back to its own newest
         // release — it has a `default` and this project does not — while every threshold here stays
@@ -42,7 +42,7 @@ class build {
         if (!Build.feature("since-1.14.4")) {
             Build.error(
                 "select a Minecraft version feature, e.g. `--features 1.20.1`. This harness is"
-                    + " written against 43 releases and compiles the one it is told about; there"
+                    + " written against 44 releases and compiles the one it is told about; there"
                     + " is deliberately no default, because a release chooses the game jar, the"
                     + " runtime libraries and every `#[cfg]` branch at once.");
             return;

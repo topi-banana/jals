@@ -24,11 +24,11 @@ is what lets another project depend on this one and _compile_ against all three.
 
 ## Version selection
 
-Every release from **1.14.4** to **26.2** is a feature — 43 of them, named exactly like the
+Every release from **1.14.4** to **26.3** is a feature — 44 of them, named exactly like the
 release:
 
 ```
-26.2     26.1.2   26.1.1  26.1
+26.3     26.2     26.1.2   26.1.1  26.1
 1.21.11  1.21.10  1.21.9  1.21.8  1.21.7  1.21.6  1.21.5  1.21.4  1.21.3  1.21.2  1.21.1  1.21
 1.20.6   1.20.5   1.20.4  1.20.3  1.20.2  1.20.1  1.20
 1.19.4   1.19.3   1.19.2  1.19.1  1.19
@@ -41,11 +41,11 @@ release:
 
 They are mutually **exclusive**: at most one may be active. `jals.toml` therefore keeps
 `default = ["server", "mixin", "mixinextras"]` — the default list carries a side and the two
-libraries, but deliberately no version — and `build.java` falls back to `DEFAULT_VERSION` (26.2, the
+libraries, but deliberately no version — and `build.java` falls back to `DEFAULT_VERSION` (26.3, the
 newest release) when no version feature is selected. Selecting a version needs nothing else:
 
 ```sh
-jals build                       # 26.2 (the fallback) + server + mixin + mixinextras
+jals build                       # 26.3 (the fallback) + server + mixin + mixinextras
 jals build --features 1.20.1     # 1.20.1 + server + mixin + mixinextras
 jals build --features 1.16.5,client   # 1.16.5, client overlaid on server, + both libraries
 ```
@@ -58,7 +58,7 @@ $ jals build --features 1.20.1,1.19.4
 error: build script reported: error: select at most one Minecraft version feature, got `1.20.1` and `1.19.4`
 ```
 
-`--all-features` therefore always fails here — it selects all 43 releases at once.
+`--all-features` therefore always fails here — it selects all 44 releases at once.
 
 Three boundaries are baked into the catalog at the top of `build.java`, carried by the two flag
 columns on each entry (`bundled` and `obfuscated`), which are independent of each other:
@@ -91,7 +91,7 @@ keeps the default `server` and therefore builds the _merged_ jar. Drop `server` 
 
 | selection                                 | resolved features                          | behaviour                                                   |
 | ----------------------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
-| (none)                                    | `server`, `mixin`, `mixinextras`           | server jar only (26.2 — no mappings, no remap)              |
+| (none)                                    | `server`, `mixin`, `mixinextras`           | server jar only (26.3 — no mappings, no remap)              |
 | `--features client`                       | `server`, `client`, `mixin`, `mixinextras` | remap both if obfuscated, then `merge_jars(server, client)` |
 | `--features server,client`                | `server`, `client`, `mixin`, `mixinextras` | same as above                                               |
 | `--no-default-features --features client` | `client`                                   | client jar only — and neither library at all                |
@@ -212,7 +212,7 @@ together: `@Mixin`, `@Shadow`, `@Inject`, `@At`, `CallbackInfo`, `CallbackInfoRe
 - `Tasks.jsonUrl` / `jsonSha1` / `jsonU64` projections over Mojang version metadata.
 - `Tasks.nestedJar(jar, member)` — pull the game jar out of a 1.18+ server bundler.
 - `Tasks.addNestedClasspath(jar)` — flatten every nested library jar onto the compile classpath.
-- `Tasks.remapJar(jar, mappings)` — hierarchy-aware Mojang mojmap deobfuscation. The default 26.2
+- `Tasks.remapJar(jar, mappings)` — hierarchy-aware Mojang mojmap deobfuscation. The default 26.3
   build does not reach it; `--features 1.21.11` (or any release up to it) does.
 - `Tasks.mergeJars(base, overlay)` — deterministic union, overlay wins on conflict.
 - `Tasks.decompileJava(jar, prefix)` — compile-oriented skeleton source tree.
@@ -238,7 +238,7 @@ together: `@Mixin`, `@Shadow`, `@Inject`, `@At`, `CallbackInfo`, `CallbackInfoRe
 - **Mutually exclusive features on top of an additive `[features]` model**: the script scans its
   catalog with `Build.feature`, rejects a second match with `Build.error` (which publishes nothing
   and runs no task), and falls back to `DEFAULT_VERSION` when none matched.
-- **One version-shaped pipeline**: the same task graph serves 43 releases, with the catalog's
+- **One version-shaped pipeline**: the same task graph serves 44 releases, with the catalog's
   `bundled` and `obfuscated` flags as its only two structural branches — independent of each
   other, so 26.x takes the bundler path without the remap one — and the version threaded through
   the metadata URL, the nested member path, and the `publishTree` owner (`minecraft-<version>`).
@@ -293,7 +293,7 @@ Another project can depend on this one and get the game without running any of i
 
 ```toml
 [dependencies]
-minecraft = { path = "../jals/examples/minecraft", features = ["client", "26.2"] }
+minecraft = { path = "../jals/examples/minecraft", features = ["client", "26.3"] }
 ```
 
 The consumer's `jals build` runs this build script under its _own_ feature selection and receives
@@ -344,7 +344,7 @@ set, so rebuilds and editor reloads reuse it.
 
 [`examples/minecraft_mod`](../minecraft_mod) is that consumer: a Mixin mod built from this project's
 three classpath jars, reobfuscated by `[build] remap` into the names vanilla actually loads, for all
-43 releases. Read it for the whole shape; what belongs *here* is the one fact about the game that
+44 releases. Read it for the whole shape; what belongs *here* is the one fact about the game that
 decides how such a mod is written.
 
 **Not every class is obfuscated.** Mojang keeps a few names, and the entry points are exactly where

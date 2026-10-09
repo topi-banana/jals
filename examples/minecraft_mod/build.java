@@ -3,7 +3,7 @@ import jals.build.Build;
 /**
  * What `javac` needs that varies with the Minecraft release, and nothing else.
  *
- * <p>There is deliberately no catalog of versions here. `jals.toml` routes each of its 43 version
+ * <p>There is deliberately no catalog of versions here. `jals.toml` routes each of its 44 version
  * features into the SDK, and the SDK's own build script is what rejects a second one; a table of
  * releases in this file would be a second copy of that rule and the first of the two to drift. What
  * this script reads is the *threshold* chain instead — four names, three of which are the steps the
@@ -22,7 +22,7 @@ class build {
         // and a "cannot find symbol".
         if (!Build.feature("since-1.14.4")) {
             Build.error(
-                "select a Minecraft version feature, e.g. `--features 26.2`. There is"
+                "select a Minecraft version feature, e.g. `--features 26.3`. There is"
                     + " deliberately no default: a release chooses the game jar, the mapping"
                     + " set and every `#[cfg]` branch at once, and this project cannot see"
                     + " which release the SDK fell back to.");

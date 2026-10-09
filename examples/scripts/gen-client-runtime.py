@@ -4,7 +4,7 @@
 A build script cannot walk a release's `libraries` array: `Tasks.fetchJson` returns a *task handle*
 and the fetch happens after the script has finished, so `Tasks.jsonAt` projects one named field and
 there is no index, no length and no loop. The list of jars a client needs therefore has to be
-written out, and the harness supports every release the SDK does — 43 of them, ~2400 jars in total,
+written out, and the harness supports every release the SDK does — 44 of them, ~2400 jars in total,
 each with its SHA-1 and its byte count. Nobody would keep that up by hand. This does it, and writes
 it as data: `build.java` reads `runtime.tsv` at script run time and parses the fields, so a
 regeneration is a diff of the file whose content actually moved rather than of a Java source with a
@@ -40,7 +40,7 @@ Usage:
     python3 examples/scripts/gen-client-runtime.py
 
 It takes no arguments and always writes **every** release in the catalog. A per-release mode would
-have to splice one release's rows into a committed table of 43, and a table that is partly
+have to splice one release's rows into a committed table of 44, and a table that is partly
 regenerated is exactly the failure this file's gap check exists to prevent. Re-run it when the
 catalog gains a release. The result is committed — this is not a build step, and CI never runs it.
 """
@@ -144,13 +144,13 @@ class Runtime:
 
     @staticmethod
     def get_json(url: str, sha1: str) -> dict:
-        # With a deadline. Forty-three sequential fetches and no timeout is a run that can stall
+        # With a deadline. Forty-four sequential fetches and no timeout is a run that can stall
         # on one connection forever, and this script writes nothing until every release has been
         # read — so a stall produces no output and no account of where it stopped.
         with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response:
             body = response.read()
         # Checked, not merely addressed. The catalog carries the digest so the fetch names one
-        # immutable document, and every one of the 2287 rows written below is derived from these
+        # immutable document, and every one of the 2352 rows written below is derived from these
         # bytes — so a proxy, a CDN edge or a poisoned resolver that answers with something else
         # would be pinned into a committed file that nothing downstream can tell from the real one.
         # The SDK side verifies the same document through `Tasks.sha1`; this is that check.
