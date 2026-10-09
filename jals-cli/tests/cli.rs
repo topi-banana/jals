@@ -1071,6 +1071,288 @@ fn transitive_graph_sources_and_classpath_reach_compile_and_run() {
     }
 }
 
+/// A Maven repository served from one loopback socket.
+///
+/// `[registries]` validates an `http://`/`https://` URL, so the in-memory `Fetcher`
+/// `jals-classpath`'s tests mock with is out of reach at the host boundary: a registry fixture
+/// here has to speak HTTP. Every response closes its connection, which is all `reqwest` needs to
+/// read a status and a body. The serving thread parks in `accept` once the test is done and dies
+/// with the test binary; nothing on the far side is left waiting on it.
+struct FixtureRegistry {
+    base: String,
+}
+
+impl FixtureRegistry {
+    fn start(routes: &[(&str, &[u8])]) -> Self {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let address = listener.local_addr().expect("a bound address");
+        let routes: std::collections::BTreeMap<String, Vec<u8>> = routes
+            .iter()
+            .map(|(path, body)| ((*path).to_owned(), body.to_vec()))
+            .collect();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    break;
+                };
+                Self::serve(stream, &routes);
+            }
+        });
+        Self {
+            base: format!("http://{address}"),
+        }
+    }
+
+    fn serve(
+        mut stream: std::net::TcpStream,
+        routes: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+
+        let Ok(reader) = stream.try_clone() else {
+            return;
+        };
+        let mut reader = BufReader::new(reader);
+        let mut request = String::new();
+        if reader.read_line(&mut request).is_err() {
+            return;
+        }
+        // A `GET` has no body, so the blank line ends the request. Answering before it is read can
+        // reach the client as a reset rather than as a status.
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) if line == "\r\n" || line == "\n" => break,
+                Ok(_) => {}
+            }
+        }
+        let path = request.split_whitespace().nth(1).unwrap_or_default();
+        match routes.get(path) {
+            Some(body) => {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+            None => {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        }
+    }
+}
+
+/// A jar in memory: a zip of the given entries. Only a loading side opens one here, so the
+/// stored-only writer `jals-classpath` uses for real jars is not needed.
+fn jar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        archive
+            .start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(bytes).unwrap();
+    }
+    archive.finish().unwrap().into_inner()
+}
+
+/// The registry fixture's two jars. With a host `javac`, the classes inside are compiled by it, so
+/// the consumer's import can be compiled against the very same toolchain; without one the archives
+/// carry placeholder bytes and only the argv assertions below run — resolution reads a jar's path
+/// and never opens its contents.
+fn fixture_jars(root: &Path) -> (Vec<u8>, Vec<u8>) {
+    if !javac_available() {
+        return (
+            jar_bytes(&[("com/example/lib/Lib.class", b"lib-placeholder")]),
+            jar_bytes(&[("com/example/direct/Direct.class", b"direct-placeholder")]),
+        );
+    }
+    let sources = root.join("fixture-src/com/example");
+    std::fs::create_dir_all(sources.join("lib")).unwrap();
+    std::fs::create_dir_all(sources.join("direct")).unwrap();
+    std::fs::write(
+        sources.join("lib/Lib.java"),
+        "package com.example.lib;\n\
+         public class Lib {\n\
+         \x20\x20\x20\x20public static String greet() { return \"hello\"; }\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sources.join("direct/Direct.java"),
+        "package com.example.direct;\npublic class Direct {}\n",
+    )
+    .unwrap();
+    let classes = root.join("fixture-classes");
+    std::fs::create_dir_all(&classes).unwrap();
+    let compiled = Command::new("javac")
+        .arg("-d")
+        .arg(&classes)
+        .arg(sources.join("lib/Lib.java"))
+        .arg(sources.join("direct/Direct.java"))
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "the fixture's classes compile: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let lib = std::fs::read(classes.join("com/example/lib/Lib.class")).unwrap();
+    let direct = std::fs::read(classes.join("com/example/direct/Direct.class")).unwrap();
+    (
+        jar_bytes(&[("com/example/lib/Lib.class", &lib)]),
+        jar_bytes(&[("com/example/direct/Direct.class", &direct)]),
+    )
+}
+
+/// The `-classpath` entries of a printed command line, with the display quoting removed.
+fn classpath_entries(command: &str) -> Vec<PathBuf> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let flag = words
+        .iter()
+        .position(|word| *word == "-classpath")
+        .unwrap_or_else(|| panic!("the compile command must carry a classpath: {command}"));
+    words[flag + 1]
+        .trim_matches('"')
+        .split(if cfg!(windows) { ';' } else { ':' })
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// The M0.1 regression at the host boundary: a registry dependency resolves, downloads, locks, and
+/// reaches the analysis index — and it must also reach `javac`'s `-classpath`. The bug this pins
+/// was exactly that split: `jals-project`'s projection mapped the root plan's resolved jars into
+/// `inputs` but not into `compile_classpath`, so the project linted clean and failed to compile.
+/// The unit pin lives beside that projection
+/// (`resolve_native_lowers_registry_dependencies_under_the_roots_selection`); this one drives the
+/// real `jals` binary, because the wiring the bug lived in is between crates and only a host can
+/// print the argv a user's import is compiled with.
+///
+/// The repository is the loopback [`FixtureRegistry`] serving the files
+/// `a_registry_dependency_resolves_through_poms_and_locks` resolves: one direct entry whose POM
+/// declares one transitive entry. The consumer imports both, so the real compile below fails on
+/// either jar missing from the classpath — the same `cannot find symbol` the reports named.
+#[test]
+fn registry_dependency_reaches_javac_classpath() {
+    let dir = tempdir().unwrap();
+    let has_javac = javac_available();
+    let (lib_jar, direct_jar) = fixture_jars(dir.path());
+    let files: [(&str, &[u8]); 5] = [
+        (
+            "/com/example/lib/maven-metadata.xml",
+            br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+        ),
+        (
+            "/com/example/lib/1.0.0/lib-1.0.0.pom",
+            br"<project>
+              <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></dependency>
+              </dependencies>
+            </project>",
+        ),
+        (
+            "/com/example/direct/2.0.0/direct-2.0.0.pom",
+            br"<project><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></project>",
+        ),
+        ("/com/example/lib/1.0.0/lib-1.0.0.jar", lib_jar.as_slice()),
+        (
+            "/com/example/direct/2.0.0/direct-2.0.0.jar",
+            direct_jar.as_slice(),
+        ),
+    ];
+    let registry = FixtureRegistry::start(&files);
+
+    let source = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("Main.java"),
+        "package com.example;\n\
+         import com.example.direct.Direct;\n\
+         import com.example.lib.Lib;\n\
+         public class Main {\n\
+         \x20\x20\x20\x20public static void main(String[] args) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20System.out.println(Lib.greet() + new Direct());\n\
+         \x20\x20\x20\x20}\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        format!(
+            "[package]\nname = \"registry-consumer\"\n\
+             [registries.local]\nurl = \"{}\"\n\
+             [dependencies]\n\"com.example:lib\" = {{ version = \"1\", registry = \"local\" }}\n",
+            registry.base
+        ),
+    )
+    .unwrap();
+    let manifest = dir.path().join("jals.toml");
+
+    let output = jals()
+        .args(["build", "--dry-run", "-v", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        names_javac(&stdout),
+        "the preview is the compile command: {stdout}"
+    );
+    assert!(
+        stdout.contains("Main.java"),
+        "the preview compiles this project's source: {stdout}"
+    );
+    let entries = classpath_entries(&stdout);
+    // The materialized bytes, not a path: a digest-derived address is not one a test can predict,
+    // and the bytes are the only evidence that the entry is this fixture rather than some other
+    // archive the host happened to put there.
+    for (name, expected) in [
+        ("lib", lib_jar.as_slice()),
+        ("direct", direct_jar.as_slice()),
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|entry| std::fs::read(entry).is_ok_and(|bytes| bytes.as_slice() == expected)),
+            "the {name} registry jar must be a materialized `-classpath` entry; entries: {entries:?}"
+        );
+    }
+
+    if !has_javac {
+        // No JDK: the preview above still pins the argv, which is where the regression lived. The
+        // import half needs a real `javac`, and CI supplies one on every platform.
+        return;
+    }
+    let output = jals()
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the imports must compile against the registry jars; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dir.path()
+            .join("target/classes/com/example/Main.class")
+            .is_file(),
+        "the compile actually ran"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn dependency_classpath_directory_is_passed_once_instead_of_member_classes() {
