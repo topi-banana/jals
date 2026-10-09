@@ -526,6 +526,23 @@ impl VersionReq {
     pub fn pinned_base(&self) -> Option<&Version> {
         match &self.kind {
             ReqKind::Exact(base) | ReqKind::Caret(base) | ReqKind::Tilde(base) => Some(base),
+            _ => self.exact_base(),
+        }
+    }
+
+    /// The one version this requirement pins *exactly*, when it names one.
+    ///
+    /// `=1.2.3` and the single-version Maven range `[1.2.3]` each name exactly one version, and
+    /// Maven itself never consults the version index for one: a repository may serve an artifact
+    /// its `maven-metadata.xml` does not list (a stale index is why `antlr:antlr:2.7.7` resolved
+    /// under Maven but not under an index-driven provider). A provider that can construct the
+    /// artifact directly asks this before fetching, so the index is only read for the
+    /// requirements it is actually needed for. Distinct from
+    /// [`pinned_base`](Self::pinned_base), which also answers for the version a caret/tilde
+    /// requirement *starts* at.
+    pub fn exact_base(&self) -> Option<&Version> {
+        match &self.kind {
+            ReqKind::Exact(base) => Some(base),
             ReqKind::Ranges(ranges) if ranges.len() == 1 => {
                 let range = &ranges[0];
                 match (&range.lower, &range.upper) {
@@ -537,7 +554,11 @@ impl VersionReq {
                     _ => None,
                 }
             }
-            ReqKind::Any | ReqKind::Wildcard { .. } | ReqKind::Ranges(_) => None,
+            ReqKind::Any
+            | ReqKind::Caret(_)
+            | ReqKind::Tilde(_)
+            | ReqKind::Wildcard { .. }
+            | ReqKind::Ranges(_) => None,
         }
     }
 
@@ -980,6 +1001,24 @@ mod tests {
         assert!(requirement.matches(&version("2.1.0-jre")));
         assert!(!requirement.matches(&version("1.9.9")));
         assert!(!requirement.matches(&version("3.0.0")));
+    }
+
+    #[test]
+    fn only_an_exact_requirement_answers_exact_base() {
+        assert_eq!(req("=1.2.3").exact_base(), Some(&version("1.2.3")));
+        assert_eq!(req("[1.2.3]").exact_base(), Some(&version("1.2.3")));
+        assert!(
+            req("1.2.3").exact_base().is_none(),
+            "a bare version is a caret, not a pin"
+        );
+        assert!(req("~1.2.3").exact_base().is_none());
+        assert!(req("[1.2,1.3)").exact_base().is_none());
+        assert!(req("1.*").exact_base().is_none());
+        // The wider question still answers for everything a caret/tilde starts at.
+        assert_eq!(req("1.2.3").pinned_base(), Some(&version("1.2.3")));
+        assert_eq!(req("^1.2.3").pinned_base(), Some(&version("1.2.3")));
+        assert_eq!(req("[1.2.3]").pinned_base(), Some(&version("1.2.3")));
+        assert!(req("[1.2,1.3)").pinned_base().is_none());
     }
 
     #[test]

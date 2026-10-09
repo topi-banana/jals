@@ -611,6 +611,87 @@ url = "https://repo.test/maven2"
     );
 }
 
+/// `HikariCP`'s `antlr:antlr:2.7.7` shape: the version index is stale (it stops short of the
+/// pinned version) while the POM and jar are served. Maven never consults the index for an exact
+/// version, so a build must resolve through the pin without reading it.
+#[test]
+fn an_exact_registry_version_resolves_past_a_stale_index() {
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:antlr" = { version = "=2.7.7", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/antlr/maven-metadata.xml"),
+        br"<metadata><versioning><versions><version>2.7.6</version></versions></versioning></metadata>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/antlr/2.7.7/antlr-2.7.7.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>antlr</artifactId><version>2.7.7</version></project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/antlr/2.7.7/antlr-2.7.7.jar"),
+        b"antlr-bytes",
+    );
+    let fetcher_ref = &fetcher;
+    let (inputs, registry) = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                Some(&mut registry),
+            )
+            .await;
+            (inputs, registry)
+        }
+    })
+    .unwrap();
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    assert_eq!(inputs.dependency_jars.len(), 1);
+    let lock = registry
+        .resolved_lock
+        .as_ref()
+        .expect("resolution produced a lock");
+    let names: Vec<String> = lock
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(names, vec!["com.example:antlr 2.7.7"]);
+    let seen = fetcher.seen.borrow();
+    assert!(
+        seen.iter().any(|url| url.ends_with("antlr-2.7.7.jar")),
+        "the exact jar is fetched: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|url| url.ends_with("antlr/maven-metadata.xml")),
+        "the stale index is not consulted: {seen:?}"
+    );
+}
+
 #[test]
 fn the_lock_covers_optional_and_dev_entries_the_selection_skips() {
     const BASE: &str = "https://repo.test/maven2";

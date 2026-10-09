@@ -391,6 +391,19 @@ pub(crate) struct MavenProvider<'f, F: Fetcher> {
     effective: BTreeMap<(Coordinate, String, RegistryId), EffectivePom>,
 }
 
+/// Where a batch request's version list comes from.
+///
+/// The batch plan exists so every list that needs a fetch is one concurrent batch; an exact
+/// requirement needs none and is answered from itself, exactly as the single-request path does.
+enum VersionSource {
+    /// `=1.2.3` or `[1.2.3]`: the requirement names its one version.
+    Exact(Version),
+    /// An earlier call memoized the coordinate's list.
+    Memoized,
+    /// One `maven-metadata.xml` fetch.
+    Fetch(ExternalLocator),
+}
+
 impl<'f, F: Fetcher> MavenProvider<'f, F> {
     /// A provider over `registries` (name → base URL); `maven-central` is added when absent.
     pub(crate) fn new(fetcher: &'f F, registries: BTreeMap<String, String>) -> Self {
@@ -803,7 +816,14 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
             }
         };
         let key = (coordinate.clone(), registry.clone());
-        let versions = if let Some(cached) = self.metadata.get(&key) {
+        // Maven never consults `maven-metadata.xml` for an exact version: a repository can serve
+        // an artifact its index does not list (the stale antlr index behind HikariCP's
+        // `antlr:antlr:2.7.7`). Answer from the requirement itself and fetch nothing; the version
+        // memo is left alone so a later range request for the same coordinate still reads the
+        // index rather than this one-version answer.
+        let versions = if let Some(exact) = request.version.exact_base() {
+            vec![exact.clone()]
+        } else if let Some(cached) = self.metadata.get(&key) {
             cached.clone()
         } else {
             let base = self.base_url(&registry)?.to_owned();
@@ -856,41 +876,48 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
         // second resolver pass over one provider (selection, then the full lock) does not refetch
         // `maven-metadata.xml`; every remaining fetch future borrows only the shared fetcher and
         // its own owned locator, which is what lets `join_ordered` overlap them.
-        let plans: Vec<Result<(Coordinate, RegistryId, Option<ExternalLocator>), String>> =
-            requests
-                .iter()
-                .map(|entry| {
-                    let coordinate =
-                        Coordinate::parse(&entry.request.package).ok_or_else(|| {
-                            format!("`{}` is not a Maven coordinate", entry.request.package)
-                        })?;
-                    let registry = match &entry.request.source {
-                        SourceRequest::Registry { registry } => registry.clone(),
-                        other => {
-                            return Err(format!(
-                                "the Maven provider cannot answer a request from `{other}`"
-                            ));
-                        }
-                    };
-                    if self
-                        .metadata
-                        .contains_key(&(coordinate.clone(), registry.clone()))
-                    {
-                        return Ok((coordinate, registry, None));
+        let plans: Vec<Result<(Coordinate, RegistryId, VersionSource), String>> = requests
+            .iter()
+            .map(|entry| {
+                let coordinate = Coordinate::parse(&entry.request.package).ok_or_else(|| {
+                    format!("`{}` is not a Maven coordinate", entry.request.package)
+                })?;
+                let registry = match &entry.request.source {
+                    SourceRequest::Registry { registry } => registry.clone(),
+                    other => {
+                        return Err(format!(
+                            "the Maven provider cannot answer a request from `{other}`"
+                        ));
                     }
-                    let base = self.base_url(&registry)?.to_owned();
-                    let url = Self::join(
-                        &base,
-                        &format!("{}/maven-metadata.xml", coordinate.directory()),
-                    );
-                    Ok((coordinate, registry, Some(Self::locator(&url))))
-                })
-                .collect();
+                };
+                // An exact requirement names its own version; like the single-request path, it
+                // neither fetches nor memoizes `maven-metadata.xml`.
+                if let Some(exact) = entry.request.version.exact_base() {
+                    return Ok((coordinate, registry, VersionSource::Exact(exact.clone())));
+                }
+                if self
+                    .metadata
+                    .contains_key(&(coordinate.clone(), registry.clone()))
+                {
+                    return Ok((coordinate, registry, VersionSource::Memoized));
+                }
+                let base = self.base_url(&registry)?.to_owned();
+                let url = Self::join(
+                    &base,
+                    &format!("{}/maven-metadata.xml", coordinate.directory()),
+                );
+                Ok((
+                    coordinate,
+                    registry,
+                    VersionSource::Fetch(Self::locator(&url)),
+                ))
+            })
+            .collect();
         let fetchable: Vec<usize> = plans
             .iter()
             .enumerate()
             .filter_map(|(index, plan)| match plan {
-                Ok((_, _, Some(_))) => Some(index),
+                Ok((_, _, VersionSource::Fetch(_))) => Some(index),
                 _ => None,
             })
             .collect();
@@ -900,7 +927,7 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
             .iter()
             .zip(&tasks)
             .map(|(index, task)| match &plans[*index] {
-                Ok((_, _, Some(locator))) => {
+                Ok((_, _, VersionSource::Fetch(locator))) => {
                     let locator = locator.clone();
                     async move { Fetch::bounded(fetcher, &locator, MAX_METADATA_BYTES, task).await }
                 }
@@ -915,9 +942,16 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
         for (index, plan) in plans.into_iter().enumerate() {
             let result = match plan {
                 Err(error) => Err(error),
-                Ok((coordinate, registry, locator)) => {
-                    let versions = if locator.is_some() {
-                        match bodies.remove(&index) {
+                Ok((coordinate, registry, source)) => {
+                    let exact = matches!(source, VersionSource::Exact(_));
+                    let versions = match source {
+                        VersionSource::Exact(version) => vec![version],
+                        VersionSource::Memoized => self
+                            .metadata
+                            .get(&(coordinate.clone(), registry.clone()))
+                            .cloned()
+                            .unwrap_or_default(),
+                        VersionSource::Fetch(_) => match bodies.remove(&index) {
                             Some(Ok(bytes)) => match Self::parse_versions(&bytes) {
                                 Ok(versions) => versions,
                                 Err(error) => {
@@ -940,15 +974,12 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
                             }
                             // A planned fetch always has a body; an empty list is honest.
                             None => Vec::new(),
-                        }
-                    } else {
-                        self.metadata
-                            .get(&(coordinate.clone(), registry.clone()))
-                            .cloned()
-                            .unwrap_or_default()
+                        },
                     };
-                    self.metadata
-                        .insert((coordinate.clone(), registry.clone()), versions.clone());
+                    if !exact {
+                        self.metadata
+                            .insert((coordinate.clone(), registry.clone()), versions.clone());
+                    }
                     Ok(Self::candidates_from(
                         &coordinate,
                         &registry,
@@ -1069,7 +1100,7 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use core::cell::Cell;
+    use core::cell::{Cell, RefCell};
     use jals_resolve::summary::RootRequest;
 
     const BASE: &str = "https://repo.test/maven2";
@@ -1078,6 +1109,7 @@ mod tests {
     struct MapFetcher {
         files: BTreeMap<String, Vec<u8>>,
         fetches: Cell<usize>,
+        seen: RefCell<Vec<String>>,
     }
 
     impl MapFetcher {
@@ -1085,6 +1117,7 @@ mod tests {
             Self {
                 files: BTreeMap::new(),
                 fetches: Cell::new(0),
+                seen: RefCell::new(Vec::new()),
             }
         }
 
@@ -1117,6 +1150,7 @@ mod tests {
             _report: &Task,
         ) -> Result<Vec<u8>, crate::FetchError> {
             self.fetches.set(self.fetches.get() + 1);
+            self.seen.borrow_mut().push(locator.to_owned());
             self.files
                 .get(locator)
                 .cloned()
@@ -1444,6 +1478,118 @@ mod tests {
         .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id.version.as_str(), "2.0.16");
+    }
+
+    /// A stale index is not a missing one: the repository *does* answer `maven-metadata.xml`, it
+    /// just stops short of the version. `antlr:antlr:2.7.7` — the exact pin `HikariCP` could not
+    /// resolve — is this shape (Central's index lists older versions while the POM answers 200),
+    /// so an exact requirement must never read the index at all, and a one-version answer must
+    /// not be memoized as the coordinate's version list.
+    #[test]
+    fn an_exact_requirement_skips_a_stale_version_index() {
+        let mut fetcher = MapFetcher::new();
+        add_stale_antlr_repository(&mut fetcher);
+        let mut provider = provider(&fetcher);
+        let candidates = jals_exec::block_on_inline(
+            provider.candidates(&request("com.example:antlr", "=2.7.7"), None),
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id.version.as_str(), "2.7.7");
+        assert_eq!(fetcher.fetches(), 0, "an exact version reads no index");
+
+        // The batch plan answers the same way and fetches nothing either.
+        let batch = jals_exec::block_on_inline(provider.candidates_batch(vec![CandidateRequest {
+            request: request("com.example:antlr", "=2.7.7"),
+            locked: None,
+        }]));
+        assert!(batch[0].is_ok(), "{:?}", batch[0]);
+        assert_eq!(fetcher.fetches(), 0, "the batch plan reads no index either");
+
+        // The one-version answer is not memoized as the coordinate's list: a range request still
+        // reads the index, which lists only 2.7.6.
+        let candidates = jals_exec::block_on_inline(
+            provider.candidates(&request("com.example:antlr", "2"), None),
+        )
+        .unwrap();
+        assert_eq!(fetcher.fetches(), 1, "a range request reads the index");
+        let versions: Vec<String> = candidates
+            .iter()
+            .map(|candidate| candidate.id.version.to_string())
+            .collect();
+        assert_eq!(versions, vec!["2.7.6"]);
+    }
+
+    /// The `HikariCP` regtest, reduced: a dependency's POM pins an exact version whose index entry
+    /// is absent, and resolution still walks all the way through the graph.
+    #[test]
+    fn a_transitive_exact_version_resolves_without_a_metadata_entry() {
+        let mut fetcher = MapFetcher::new();
+        fetcher.add(
+            "com/example/hibernate/maven-metadata.xml",
+            r"<metadata><versioning><versions><version>5.4.24.Final</version></versions></versioning></metadata>",
+        );
+        fetcher.add(
+            "com/example/hibernate/5.4.24.Final/hibernate-5.4.24.Final.pom",
+            r"<project>
+                 <groupId>com.example</groupId><artifactId>hibernate</artifactId><version>5.4.24.Final</version>
+                 <dependencies>
+                   <dependency><groupId>com.example</groupId><artifactId>antlr</artifactId><version>2.7.7</version></dependency>
+                 </dependencies>
+               </project>",
+        );
+        add_stale_antlr_repository(&mut fetcher);
+        let mut provider = provider(&fetcher);
+        let root = RootRequest::new(Summary {
+            id: PackageId::new(
+                PackageName::new("app").unwrap(),
+                Version::parse("0.0.0").unwrap(),
+                SourceId::Workspace(jals_resolve::id::WorkspaceSource {
+                    member: "app".to_owned(),
+                }),
+            ),
+            dependencies: vec![request("com.example:hibernate", "=5.4.24.Final")],
+            features: BTreeMap::new(),
+        });
+        let graph = jals_exec::block_on_inline(
+            jals_resolve::resolve::Resolver::new(&mut provider).resolve(&[root], None),
+        )
+        .unwrap();
+        let names: Vec<String> = graph
+            .packages
+            .iter()
+            .map(|package| format!("{} {}", package.id.name, package.id.version))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "com.example:antlr 2.7.7",
+                "com.example:hibernate 5.4.24.Final"
+            ]
+        );
+        // Both requirements are exact, so the stale antlr index is never consulted at all: the
+        // only reads are the two POMs.
+        assert!(
+            !fetcher
+                .seen
+                .borrow()
+                .iter()
+                .any(|url| url.contains("antlr/maven-metadata.xml")),
+            "the antlr index must not be read: {:?}",
+            fetcher.seen.borrow()
+        );
+    }
+
+    /// The repository shape of the tests above: a stale index and a servable 2.7.7 POM.
+    fn add_stale_antlr_repository(fetcher: &mut MapFetcher) {
+        fetcher.add(
+            "com/example/antlr/maven-metadata.xml",
+            r"<metadata><versioning><versions><version>2.7.6</version></versions></versioning></metadata>",
+        );
+        fetcher.add(
+            "com/example/antlr/2.7.7/antlr-2.7.7.pom",
+            r"<project><groupId>com.example</groupId><artifactId>antlr</artifactId><version>2.7.7</version></project>",
+        );
     }
 
     #[test]
