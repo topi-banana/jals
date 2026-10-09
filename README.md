@@ -238,7 +238,7 @@ terminal. Downloads are aggregated into one line per phase rather than announced
 which `-v` turns back into a line each:
 
 ```console
-$ jals build --features 1.21.6
+$ jals build --features 26.2
    Preparing hellomod v0.1.0
    Preparing minecraft v0.1.0
   Downloaded 2 files (58.1 MiB) in 2.5s

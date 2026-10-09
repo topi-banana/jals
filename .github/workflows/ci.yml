@@ -607,7 +607,7 @@ jobs:
           # source: 1.20.1 compiles the `getName()` spelling and 1.21.11 the `name()` one, and a
           # matrix that built only one of them would let the other rot until someone selected it by
           # hand. They differ in nothing else — same tree, same gates — so the second cell is the
-          # whole cost of keeping a conditional honest. The other 41 releases are not cells: they
+          # whole cost of keeping a conditional honest. The other 42 releases are not cells: they
           # reach the same two branches through the same threshold, and each one is a ~50 MiB fetch
           # and a whole-game remap.
           #
@@ -624,7 +624,7 @@ jobs:
           # `minecraft/client` while this project's own defaults route `minecraft/server`, and the
           # SDK answers a node carrying both with the *merged* jar. So the test step is a second
           # game-jar fetch and a second whole-game remap on top of what the build step already did
-          # — the same cost this file cites as the reason the other 41 releases are not cells.
+          # — the same cost this file cites as the reason the other 42 releases are not cells.
           - name: minecraft_mod (1.20.1)
             dir: examples/minecraft_mod
             features: --features 1.20.1
