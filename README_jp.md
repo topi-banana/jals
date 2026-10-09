@@ -473,8 +473,10 @@ hard graph error は root manifest に診断してから root-only analysis へ 
 と script を browser でも利用できます。一方 browser では Git を取得できません。Git entry は warning
 を出して省略され、browser Git support を提供するものではありません。
 
-この transitive JALS source-project graph は実装済みです。Maven/POM coordinate resolution、coordinate
-version selection、transitive Maven download、`jals.lock` lockfile は将来の課題です。
+依存解決は 2 系統とも実装済みです。上の transitive な JALS source-project graph と、Maven/POM
+coordinate resolution — `maven-metadata.xml`/POM の走査・coordinate version selection・transitive
+Maven download・`jals.lock` lockfile（`--locked`/`--frozen`、`jals update`）です。POM の
+exclusions/classifiers、`jals fetch`/`tree`、パッケージングは残っています。
 
 ### オプション
 
@@ -760,10 +762,11 @@ free function はできる限り避けます。associated function は親とな�
 範囲をカバーしていますが、API は変更される可能性があります。セマンティック解析（`jals-hir`）は
 名前解決・ファイル横断の型インデックス・型推論/型検査をカバーしており、プロジェクトの classpath
 や `[dependencies]` から解決した型も扱えますが、ジェネリックメソッドの型推論・より高度な
-バイトコード逆コンパイル（ループの `break`/`continue`、try-with-resources）・Maven 座標
-（`group:artifact:version`）の POM/version 解決と lockfile はまだ未対応です。transitive な JALS
-`path`/`git` source-project graph は実装済みで、より広い Maven dependency management・テスト・
-パッケージングは build [ロードマップ](jals-build/README.md#roadmap)上にあります。
+バイトコード逆コンパイル（ループの `break`/`continue`、try-with-resources）はまだ未対応です。
+依存解決は 2 系統とも実装済みです。transitive な JALS `path`/`git` source-project graph と、
+Maven 座標（`group:artifact:version`）の POM/version 解決・`jals.lock` lockfile です。POM の
+exclusions/classifiers・`jals fetch`/`tree`・パッケージングは build
+[ロードマップ](jals-build/README.md#roadmap)上にあります。
 
 ## ライセンス
 
