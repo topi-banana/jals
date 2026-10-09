@@ -112,6 +112,28 @@ fn classpath_contains(entry: &CompileClasspathEntry, suffix: &str) -> bool {
     }
 }
 
+/// Every resolved dependency jar is on the compile classpath a host materializes for `javac`.
+///
+/// The assertion that `inputs.dependency_jars` alone cannot make: that list is what an analysis host
+/// indexes, and the registry leak shipped behind exactly that asymmetry — a jar present there and
+/// absent from the compiler's classpath, so the project linted clean and failed to compile. One
+/// direction only, deliberately: task artifacts and declared `[build] classpath` entries sit on the
+/// compile classpath without being resolved dependency jars.
+fn assert_dependency_jars_reach_the_compile_classpath(assembly: &crate::NativeProjectAssembly) {
+    for key in &assembly.inputs.dependency_jars {
+        assert!(
+            assembly.compile_classpath.iter().any(|entry| match entry {
+                CompileClasspathEntry::File(file) => &file.key == key,
+                // A tree entry is a directory of class files; a resolved jar is an archive by
+                // type and is never materialized as one member of one.
+                CompileClasspathEntry::Tree(_) => false,
+            }),
+            "resolved jar {key:?} is not on the compile classpath: {:?}",
+            assembly.compile_classpath
+        );
+    }
+}
+
 async fn storage(root: &Path, exec: &Exec) -> NativeStorage {
     NativeStorage::native(root, root.join(".cache"), exec.clone())
         .await
@@ -1451,6 +1473,266 @@ fn resolve_native_lowers_registry_dependencies_under_the_roots_selection() {
             );
         };
         assert_eq!(file.key, assembly.inputs.dependency_jars[0]);
+    })
+    .unwrap();
+}
+
+/// The workspace path: when a root has resolved one lock for every member, a member's own classpath
+/// pass pins against it (`RegistryResolution::generate_lock == false`) instead of generating one.
+///
+/// A lock is a version decision, not a classpath, so what the member still has to do is resolve its
+/// own selection against it and put the result on the compile classpath — the direct packages and
+/// the ones their POMs pull in alike. This is the state `jals-cli`'s workspace block hands over, and
+/// the member pass is the only place those jars can reach `javac`.
+#[test]
+fn a_workspace_member_pins_its_resolved_registry_jars_onto_the_compile_classpath() {
+    const BASE: &str = "https://repo.test/maven2";
+
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "src/main/java/Root.java", "class Root {}\n");
+        let member = manifest(
+            "[package]\nname = \"member\"\n\
+             [registries.test]\nurl = \"https://repo.test/maven2\"\n\
+             [dependencies]\nlib = { group = \"com.example\", version = \"1\", registry = \"test\" }\n",
+        );
+        // A second member, so this is a workspace lock and not one project's own lock beside it.
+        let sibling = manifest("[package]\nname = \"sibling\"\n");
+        let metadata = format!("{BASE}/com/example/lib/maven-metadata.xml");
+        let lib_pom = format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom");
+        let shared_pom = format!("{BASE}/com/example/shared/2.0.0/shared-2.0.0.pom");
+        let lib_jar = format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.jar");
+        let shared_jar = format!("{BASE}/com/example/shared/2.0.0/shared-2.0.0.jar");
+        let files: [(&str, &[u8]); 5] = [
+            (
+                metadata.as_str(),
+                br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+            ),
+            (
+                lib_pom.as_str(),
+                br"<project>
+                      <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+                      <dependencies>
+                        <dependency><groupId>com.example</groupId><artifactId>shared</artifactId><version>2.0.0</version></dependency>
+                      </dependencies>
+                    </project>",
+            ),
+            (
+                shared_pom.as_str(),
+                br"<project><groupId>com.example</groupId><artifactId>shared</artifactId><version>2.0.0</version></project>",
+            ),
+            (lib_jar.as_str(), b"lib-bytes"),
+            (shared_jar.as_str(), b"shared-bytes"),
+        ];
+        let fetcher = CountingFetcher::new(&files);
+        let workspace = jals_classpath::RegistryResolver::resolve_workspace(
+            &[&member, &sibling],
+            &fetcher,
+            None,
+        )
+        .await
+        .unwrap();
+        let lock_text = workspace
+            .lock
+            .expect("the workspace lock covers both packages")
+            .render();
+
+        let mut root_storage = storage(project.path(), &exec).await;
+        // What `jals-cli` holds after its workspace block: the lock to pin against, and no licence
+        // for the member-scoped pass to generate its own. Parsed back from text because that is how
+        // a host reads one — the lock on disk, not a resolver value handed around in memory.
+        let mut registry = jals_classpath::RegistryResolution::from_lock_text(Some(&lock_text))
+            .expect("the rendered workspace lock parses back");
+        registry.generate_lock = false;
+        let assembly = ProjectScript::skipped()
+            .resolve_native(
+                &member,
+                project.path(),
+                &mut root_storage,
+                GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
+                    exec: &exec,
+                    fetcher: &fetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                },
+                DependencyScope::Build,
+                ProjectInputOptions::Compile,
+                Some(&mut registry),
+            )
+            .await
+            .unwrap();
+
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+        // The member pass pinned without producing a lock: the workspace's is the file the host
+        // writes, and a member-scoped replacement would shrink it to one member.
+        assert!(
+            registry.resolved_lock.is_none(),
+            "{:?}",
+            registry.resolved_lock
+        );
+        // Both the direct package and the one its POM pulls in: a classpath that stopped at the
+        // direct edge would compile against half of what the lock resolved.
+        let packages: Vec<String> = registry.packages.iter().map(ToString::to_string).collect();
+        assert_eq!(packages, ["com.example:lib", "com.example:shared"]);
+        assert_eq!(
+            assembly.inputs.dependency_jars.len(),
+            2,
+            "fetched: {:?}",
+            fetcher.calls()
+        );
+        assert_dependency_jars_reach_the_compile_classpath(&assembly);
+    })
+    .unwrap();
+}
+
+/// `[dev-dependencies]` under a test scope: the dev entry is a classpath input for a test run and
+/// nothing under a build. The lock pass resolves it either way — a lock that moved with the scope
+/// would rewrite itself between `jals build` and `jals test` — so the two must still disagree about
+/// the classpath.
+#[test]
+fn a_dev_registry_dependency_reaches_the_compile_classpath_only_under_the_test_scope() {
+    const BASE: &str = "https://repo.test/maven2";
+
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "src/main/java/Root.java", "class Root {}\n");
+        let root = manifest(
+            "[registries.test]\nurl = \"https://repo.test/maven2\"\n\
+             [dev-dependencies]\nharness = { group = \"com.example\", version = \"4.0.0\", registry = \"test\" }\n",
+        );
+        let pom = format!("{BASE}/com/example/harness/4.0.0/harness-4.0.0.pom");
+        let jar = format!("{BASE}/com/example/harness/4.0.0/harness-4.0.0.jar");
+        let files: [(&str, &[u8]); 2] = [
+            (
+                pom.as_str(),
+                br"<project><groupId>com.example</groupId><artifactId>harness</artifactId><version>4.0.0</version></project>",
+            ),
+            (jar.as_str(), b"harness-bytes"),
+        ];
+        let fetcher = CountingFetcher::new(&files);
+
+        for (scope, expected) in [(DependencyScope::Build, 0), (DependencyScope::Test, 1)] {
+            let mut root_storage = storage(project.path(), &exec).await;
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let assembly = ProjectScript::skipped()
+                .resolve_native(
+                    &root,
+                    project.path(),
+                    &mut root_storage,
+                    GraphPreprocess {
+                        progress: &jals_progress::Progress::SILENT,
+                        exec: &exec,
+                        fetcher: &fetcher,
+                        environment: &BuildScriptEnvironment::new(),
+                        root_features: &ResolvedBuildFeatures::default(),
+                        limits: &BuildScriptLimits::default(),
+                    },
+                    scope,
+                    ProjectInputOptions::Compile,
+                    Some(&mut registry),
+                )
+                .await
+                .unwrap();
+
+            assert!(assembly.errors.is_empty(), "{scope:?}: {:?}", assembly.errors);
+            assert_eq!(
+                assembly.inputs.dependency_jars.len(),
+                expected,
+                "{scope:?} classpath"
+            );
+            assert_dependency_jars_reach_the_compile_classpath(&assembly);
+            // The lock is feature- and scope-independent, so it covers the dev entry even when the
+            // build classpath does not. A classpath that followed the lock would carry it always.
+            let lock = registry
+                .resolved_lock
+                .expect("the lock pass covers the dev table");
+            assert!(
+                lock.packages
+                    .iter()
+                    .any(|package| package.id.name.as_str() == "com.example:harness"),
+                "{scope:?}: {:?}",
+                lock.packages
+            );
+        }
+    })
+    .unwrap();
+}
+
+/// An optional registry entry is on the compile classpath exactly when the selection activates it —
+/// and the lock covers it in both runs, for the reason the dev case states. The pair is the whole
+/// rule: the activation decides the classpath, never the lock.
+#[test]
+fn an_optional_registry_dependency_reaches_the_compile_classpath_only_when_active() {
+    const BASE: &str = "https://repo.test/maven2";
+
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "src/main/java/Root.java", "class Root {}\n");
+        let root = manifest(
+            "[registries.test]\nurl = \"https://repo.test/maven2\"\n\
+             [features]\npick = [\"dep:opt\"]\n\
+             [dependencies]\nopt = { group = \"com.example\", version = \"3.0.0\", registry = \"test\", optional = true }\n",
+        );
+        let pom = format!("{BASE}/com/example/opt/3.0.0/opt-3.0.0.pom");
+        let jar = format!("{BASE}/com/example/opt/3.0.0/opt-3.0.0.jar");
+        let files: [(&str, &[u8]); 2] = [
+            (
+                pom.as_str(),
+                br"<project><groupId>com.example</groupId><artifactId>opt</artifactId><version>3.0.0</version></project>",
+            ),
+            (jar.as_str(), b"opt-bytes"),
+        ];
+        let fetcher = CountingFetcher::new(&files);
+
+        for (selected, expected) in [
+            (Vec::<String>::new(), 0),
+            (vec!["pick".to_owned()], 1),
+        ] {
+            let features = root.resolve_build_features(&selected, false, false).unwrap();
+            let mut root_storage = storage(project.path(), &exec).await;
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let assembly = ProjectScript::skipped()
+                .resolve_native(
+                    &root,
+                    project.path(),
+                    &mut root_storage,
+                    GraphPreprocess {
+                        progress: &jals_progress::Progress::SILENT,
+                        exec: &exec,
+                        fetcher: &fetcher,
+                        environment: &BuildScriptEnvironment::new(),
+                        root_features: &features,
+                        limits: &BuildScriptLimits::default(),
+                    },
+                    DependencyScope::Build,
+                    ProjectInputOptions::Compile,
+                    Some(&mut registry),
+                )
+                .await
+                .unwrap();
+
+            assert!(assembly.errors.is_empty(), "{selected:?}: {:?}", assembly.errors);
+            assert_eq!(
+                assembly.inputs.dependency_jars.len(),
+                expected,
+                "{selected:?} classpath"
+            );
+            assert_dependency_jars_reach_the_compile_classpath(&assembly);
+            // The full lock pass resolves the unactivated entry too, so the lock is not the thing
+            // that decided the classpath in either run.
+            let lock = registry
+                .resolved_lock
+                .expect("the full pass covers the optional entry");
+            assert!(
+                lock.packages
+                    .iter()
+                    .any(|package| package.id.name.as_str() == "com.example:opt"),
+                "{selected:?}: {:?}",
+                lock.packages
+            );
+        }
     })
     .unwrap();
 }
