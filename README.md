@@ -497,9 +497,10 @@ analysis. The playground runs the portable `MemoryProjectGraph` over one capture
 available in a browser: Git entries produce warnings and are omitted; this is not browser Git
 support.
 
-This transitive JALS source-project graph is implemented now. Maven/POM coordinate resolution,
-coordinate version selection, transitive Maven downloads, and a `jals.lock` lockfile remain future
-work.
+Both dependency paths are implemented: the transitive JALS source-project graph above, and
+Maven/POM coordinate resolution — `maven-metadata.xml`/POM traversal, coordinate version
+selection, transitive Maven downloads, and a `jals.lock` lockfile (`--locked`/`--frozen`,
+`jals update`). POM exclusions/classifiers, `jals fetch`/`tree`, and packaging remain.
 
 ### Options
 
@@ -788,11 +789,11 @@ Early stage (`0.1.0`). The formatter, linter, and language server are functional
 syntax layer covers a broad slice of Java, but APIs may change. Semantic analysis
 (`jals-hir`) covers name resolution, cross-file type indexing, and type inference/checking,
 including types resolved from a project's classpath and `[dependencies]`; generic-method
-inference, richer bytecode decompilation (loop `break`/`continue`, try-with-resources), and
-Maven-coordinate (`group:artifact:version`) POM/version resolution and a lockfile are still open.
-The transitive JALS `path`/`git` source-project graph is implemented; broader Maven dependency
-management, testing, and packaging remain on the build
-[roadmap](jals-build/README.md#roadmap).
+inference and richer bytecode decompilation (loop `break`/`continue`, try-with-resources) are
+still open. Both dependency paths are implemented: the transitive JALS `path`/`git`
+source-project graph, and Maven-coordinate (`group:artifact:version`) POM/version resolution with
+a `jals.lock` lockfile. POM exclusions/classifiers, `jals fetch`/`tree`, and packaging remain on
+the build [roadmap](jals-build/README.md#roadmap).
 
 ## License
 
