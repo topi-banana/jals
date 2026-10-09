@@ -900,7 +900,7 @@ the moment it has a tracked `.java`. Seven consequences for an example:
   catalog, so no release list is restated and no mutable version manifest is consulted — and it
   refuses to write at all when it cannot read one library of one release, because a table that is
   partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
-- The client harness supports the same 43 releases the SDK does, and **one feature selects it** — a
+- The client harness supports the same 44 releases the SDK does, and **one feature selects it** — a
   release (`minecraft/<version>` into the SDK, plus one threshold). There is deliberately no second
   feature asking whether the harness is wanted: being a `[dev-dependencies]` entry is already that
   answer, since `jals test` and the analysis hosts resolve one and nothing that produces output
@@ -915,13 +915,13 @@ the moment it has a tracked `.java`. Seven consequences for an example:
   `GameClient.java` names a *threshold*, never a release, and the fourteen thresholds are that
   project's own: `examples/minecraft_mod` reads the same catalog through five of its own, because it
   branches on different things. Two of the fourteen boundaries are invisible in a mapping file,
-  which carries no access flags — they were found by compiling, which is what the 43-cell matrix is
+  which carries no access flags — they were found by compiling, which is what the 44-cell matrix is
   for.
 - The harness is **Java 8 source** and its `--release` follows the game's own
   `javaVersion.majorVersion` (8/16/17/21), because it is loaded by the JVM the release runs on. That
   is also the one place `jals build` and `jals test` want different JDKs, and `$JAVAC`/`$JAVA`
   resolve independently so one command can say both.
-- `client harness (<release>)` is a 43-cell matrix modelled on `mod jar`, and its assertion is not
+- `client harness (<release>)` is a 44-cell matrix modelled on `mod jar`, and its assertion is not
   the exit status: a green build says a selection resolved, not that a type came out, so the cell
-  checks `GameClient.class` exists. Running the build script is also what verifies all 2287 pinned
+  checks `GameClient.class` exists. Running the build script is also what verifies all 2352 pinned
   library digests.

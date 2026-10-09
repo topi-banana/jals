@@ -16,7 +16,7 @@ package com.example.hellomod;
  * gives and the reason there are three tests here rather than thirty: a boot on a software
  * rasterizer costs the better part of a minute. Run them one at a time — {@code jals test
  * --features 1.21.11,client-test -j 1} — since two clients at once want two GL contexts and twice
- * the memory. Any of the SDK's 43 releases works in place of {@code 1.21.11}; the harness is what
+ * the memory. Any of the SDK's 44 releases works in place of {@code 1.21.11}; the harness is what
  * absorbs the difference, so nothing in this file names one.
  */
 #[cfg(feature = "client-test")]

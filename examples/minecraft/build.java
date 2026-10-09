@@ -28,6 +28,7 @@ import jals.build.Tasks;
 class build {
 
     private static final String[][] CATALOG = {
+        {"26.3", "702fe59163c6ee6578607daa85811d9bc9c7cc40", "true", "false"},
         {"26.2", "d98675ecc24364e90b18dbea80390b1345c3f71f", "true", "false"},
         {"26.1.2", "8228875b88ad88b4bc0dc7a2afbc6903bccf93b1", "true", "false"},
         {"26.1.1", "06e0e05c144ccf6ae8c5f766093463b20d221631", "true", "false"},
@@ -76,7 +77,7 @@ class build {
     // The release built when `[features]` selects none. `[features] default` deliberately carries
     // only the side, so `--features 1.20.1` picks a version without `--no-default-features` first
     // having to drop a conflicting default version.
-    private static final String DEFAULT_VERSION = "26.2";
+    private static final String DEFAULT_VERSION = "26.3";
 
     public static void main() {
         // Resolve the release. The version features are mutually exclusive, but `[features]`

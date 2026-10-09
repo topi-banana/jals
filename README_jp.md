@@ -229,7 +229,7 @@ stdout を明け渡します。一方 `--dry-run` / `--check` / `--diff` /
 戻ります:
 
 ```console
-$ jals build --features 1.21.6
+$ jals build --features 26.2
    Preparing hellomod v0.1.0
    Preparing minecraft v0.1.0
   Downloaded 2 files (58.1 MiB) in 2.5s
@@ -427,11 +427,11 @@ source archive task の形は [`examples/task_source_archive`](examples/task_sou
 remap 済み Minecraft の例は [`examples/minecraft`](examples/minecraft)
 にあります。その上に Mixin mod を組み立てる例が
 [`examples/minecraft_mod`](examples/minecraft_mod) で、宣言的な `[mappings]` の代替と
-`[build] remap` により全 43 リリース向けに jar を package し、そのうち難読化された 39
-リリースでは再難読化します。source tree は 43 リリースで 1 つです。その範囲内で Mojang が
+`[build] remap` により全 44 リリース向けに jar を package し、そのうち難読化された 39
+リリースでは再難読化します。source tree は 44 リリースで 1 つです。その範囲内で Mojang が
 rename した唯一の API を dialect の `#[cfg]` が引き受け、その述語である threshold feature の
 chain は build script と resource template も読みます。この mod の `jals test` は実際の Minecraft
-client を起動して assert します。しかも同じ 43 リリースのいずれでもです。それを行う harness は
+client を起動して assert します。しかも同じ 44 リリースのいずれでもです。それを行う harness は
 `[dev-dependencies]` に 1 行書くだけの別 project —
 [`examples/minecraft_client_test`](examples/minecraft_client_test) — で、build は解決せず jar にも
 入りません。この harness が各リリースの runtime jar 約 60 本を pin し、client API 用の threshold

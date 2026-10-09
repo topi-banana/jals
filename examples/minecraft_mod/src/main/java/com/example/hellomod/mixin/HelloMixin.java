@@ -43,12 +43,12 @@ public class HelloMixin {
      * already correct and Mixin must take it verbatim; {@code remap = true} would send it looking
      * for a refmap that exists in neither case.
      *
-     * <p>The version string is where 43 releases stop being one API. {@code SharedConstants}
+     * <p>The version string is where 44 releases stop being one API. {@code SharedConstants}
      * answers in every one of them, but 1.21.6 turned {@code WorldVersion}'s getters into
      * record-style accessors, so the call is {@code name()} from there on and {@code getName()}
      * below it — a rename in the game's <em>source</em>, which no remapping can paper over. The
-     * predicate is a threshold feature rather than a version, so the fifteen releases on the new
-     * side of it and the twenty-eight on the old side each say one name. Both branches are live
+     * predicate is a threshold feature rather than a version, so the eleven releases on the new
+     * side of it and the thirty-three on the old side each say one name. Both branches are live
      * source: whichever release is selected, the other is still parsed, formatted and navigable.
      */
     @Inject(method = "<init>", at = @At("RETURN"), remap = false)

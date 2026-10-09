@@ -22,7 +22,7 @@ features = ["attributes"]
 # release has to list more than one name.
 #
 # A threshold exists only where something branches on it, which is why there are five rather than
-# forty-three. Three are the steps the game's own JVM took, the era table in `README.md`: 1.17 needs
+# forty-four. Three are the steps the game's own JVM took, the era table in `README.md`: 1.17 needs
 # Java 16, 1.18 needs 17, 1.20.5 needs 21. The fourth is the single API rename this mod's source has
 # to survive — at 1.21.6 `WorldVersion`'s getters became record-style accessors, so `getName()` is
 # `name()`. Adding a threshold means adding a link to the chain and pointing the affected releases
@@ -40,7 +40,7 @@ features = ["attributes"]
 #
 # The version features are mutually exclusive, and this project does not re-enforce that: the
 # forwarded selection reaches the SDK's own build script, whose `build.error` rejects a second
-# version before any download. Restating the rule here would be a second copy of a 43-row table.
+# version before any download. Restating the rule here would be a second copy of a 44-row table.
 #
 # Each row routes its release to two places: the SDK, which fetches and remaps that release's game
 # jar, and the `mc-client-test` dev-dependency, which pins that release's client runtime libraries
@@ -64,7 +64,7 @@ mixinextras = ["minecraft/mixinextras"]
 # `#[cfg]`-gated on it, so a selection that does not name it compiles and lints as if the tests were
 # not there — which is what keeps the other CI cells unchanged.
 #
-# It names no release, and cannot: the harness supports all 43 and the release reaching it is routed
+# It names no release, and cannot: the harness supports all 44 and the release reaching it is routed
 # by whichever version feature the command line named — see the table below, where every row carries
 # a `mc-client-test/<version>` beside its `minecraft/<version>`. There is nothing else to route:
 # the harness carries no presence switch, so what this feature selects is this project's own test
@@ -75,6 +75,7 @@ client-test = ["client"]
 "since-1.18" = ["since-1.17"]
 "since-1.20.5" = ["since-1.18"]
 "since-1.21.6" = ["since-1.20.5"]
+"26.3" = ["since-1.21.6", "minecraft/26.3", "mc-client-test/26.3"]
 "26.2" = ["since-1.21.6", "minecraft/26.2", "mc-client-test/26.2"]
 "26.1.2" = ["since-1.21.6", "minecraft/26.1.2", "mc-client-test/26.1.2"]
 "26.1.1" = ["since-1.21.6", "minecraft/26.1.1", "mc-client-test/26.1.1"]
