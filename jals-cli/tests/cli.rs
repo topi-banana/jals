@@ -1212,14 +1212,23 @@ fn fixture_jars(root: &Path) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The `-classpath` entries of a printed command line, with the display quoting removed.
+///
+/// Splitting the line into words is not enough: `display_command` wraps an argument containing
+/// whitespace in one pair of quotes, and a classpath joins every entry into one argument — so a
+/// single entry below a directory with a space quotes the whole value. Take the value from the
+/// text itself, where the inner whitespace survives verbatim.
 fn classpath_entries(command: &str) -> Vec<PathBuf> {
-    let words: Vec<&str> = command.split_whitespace().collect();
-    let flag = words
-        .iter()
-        .position(|word| *word == "-classpath")
-        .unwrap_or_else(|| panic!("the compile command must carry a classpath: {command}"));
-    words[flag + 1]
-        .trim_matches('"')
+    let Some((_, value)) = command.split_once(" -classpath ") else {
+        panic!("the compile command must carry a classpath: {command}");
+    };
+    // Display quoting is the whole of the encoding — there are no escapes — so a quoted value
+    // ends at the first closing quote and an unquoted one at the next whitespace. Both quotes
+    // are dropped.
+    let value = value.strip_prefix('"').map_or_else(
+        || value.split_whitespace().next().unwrap_or_default(),
+        |quoted| quoted.split_once('"').map_or(quoted, |(inner, _)| inner),
+    );
+    value
         .split(if cfg!(windows) { ';' } else { ':' })
         .map(PathBuf::from)
         .collect()
@@ -1295,7 +1304,13 @@ fn registry_dependency_reaches_javac_classpath() {
     .unwrap();
     let manifest = dir.path().join("jals.toml");
 
+    // The fixture's classes were compiled by the `javac` on `PATH`, while `jals` resolves
+    // `$JAVAC` first, then `$JAVA_HOME`, then `PATH` (`jals_build`'s `ToolResolver`). Pin the
+    // child to the same bare name so the compile below is judged against the fixture's compiler
+    // and not against whichever JDK the host's environment happens to name — an older one would
+    // reject the fixture's class-file version before any regression could be seen.
     let output = jals()
+        .env("JAVAC", "javac")
         .args(["build", "--dry-run", "-v", "--manifest-path"])
         .arg(&manifest)
         .output()
@@ -1336,6 +1351,7 @@ fn registry_dependency_reaches_javac_classpath() {
         return;
     }
     let output = jals()
+        .env("JAVAC", "javac")
         .args(["build", "--manifest-path"])
         .arg(&manifest)
         .output()
