@@ -692,6 +692,99 @@ url = "https://repo.test/maven2"
     );
 }
 
+/// slf4j's caret trap: `2.0.17` means `>=2.0.17, <3.0.0`, and `2.1.0-alpha1` sorts inside that
+/// window — but it is a pre-release, so the lock must stay at `2.0.17`. An exact pin still
+/// selects the pre-release it names.
+#[test]
+fn a_caret_registry_requirement_locks_the_release_not_the_pre_release() {
+    const BASE: &str = "https://repo.test/maven2";
+    let metadata = br"<metadata><versioning><versions><version>2.1.0-alpha1</version><version>2.0.17</version></versions></versioning></metadata>";
+
+    let caret_manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:slf4j" = { version = "2.0.17", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/slf4j/maven-metadata.xml"),
+        metadata,
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/slf4j/2.0.17/slf4j-2.0.17.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>slf4j</artifactId><version>2.0.17</version></project>",
+    );
+    let caret_features = features(&caret_manifest);
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve(
+            &caret_manifest,
+            DependencyScope::Build,
+            &caret_features,
+            &fetcher,
+            None,
+            jals_classpath::LockMode::Generate,
+        )
+        .await
+        .unwrap()
+    })
+    .unwrap();
+    let locked = |graphs: &jals_classpath::RegistryGraphs| -> Vec<String> {
+        graphs
+            .lock
+            .as_ref()
+            .expect("a lock was produced")
+            .packages
+            .iter()
+            .map(|package| format!("{} {}", package.id.name, package.id.version))
+            .collect()
+    };
+    assert_eq!(locked(&graphs), vec!["com.example:slf4j 2.0.17"]);
+
+    // The exact pin resolves to the pre-release it names — and, being exact, reads no index.
+    let exact_manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:slf4j" = { version = "=2.1.0-alpha1", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/slf4j/2.1.0-alpha1/slf4j-2.1.0-alpha1.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>slf4j</artifactId><version>2.1.0-alpha1</version></project>",
+    );
+    let exact_features = features(&exact_manifest);
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve(
+            &exact_manifest,
+            DependencyScope::Build,
+            &exact_features,
+            &fetcher,
+            None,
+            jals_classpath::LockMode::Generate,
+        )
+        .await
+        .unwrap()
+    })
+    .unwrap();
+    assert_eq!(locked(&graphs), vec!["com.example:slf4j 2.1.0-alpha1"]);
+    assert!(
+        !fetcher
+            .seen
+            .borrow()
+            .iter()
+            .any(|url| url.ends_with("maven-metadata.xml")),
+        "an exact pin reads no index: {:?}",
+        fetcher.seen.borrow()
+    );
+}
+
 #[test]
 fn the_lock_covers_optional_and_dev_entries_the_selection_skips() {
     const BASE: &str = "https://repo.test/maven2";

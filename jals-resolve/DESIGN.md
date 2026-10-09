@@ -107,6 +107,11 @@ internal = { url = "https://nexus.example/repository/maven-public" }
 - A bare version is a **caret requirement** (`2.0.16` = `>=2.0.16, <3.0.0`; `0.2.3` = `<0.3.0`;
   `0.0.3` = `<0.0.4`) — Cargo's rule, kept even though the registry is Maven, because the
   manifest syntax is Cargo's.
+- Pre-releases are excluded from caret/tilde/wildcard matching, as Cargo excludes semver
+  pre-releases: a version carrying a Maven qualifier below the release marker (`alpha`, `beta`,
+  `milestone`, `rc`, `snapshot`) only matches when the requirement's own base is a pre-release.
+  An unknown qualifier (`-jre`) sorts after a release in Maven and is not a pre-release. Exact
+  pins (`=2.1.0-alpha1`) and Maven ranges keep their written semantics.
 - `=1.2.3` exact, `~1.2.3` tilde, `1.2.*` wildcard, `*` any.
 - Maven range syntax is accepted verbatim and uses Maven semantics: `[1.0]`, `[1.0,2.0)`,
   `(,1.0]`, `[1.5,)`, `(1.0,2.0)`, and unions `[1.0,2.0),[3.0,)`.

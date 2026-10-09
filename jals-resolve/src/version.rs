@@ -12,6 +12,12 @@
 //!   caret requirement (`>=2.0.16, <3.0.0`), while `[1.0,2.0)` is read verbatim with Maven
 //!   semantics. That is the one place this crate deliberately mixes dialects, and it is what
 //!   makes `commons-lang3 = "3.17.0"` behave the way both audiences expect.
+//!
+//! Cargo's pre-release rule travels with the spelling: a caret/tilde/wildcard requirement does
+//! not match a version carrying a known pre-release qualifier (`alpha`/`beta`/`milestone`/`rc`/
+//! `snapshot`) unless the requirement's own base is one, while an exact pin and a Maven range
+//! keep their written semantics. An *unknown* qualifier (`-jre`) sorts after a release in Maven
+//! and is therefore not a pre-release.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -89,6 +95,27 @@ impl Version {
     /// The version as it was written.
     pub fn as_str(&self) -> &str {
         &self.raw
+    }
+
+    /// Whether Maven's qualifier order marks this version a pre-release.
+    ///
+    /// A known qualifier below the release marker (`alpha`, `beta`, `milestone`, `rc`, `snapshot`)
+    /// anywhere in the version marks one; an *unknown* qualifier (`-jre`, `-android`) sorts after
+    /// a release in [`QUALIFIERS`] and is not a pre-release. That makes this the Maven analogue of
+    /// Cargo's semver pre-release: `2.1.0-alpha1 < 2.1.0`, while `33.4.0-jre > 33.4.0` and stays
+    /// selectable by a plain caret requirement written at `33.4.0`.
+    pub fn is_prerelease(&self) -> bool {
+        Self::items_are_prerelease(&self.items)
+    }
+
+    fn items_are_prerelease(items: &[Item]) -> bool {
+        items.iter().any(|item| match item {
+            Item::Text(text) => {
+                Self::qualifier_index(text).is_some_and(|index| index < RELEASE_INDEX)
+            }
+            Item::List(inner) => Self::items_are_prerelease(inner),
+            Item::Number(_) => false,
+        })
     }
 
     /// The leading numeric components, at most three, normalized without leading zeros.
@@ -563,29 +590,54 @@ impl VersionReq {
     }
 
     /// Whether `version` satisfies this requirement.
+    ///
+    /// Caret, tilde, and wildcard requirements keep Cargo's pre-release rule: a version with a
+    /// known pre-release qualifier only matches when the requirement's own base is a pre-release
+    /// too. An exact pin compares equality and a Maven range keeps Maven semantics, so neither is
+    /// filtered here.
     pub fn matches(&self, version: &Version) -> bool {
         match &self.kind {
             ReqKind::Any => true,
             ReqKind::Exact(base) => version == base,
-            ReqKind::Caret(base) => version >= base && version < &Self::next_compatible(base),
-            ReqKind::Tilde(base) => {
-                version >= base && Self::next_tilde(base).is_none_or(|upper| version < &upper)
+            ReqKind::Caret(base) => {
+                Self::admits_prerelease(base, version)
+                    && version >= base
+                    && version < &Self::next_compatible(base)
             }
-            ReqKind::Wildcard { major, minor } => match (major, minor) {
-                (None, _) => true,
-                (Some(major), None) => {
-                    let lower = Self::numeric(major, "0", "0");
-                    let upper = Self::numeric(&Self::bump(major), "0", "0");
-                    version >= &lower && version < &upper
-                }
-                (Some(major), Some(minor)) => {
-                    let lower = Self::numeric(major, minor, "0");
-                    let upper = Self::numeric(major, &Self::bump(minor), "0");
-                    version >= &lower && version < &upper
-                }
-            },
+            ReqKind::Tilde(base) => {
+                Self::admits_prerelease(base, version)
+                    && version >= base
+                    && Self::next_tilde(base).is_none_or(|upper| version < &upper)
+            }
+            ReqKind::Wildcard { major, minor } => {
+                // A wildcard comparator carries no base version to name a pre-release with, so a
+                // pre-release never matches one, exactly as in Cargo. `*` above is deliberately
+                // different: it is not a comparator and matches everything, as Cargo's `STAR`
+                // does.
+                !version.is_prerelease()
+                    && match (major, minor) {
+                        (None, _) => true,
+                        (Some(major), None) => {
+                            let lower = Self::numeric(major, "0", "0");
+                            let upper = Self::numeric(&Self::bump(major), "0", "0");
+                            version >= &lower && version < &upper
+                        }
+                        (Some(major), Some(minor)) => {
+                            let lower = Self::numeric(major, minor, "0");
+                            let upper = Self::numeric(major, &Self::bump(minor), "0");
+                            version >= &lower && version < &upper
+                        }
+                    }
+            }
             ReqKind::Ranges(ranges) => ranges.iter().any(|range| range.matches(version)),
         }
+    }
+
+    /// Cargo's pre-release admission rule in Maven's qualifier vocabulary: a pre-release version
+    /// matches a caret/tilde requirement only when the requirement's base is itself a
+    /// pre-release.
+    fn admits_prerelease(base: &Version, version: &Version) -> bool {
+        base.is_prerelease() || !version.is_prerelease()
     }
 
     /// The upper bound of a caret requirement, from the base's leading numeric components.
@@ -960,6 +1012,35 @@ mod tests {
         assert!(version("1.0.0.M1") < version("1.0.0"));
         assert!(version("6.0.0-M1") < version("6.0.0"));
         assert!(!req("6.0.0").matches(&version("6.0.0-M1")));
+    }
+
+    #[test]
+    fn a_caret_requirement_excludes_pre_releases_unless_it_names_one() {
+        // The slf4j case: `2.1.0-alpha1` sorts inside `2.0.17`'s caret window (`>=2.0.17,
+        // <3.0.0`), and must not be selected (Cargo's rule; `jals-resolve/DESIGN.md` §3.2).
+        assert!(!req("2.0.17").matches(&version("2.1.0-alpha1")));
+        assert!(!req("2.0.17").matches(&version("2.2.0-beta")));
+        assert!(!req("2.0.17").matches(&version("2.5.0-rc1")));
+        assert!(!req("2.0.17").matches(&version("2.1.0-SNAPSHOT")));
+        assert!(req("2.0.17").matches(&version("2.0.17")));
+        assert!(req("2.0.17").matches(&version("2.1.0")));
+        // An unknown qualifier sorts after a release in Maven and is not a pre-release, so the
+        // guava-style `-jre` version stays selectable by the plain caret.
+        assert!(req("2.0.17").matches(&version("2.1.0-jre")));
+        assert!(req("2.0.17").matches(&version("2.1.0-sp")));
+        // A base that is itself a pre-release admits pre-releases within its window.
+        assert!(req("2.1.0-alpha1").matches(&version("2.1.0-alpha2")));
+        assert!(req("2.1.0-alpha1").matches(&version("2.1.0")));
+        // An exact pin still selects the pre-release it names.
+        assert!(req("=2.1.0-alpha1").matches(&version("2.1.0-alpha1")));
+        assert!(req("[2.1.0-alpha1]").matches(&version("2.1.0-alpha1")));
+        // Tilde and wildcard carry the same rule; `*` carries no comparator and matches.
+        assert!(!req("~2.1.0").matches(&version("2.1.1-alpha")));
+        assert!(req("~2.1.0-alpha").matches(&version("2.1.1-alpha")));
+        assert!(!req("2.*").matches(&version("2.1.0-alpha1")));
+        assert!(req("*").matches(&version("0.0.1-alpha")));
+        // Maven ranges keep Maven semantics: a pre-release sorts inside a range and matches.
+        assert!(req("[2.0,3.0)").matches(&version("2.1.0-alpha1")));
     }
 
     #[test]
