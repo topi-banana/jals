@@ -126,7 +126,12 @@ impl Default for BuildScriptLimits {
     fn default() -> Self {
         Self {
             max_script_size: 1_048_576,
-            max_operations: 1_000_000,
+            // Raised from 1M when netty's collection codegen — 15 files rendered from 3
+            // templates and written through `Output` — measured under 33M WebAssembly
+            // instructions: a budget that cannot run real code generation is not a budget for
+            // a build script. Still bounded: the fuel conversion caps one run at 128M
+            // instructions.
+            max_operations: 8_000_000,
             max_string_size: 1_048_576,
             max_array_size: 65_536,
             max_map_size: 4_096,
