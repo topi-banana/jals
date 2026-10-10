@@ -33,7 +33,7 @@ use jals_storage::{
 };
 
 use crate::io::Fetch;
-use crate::maven::{Coordinate, MavenProvider};
+use crate::maven::{ArtifactType, Coordinate, MavenProvider};
 use crate::{
     ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, FetchError, Fetcher,
     LibrarySource, NetworkPolicy, ProjectInputOptions, ProjectInputPlan, ProjectInputs,
@@ -118,6 +118,10 @@ pub enum LockMode {
 pub struct RegistryGraphs {
     /// External dependency specs for the selected classpath, in resolver order.
     pub specs: Vec<DependencySpec>,
+    /// Artifact specs that are fetched into the verified cache but are not classpath entries: a
+    /// `tar.gz` native bundle, a `war`, a classified `-sources` jar. The lock records the package
+    /// either way; only a jar can be a classpath entry.
+    pub artifacts: Vec<DependencySpec>,
     /// The feature-independent lock, when one was generated *and* carries at least one package.
     /// An empty lock is not a lock: a project with no registry dependency has nothing to pin, and
     /// writing `version = 1` alone would make `--locked` demand a file nothing resolves against.
@@ -182,7 +186,7 @@ impl RegistryResolver {
         // with no registry package must hand back `None` rather than `version = 1` alone: a
         // `--locked` build of such a project must not demand a file nothing resolves against.
         let lockfile = lockfile.filter(|lock| !lock.packages.is_empty());
-        let specs = Self::specs(&selected, &registries);
+        let (specs, artifacts) = Self::specs(&selected, &registries, provider.artifact_types());
         let packages = match &lockfile {
             Some(lock) => lock
                 .packages
@@ -197,6 +201,7 @@ impl RegistryResolver {
         };
         Ok(RegistryGraphs {
             specs,
+            artifacts,
             lock: lockfile,
             packages,
             warnings,
@@ -260,6 +265,8 @@ impl RegistryResolver {
             .collect();
         Ok(RegistryGraphs {
             specs: Vec::new(),
+            // A workspace pass produces the lock alone; each member's own pass builds specs.
+            artifacts: Vec::new(),
             // An empty lock is not a lock, exactly as in `resolve`: a workspace with no registry
             // package must not make its host write `version = 1` (nor fail `--locked` against it).
             lock: (!packages.is_empty()).then(|| graph.lockfile()),
@@ -362,9 +369,15 @@ impl RegistryResolver {
         })
     }
 
-    /// Map a resolved graph's packages onto external jar specs.
-    fn specs(graph: &ResolveGraph, registries: &BTreeMap<String, String>) -> Vec<DependencySpec> {
+    /// Map a resolved graph's packages onto external artifact specs, split into the jars a
+    /// classpath can carry and the artifacts that are only fetched and locked.
+    fn specs(
+        graph: &ResolveGraph,
+        registries: &BTreeMap<String, String>,
+        artifacts_by_package: &BTreeMap<(PackageName, Version), ArtifactType>,
+    ) -> (Vec<DependencySpec>, Vec<DependencySpec>) {
         let mut specs = Vec::new();
+        let mut artifacts = Vec::new();
         for package in &graph.packages {
             let SourceId::Registry(registry_name) = &package.id.source else {
                 continue;
@@ -375,14 +388,20 @@ impl RegistryResolver {
             let Some(base) = registries.get(registry_name.as_str()) else {
                 continue;
             };
-            let url = coordinate.artifact_url(base, &package.id.version, "jar");
+            // The POM that pulled this package in said `<type>`/`<classifier>`; a package with no
+            // recorded artifact (a manifest dependency, a range edge) is Maven's default jar.
+            let artifact = artifacts_by_package
+                .get(&(package.id.name.clone(), package.id.version.clone()))
+                .cloned()
+                .unwrap_or_else(ArtifactType::jar);
+            let url = coordinate.artifact_url(base, &package.id.version, &artifact);
             // A `Name` is a portable path component: a coordinate's `:` is a Windows-reserved
             // character, so the diagnostic label folds it to `-`. Nothing keys on this name
             // except progress and warning text (`remap` is never set here).
             let Ok(name) = Name::new(package.id.name.as_str().replace(':', "-")) else {
                 continue;
             };
-            specs.push(DependencySpec {
+            let spec = DependencySpec {
                 name,
                 location: DependencyLocation::External {
                     locator: ExternalLocator::new(url),
@@ -396,9 +415,14 @@ impl RegistryResolver {
                 },
                 remap: None,
                 recursive: false,
-            });
+            };
+            if artifact.is_classpath() {
+                specs.push(spec);
+            } else {
+                artifacts.push(spec);
+            }
         }
-        specs
+        (specs, artifacts)
     }
 }
 
@@ -779,6 +803,10 @@ impl NativeProjectPlan {
         }
         registry.packages = graphs.packages;
         registry.warnings.extend(graphs.warnings);
+        // Non-jar artifacts (a `tar.gz` native bundle) are acquired through the same verified
+        // path as the jars but never become classpath entries; they ride the plan's auxiliary
+        // half, which `ProjectInputs::assemble` downloads beside the dependencies.
+        self.plan.auxiliary_artifacts.extend(graphs.artifacts);
         Some(graphs.specs)
     }
 
