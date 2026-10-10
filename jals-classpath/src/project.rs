@@ -172,6 +172,10 @@ pub struct ProjectInputs {
     pub source_dep_sources: Vec<SourceFile>,
     pub feature_set: FeatureSet,
     pub warnings: Vec<Warning>,
+    /// Failures the classpath phase could not recover from, which make the assembled inputs
+    /// incomplete in the way the caller's own purpose cannot tolerate. A `Compile` lowering is the
+    /// only producer today: `Analysis` and `Editor` report the same condition as a warning.
+    pub errors: Vec<Warning>,
 }
 
 impl ProjectInputs {
@@ -393,6 +397,9 @@ impl ProjectInputs {
             source_dep_sources,
             feature_set: plan.feature_set,
             warnings,
+            // `ProjectInputs::assemble` has no failing step of its own — everything it can
+            // recover from is a warning — so the caller fills this from its lowering state.
+            errors: Vec::new(),
         }
     }
 }

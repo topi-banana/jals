@@ -885,6 +885,77 @@ url = "https://repo.test/maven2"
     );
 }
 
+/// A registry dependency that cannot resolve is a compile-stopping error and an analysis
+/// warning. A build must name the failure before `javac` runs — a silently short classpath turns
+/// into a mountain of `cannot find symbol`s — while `jals lint` and the language server keep
+/// working over the same project, offline included.
+#[test]
+fn an_unresolvable_registry_dependency_is_an_error_only_for_a_compile() {
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:missing" = { version = "=1.0.0", registry = "test" }
+"#,
+    );
+    // Nothing is served: the POM fetch fails and the resolver walk reports it.
+    let fetcher = MapFetcher::new();
+    let fetcher_ref = &fetcher;
+
+    let run = |options: ProjectInputOptions| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        jals_exec::tokio_rt::run(|exec| async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                options,
+                &jals_progress::Progress::SILENT,
+                None,
+            )
+            .await;
+            inputs
+        })
+        .unwrap()
+    };
+
+    let inputs = run(ProjectInputOptions::Compile);
+    assert_eq!(inputs.errors.len(), 1, "{:?}", inputs.errors);
+    assert!(
+        inputs.warnings.is_empty(),
+        "the failure is not also a warning: {:?}",
+        inputs.warnings
+    );
+    let rendered = inputs.errors[0].to_string();
+    assert!(
+        rendered.contains("1 registry dependencies could not be resolved"),
+        "{rendered}"
+    );
+
+    for options in [ProjectInputOptions::Analysis, ProjectInputOptions::Editor] {
+        let inputs = run(options);
+        assert!(inputs.errors.is_empty(), "{options:?}: {:?}", inputs.errors);
+        assert_eq!(
+            inputs.warnings.len(),
+            1,
+            "{options:?}: {:?}",
+            inputs.warnings
+        );
+    }
+}
+
 /// slf4j's caret trap: `2.0.17` means `>=2.0.17, <3.0.0`, and `2.1.0-alpha1` sorts inside that
 /// window — but it is a pre-release, so the lock must stay at `2.0.17`. An exact pin still
 /// selects the pre-release it names.

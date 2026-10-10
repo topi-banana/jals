@@ -678,6 +678,11 @@ pub struct NativeProjectPlan {
     pub plan: ProjectInputPlan,
     pub source_roots: Vec<DirKey>,
     pub warnings: Vec<Warning>,
+    /// Failures a `Compile` lowering could not recover from, which the assembled
+    /// [`ProjectInputs`] carries out as errors. Empty for `Analysis`/`Editor`, where a missing
+    /// input is reported as a warning: a diagnostics pass and an editor are expected to keep
+    /// working over a project whose dependencies cannot resolve, offline included.
+    errors: Vec<Warning>,
     git_dependencies: Vec<(Name, GitDependency)>,
     /// `path` dependencies outside the project root, resolved against the host filesystem by
     /// [`materialize_path_sources`](Self::materialize_path_sources).
@@ -732,7 +737,7 @@ impl NativeProjectPlan {
         // through the same dependency resolver as explicit jars, so POM traversal is one batch of
         // metadata/POM fetches and the jars download in parallel through the verified cache.
         if let Some(specs) = native
-            .resolve_registry(manifest, scope, features, fetcher, registry)
+            .resolve_registry(manifest, scope, features, fetcher, registry, options)
             .await
         {
             native.plan.dependencies.extend(specs);
@@ -741,14 +746,17 @@ impl NativeProjectPlan {
             ProjectInputs::assemble(fetcher, storage, &native.plan, options, progress).await;
         native.warnings.append(&mut inputs.warnings);
         inputs.warnings = native.warnings;
+        inputs.errors = native.errors;
         (inputs, native.source_roots)
     }
 
     /// Resolve every registry entry into `DependencySpec`s and record the lock.
     ///
-    /// Thin wrapper over [`RegistryResolver::resolve`]. Failure becomes a warning: a build whose
-    /// classpath is missing a library fails at `javac` with a missing symbol, which is worse than
-    /// the resolver's own message.
+    /// Thin wrapper over [`RegistryResolver::resolve`]. Failure becomes an error for a `Compile`
+    /// lowering and a warning for anything else: a build whose classpath is missing a library
+    /// fails at `javac` with a mountain of missing symbols, which is worse than the resolver's own
+    /// message and arrives much later; a diagnostics pass or an editor is expected to keep working
+    /// over a project whose dependencies cannot resolve, offline included.
     async fn resolve_registry<F: Fetcher>(
         &mut self,
         manifest: &Manifest,
@@ -756,6 +764,7 @@ impl NativeProjectPlan {
         features: &ResolvedBuildFeatures,
         fetcher: &F,
         registry: Option<&mut RegistryResolution>,
+        options: ProjectInputOptions,
     ) -> Option<Vec<DependencySpec>> {
         // A host without lock persistence (the language server) still gets resolution; it just
         // has nowhere to store the outcome, and no full-lock pass to pay for. A host that already
@@ -791,10 +800,26 @@ impl NativeProjectPlan {
         {
             Ok(graphs) => graphs,
             Err(error) => {
-                self.warnings.push(Warning::new(
+                let count = self.registry_dependencies.len();
+                let message = if count == 0 {
+                    format!("registry dependencies could not be resolved: {error}")
+                } else {
+                    format!("{count} registry dependencies could not be resolved: {error}")
+                };
+                let warning = Warning::new(
                     WarningOrigin::External(ExternalLocator::new("registry")),
-                    format!("registry dependencies could not be resolved: {error}"),
-                ));
+                    message,
+                );
+                // A compile needs the classpath resolution would have produced. Stopping here
+                // names the real failure once, before any compiler ran, instead of letting javac
+                // report the missing library as dozens of `cannot find symbol`s. An analysis pass
+                // and an editor keep the warning: they are the hosts that must stay useful while
+                // the project cannot resolve.
+                if options == ProjectInputOptions::Compile {
+                    self.errors.push(warning);
+                } else {
+                    self.warnings.push(warning);
+                }
                 return None;
             }
         };
@@ -832,6 +857,7 @@ impl NativeProjectPlan {
             },
             source_roots: Vec::new(),
             warnings: Vec::new(),
+            errors: Vec::new(),
             git_dependencies: Vec::new(),
             path_dependencies: Vec::new(),
             registry_dependencies: Vec::new(),

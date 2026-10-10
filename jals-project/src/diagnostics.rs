@@ -342,10 +342,10 @@ impl ScriptFile<'_> {
 
 /// Everything one resolved assembly reported, borrowed from it.
 ///
-/// The three channels together, and only together. `warnings` and `errors` are the graph's;
-/// `inputs.warnings` is the classpath's, and a host that reached for the first two alone silently
-/// dropped the third — which is how an unreadable jar became something only a server's stderr ever
-/// mentioned. The fields are private and the only constructors are
+/// The four channels together, and only together. `warnings` and `errors` are the graph's;
+/// `inputs.warnings` and `inputs.errors` are the classpath's, and a host that reached for the
+/// first two alone silently dropped the third — which is how an unreadable jar became something
+/// only a server's stderr ever mentioned. The fields are private and the only constructors are
 /// [`MemoryProjectAssembly::report`](crate::MemoryProjectAssembly::report) and its native sibling,
 /// so a [`GraphOutcome::Resolved`] cannot be built with a channel left out.
 #[derive(Clone, Copy, Debug)]
@@ -353,6 +353,7 @@ pub struct ProjectReport<'a> {
     warnings: &'a [GraphWarning],
     errors: &'a [ProjectAssemblyError],
     inputs: &'a [jals_classpath::Warning],
+    input_errors: &'a [jals_classpath::Warning],
 }
 
 impl<'a> ProjectReport<'a> {
@@ -360,11 +361,13 @@ impl<'a> ProjectReport<'a> {
         warnings: &'a [GraphWarning],
         errors: &'a [ProjectAssemblyError],
         inputs: &'a [jals_classpath::Warning],
+        input_errors: &'a [jals_classpath::Warning],
     ) -> Self {
         Self {
             warnings,
             errors,
             inputs,
+            input_errors,
         }
     }
 }
@@ -412,7 +415,7 @@ impl ProjectDiagnostics {
         let mut out = Vec::new();
         Self::script_phase(&mut out, script, script_file);
         let graph_start = out.len();
-        Self::graph_phase(&mut out, graph);
+        Self::graph_phase(&mut out, &graph);
 
         // Advisory last, and only about what the graph phase just said. A refusal reads the same in
         // a graph warning and a classpath one, so the scan runs over both rather than over the type
@@ -573,7 +576,7 @@ impl ProjectDiagnostics {
         }
     }
 
-    fn graph_phase(out: &mut Vec<ProjectDiagnostic>, graph: GraphOutcome<'_>) {
+    fn graph_phase(out: &mut Vec<ProjectDiagnostic>, graph: &GraphOutcome<'_>) {
         match graph {
             GraphOutcome::NotReached => {}
             GraphOutcome::Failed(failure) => {
@@ -613,6 +616,16 @@ impl ProjectDiagnostics {
                         ProjectAnchor::Manifest,
                         ProjectDiagnosticCode::ClasspathInput,
                         warning,
+                    ));
+                }
+                // A classpath failure that is fatal to the run's own purpose: a compile whose
+                // dependency graph could not resolve. The error gate sees it and stops before any
+                // backend runs.
+                for error in report.input_errors {
+                    out.push(Self::error(
+                        ProjectAnchor::Manifest,
+                        ProjectDiagnosticCode::ClasspathInput,
+                        error,
                     ));
                 }
             }
@@ -656,7 +669,7 @@ mod tests {
     use alloc::vec;
 
     use jals_build::build_script::BuildScriptDiagnostic;
-    use jals_classpath::{Warning, WarningOrigin};
+    use jals_classpath::{ExternalLocator, Warning, WarningOrigin};
 
     use super::*;
     use crate::graph::CycleEdge;
@@ -704,8 +717,8 @@ mod tests {
     }
 
     /// The assembly under one outcome pair, with no script file configured.
-    fn assemble(script: ScriptOutcome<'_>, graph: GraphOutcome<'_>) -> Vec<ProjectDiagnostic> {
-        ProjectDiagnostics::assemble(script, graph, None)
+    fn assemble(script: ScriptOutcome<'_>, graph: &GraphOutcome<'_>) -> Vec<ProjectDiagnostic> {
+        ProjectDiagnostics::assemble(script, *graph, None)
     }
 
     fn codes(diagnostics: &[ProjectDiagnostic]) -> Vec<ProjectDiagnosticCode> {
@@ -724,7 +737,7 @@ mod tests {
     fn a_run_that_did_neither_phase_reports_nothing() {
         // `jals lint` opens a folder without executing an unreviewed script. Declining to run one
         // is not a diagnostic, and neither is a graph phase that was never asked for.
-        let reported = assemble(ScriptOutcome::Skipped, GraphOutcome::NotReached);
+        let reported = assemble(ScriptOutcome::Skipped, &GraphOutcome::NotReached);
         assert!(reported.is_empty(), "{reported:?}");
     }
 
@@ -736,7 +749,7 @@ mod tests {
             BuildScriptDiagnostic::warning("generated sources are stale"),
             BuildScriptDiagnostic::error("no toolchain"),
         ]));
-        let out = assemble(ScriptOutcome::Failed(&error), GraphOutcome::NotReached);
+        let out = assemble(ScriptOutcome::Failed(&error), &GraphOutcome::NotReached);
 
         assert_eq!(
             messages(&out),
@@ -833,7 +846,7 @@ mod tests {
                 "classpath entry is unavailable",
             )],
         );
-        let out = assemble(ScriptOutcome::Skipped, GraphOutcome::Failed(&failure));
+        let out = assemble(ScriptOutcome::Skipped, &GraphOutcome::Failed(&failure));
 
         assert_eq!(
             codes(&out),
@@ -884,13 +897,13 @@ mod tests {
         ];
         for (error, expected) in cases {
             let failure = GraphResolveError::unreported(error);
-            let out = assemble(ScriptOutcome::Skipped, GraphOutcome::Failed(&failure));
+            let out = assemble(ScriptOutcome::Skipped, &GraphOutcome::Failed(&failure));
             assert_eq!(codes(&out), [expected]);
         }
     }
 
     #[test]
-    fn a_resolved_graph_reports_all_three_channels() {
+    fn a_resolved_graph_reports_all_four_channels() {
         // The regression this test exists for: a host reading `warnings` and `errors` alone dropped
         // the classpath's input warnings, so an unreadable jar reached no client at all.
         let warnings = vec![GraphWarning::node(
@@ -906,14 +919,19 @@ mod tests {
             WarningOrigin::Skeleton,
             "unrecognized classpath file",
         )];
-        let report = ProjectReport::new(&warnings, &errors, &inputs);
-        let out = assemble(ScriptOutcome::Skipped, GraphOutcome::Resolved(report));
+        let input_errors = vec![Warning::new(
+            WarningOrigin::External(ExternalLocator::new("registry")),
+            "2 registry dependencies could not be resolved",
+        )];
+        let report = ProjectReport::new(&warnings, &errors, &inputs, &input_errors);
+        let out = assemble(ScriptOutcome::Skipped, &GraphOutcome::Resolved(report));
 
         assert_eq!(
             codes(&out),
             [
                 ProjectDiagnosticCode::DependencyResolution,
                 ProjectDiagnosticCode::DependencyAssembly,
+                ProjectDiagnosticCode::ClasspathInput,
                 ProjectDiagnosticCode::ClasspathInput
             ]
         );
@@ -922,11 +940,14 @@ mod tests {
             [
                 ProjectDiagnosticSeverity::Warning,
                 ProjectDiagnosticSeverity::Error,
-                ProjectDiagnosticSeverity::Warning
+                ProjectDiagnosticSeverity::Warning,
+                ProjectDiagnosticSeverity::Error
             ]
         );
         // Each rendered whole — the classpath one names its origin, which its message does not.
         assert!(out[2].message.starts_with("generated source: "));
+        assert!(out[3].message.starts_with("`registry`: "));
+        assert!(ProjectDiagnostics::has_errors(&out));
     }
 
     #[test]
@@ -941,8 +962,8 @@ mod tests {
                 alloc::format!("`b.jar` was {}", NetworkPolicy::OFFLINE_REFUSAL),
             ),
         ];
-        let report = ProjectReport::new(&[], &[], &inputs);
-        let out = assemble(ScriptOutcome::Skipped, GraphOutcome::Resolved(report));
+        let report = ProjectReport::new(&[], &[], &inputs, &[]);
+        let out = assemble(ScriptOutcome::Skipped, &GraphOutcome::Resolved(report));
 
         let advisories: Vec<_> = out
             .iter()
@@ -968,7 +989,7 @@ mod tests {
             },
             Vec::new(),
         );
-        let out = assemble(ScriptOutcome::Skipped, GraphOutcome::Failed(&failure));
+        let out = assemble(ScriptOutcome::Skipped, &GraphOutcome::Failed(&failure));
         assert!(
             out.iter()
                 .all(|d| d.code != ProjectDiagnosticCode::DependencyCache)
@@ -988,7 +1009,7 @@ mod tests {
             GraphWarning::node("../a", "one"),
             GraphWarning::node("../b", "two"),
         ];
-        let report = ProjectReport::new(&warnings, &[], &[]);
+        let report = ProjectReport::new(&warnings, &[], &[], &[]);
         let out = ProjectDiagnostics::assemble(
             ScriptOutcome::Failed(&error),
             GraphOutcome::Resolved(report),
