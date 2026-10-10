@@ -49,6 +49,11 @@ pub enum ProjectInputOptions {
 #[derive(Debug, Clone, Default)]
 pub struct ProjectInputPlan {
     pub dependencies: Vec<DependencySpec>,
+    /// Artifacts fetched into the verified cache that are not classpath entries — a registry
+    /// dependency's `tar.gz` native bundle, a `war`. Nothing consumes them; they are acquired
+    /// (and the lock names the package either way) because a transitive graph pulled them in,
+    /// while handing one to `javac` would be worse than not fetching it.
+    pub auxiliary_artifacts: Vec<DependencySpec>,
     pub source_archives: Vec<DependencySpec>,
     pub classpath: Vec<ClasspathEntry>,
     pub source_dependency_roots: Vec<DirKey>,
@@ -158,6 +163,10 @@ pub enum SourceFile {
 #[derive(Debug, Default)]
 pub struct ProjectInputs {
     pub dependency_jars: Vec<CacheKey>,
+    /// Artifacts that were acquired into the verified cache but are not classpath entries — a
+    /// registry package whose POM declared a non-jar `<type>`. Kept so a host can say what was
+    /// fetched and why the classpath does not name it.
+    pub auxiliary_artifacts: Vec<CacheKey>,
     pub classpath_classes: Vec<ClassFile>,
     pub library_sources: Vec<LibrarySource>,
     pub source_dep_sources: Vec<SourceFile>,
@@ -203,6 +212,21 @@ impl ProjectInputs {
         )
         .await;
         let mut warnings = resolved.warnings;
+
+        // The non-classpath half of the plan: acquired, verified, and cached exactly like a jar,
+        // then left out of every classpath list. A `tar.gz` native bundle pulled in by a POM is
+        // fetched so the graph resolves without a 404, and the lock names its package either way.
+        let auxiliary = DependencyResolver::resolve(
+            fetcher,
+            &view,
+            storage.artifacts_mut(),
+            &plan.auxiliary_artifacts,
+            progress,
+        )
+        .await;
+        warnings.extend(auxiliary.warnings);
+        let auxiliary_artifacts: Vec<CacheKey> =
+            auxiliary.jars.into_iter().map(|jar| jar.key).collect();
 
         // Deobfuscate every jar whose entry declared a `remap`, before anything reads one. Doing it
         // here rather than at each consumer is what makes the classpath, the analysis index, and the
@@ -363,6 +387,7 @@ impl ProjectInputs {
 
         Self {
             dependency_jars,
+            auxiliary_artifacts,
             classpath_classes,
             library_sources,
             source_dep_sources,

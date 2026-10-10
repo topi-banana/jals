@@ -333,8 +333,9 @@ Landed (each commit is green on its own):
    `group:artifact` shorthand) and `[registries]`, validated and lowered to resolver requests.
    Version requirements, `[workspace]`, and inheritance remain.
 4. **Maven provider** — `maven-metadata.xml`, POM parent chains, property interpolation,
-   `dependencyManagement`, BOM imports, scope/optional filtering. Exclusions, classifiers, and
-   checksum sidecars are documented next steps.
+   `dependencyManagement`, BOM imports, scope/optional filtering, and dependency `<type>` /
+   `<classifier>` reflected in the artifact file name (jars on the classpath; other types are
+   fetched and locked only). Exclusions and checksum sidecars are documented next steps.
 5. **Graph/classpath integration** — registry entries resolve inside
    `NativeProjectPlan::assemble_native`, their jars enter the ordinary verified-cache download
    path, and `jals-cli` reads/writes `jals.lock` (only when the rendered bytes changed). The
@@ -357,4 +358,4 @@ Landed (each commit is green on its own):
    members in one command.
 
 Remaining phases: workspace inheritance and member selection; `jals fetch`/`tree`; the
-`target/jals/deps` view; POM exclusions, classifiers, and checksum sidecars.
+`target/jals/deps` view; POM exclusions and checksum sidecars.

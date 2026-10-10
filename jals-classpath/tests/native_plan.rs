@@ -692,6 +692,199 @@ url = "https://repo.test/maven2"
     );
 }
 
+/// Netty's svm shape: the POM declares `<type>tar.gz</type>` native bundles. The request must be
+/// the `.tar.gz` the repository serves — not a `.jar` that 404s — and the tarball must stay off
+/// the compile classpath while still being fetched and locked.
+#[test]
+fn a_pom_typed_artifact_is_fetched_as_named_and_kept_off_the_classpath() {
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:svm" = { version = "=19.3.6", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/svm/19.3.6/svm-19.3.6.pom"),
+        br"<project>
+              <groupId>com.example</groupId><artifactId>svm</artifactId><version>19.3.6</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>svm-hosted-native-linux-amd64</artifactId><version>19.3.6</version><type>tar.gz</type></dependency>
+              </dependencies>
+            </project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/svm/19.3.6/svm-19.3.6.jar"),
+        b"svm-classes",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/svm-hosted-native-linux-amd64/19.3.6/svm-hosted-native-linux-amd64-19.3.6.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>svm-hosted-native-linux-amd64</artifactId><version>19.3.6</version></project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/svm-hosted-native-linux-amd64/19.3.6/svm-hosted-native-linux-amd64-19.3.6.tar.gz"),
+        b"native-tarball",
+    );
+    // No `.jar` fixture for the native artifact: requesting one is exactly the 404 being fixed.
+
+    let fetcher_ref = &fetcher;
+    let inputs = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let mut registry = jals_classpath::RegistryResolution::default();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                Some(&mut registry),
+            )
+            .await;
+            assert_eq!(registry.packages.len(), 2, "the lock covers both packages");
+            inputs
+        }
+    })
+    .unwrap();
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    assert_eq!(
+        inputs.dependency_jars.len(),
+        1,
+        "only the svm classes jar is a classpath entry"
+    );
+    assert_eq!(
+        inputs.auxiliary_artifacts.len(),
+        1,
+        "the tar.gz was fetched into the verified cache"
+    );
+    let seen = fetcher.seen.borrow();
+    assert!(
+        seen.iter()
+            .any(|url| url.ends_with("svm-hosted-native-linux-amd64-19.3.6.tar.gz")),
+        "the artifact is requested under its declared type: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|url| url.ends_with("svm-hosted-native-linux-amd64-19.3.6.jar")),
+        "no `.jar` request is made for a `tar.gz` artifact: {seen:?}"
+    );
+}
+
+/// A `<classifier>` on a jar dependency and a `<type>test-jar</type>` both resolve the file Maven
+/// names, not the coordinate's default jar.
+#[test]
+fn classified_and_test_jar_dependencies_resolve_their_own_files() {
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:lib" = { version = "=1.0.0", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom"),
+        br"<project>
+              <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>native-lib</artifactId><version>2.0.0</version><classifier>linux-x86_64</classifier></dependency>
+                <dependency><groupId>com.example</groupId><artifactId>helper</artifactId><version>3.0.0</version><type>test-jar</type></dependency>
+              </dependencies>
+            </project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.jar"),
+        b"lib-classes",
+    );
+    for (artifact, version, file) in [
+        ("native-lib", "2.0.0", "native-lib-2.0.0-linux-x86_64.jar"),
+        ("helper", "3.0.0", "helper-3.0.0-tests.jar"),
+    ] {
+        fetcher.add(
+            &format!("{BASE}/com/example/{artifact}/{version}/{artifact}-{version}.pom"),
+            format!(
+                "<project><groupId>com.example</groupId><artifactId>{artifact}</artifactId><version>{version}</version></project>"
+            )
+            .as_bytes(),
+        );
+        fetcher.add(
+            &format!("{BASE}/com/example/{artifact}/{version}/{file}"),
+            format!("{artifact}-bytes").as_bytes(),
+        );
+    }
+
+    let fetcher_ref = &fetcher;
+    let inputs = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                None,
+            )
+            .await;
+            inputs
+        }
+    })
+    .unwrap();
+    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
+    assert_eq!(
+        inputs.dependency_jars.len(),
+        3,
+        "the classified jar and the `-tests` jar are classpath entries too"
+    );
+    let seen = fetcher.seen.borrow();
+    assert!(
+        seen.iter()
+            .any(|url| url.ends_with("native-lib-2.0.0-linux-x86_64.jar")),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|url| url.ends_with("helper-3.0.0-tests.jar")),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.ends_with("native-lib-2.0.0.jar")),
+        "the unclassified jar is never requested: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|url| url.ends_with("helper-3.0.0.jar")),
+        "the unclassified jar is never requested: {seen:?}"
+    );
+}
+
 /// slf4j's caret trap: `2.0.17` means `>=2.0.17, <3.0.0`, and `2.1.0-alpha1` sorts inside that
 /// window — but it is a pre-release, so the lock must stay at `2.0.17`. An exact pin still
 /// selects the pre-release it names.

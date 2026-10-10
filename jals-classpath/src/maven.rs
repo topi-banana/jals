@@ -21,9 +21,11 @@
 //!   `system` are not. `optional` transitive dependencies are skipped, as Maven skips them.
 //!
 //! Deliberately not modelled yet, and stated rather than approximated: POM `exclusions` (a
-//! path-dependent filter the resolver has no vocabulary for), classifiers (a package id has no
-//! classifier dimension), and checksum sidecars (the lock pins content after the first verified
-//! download). Each is a documented next step in `jals-resolve/DESIGN.md`.
+//! path-dependent filter the resolver has no vocabulary for) and checksum sidecars (the lock pins
+//! content after the first verified download). Each is a documented next step in
+//! `jals-resolve/DESIGN.md`. A dependency's `<type>` and `<classifier>` *are* modelled: they are
+//! what the artifact file name is made of, and a Maven graph uses them for the `-tests` jar and
+//! the `tar.gz` native bundles alike.
 //!
 //! **Parallelism.** The batch methods are overridden: every `maven-metadata.xml` in one batch is
 //! fetched concurrently with [`jals_exec::join_ordered`], and every selected POM in a summary
@@ -95,18 +97,34 @@ impl Coordinate {
         format!("{}/{}", self.directory(), version.as_str())
     }
 
-    /// The artifact file name for a version and extension.
-    fn artifact_file(&self, version: &Version, extension: &str) -> String {
-        format!("{}-{}.{}", self.artifact, version.as_str(), extension)
+    /// The artifact file name for a version and artifact type — `lib-1.0.0.jar`,
+    /// `lib-1.0.0-tests.jar`, `svm-19.3.6.tar.gz`.
+    fn artifact_file(&self, version: &Version, artifact: &ArtifactType) -> String {
+        let classifier = artifact
+            .classifier
+            .as_deref()
+            .map_or(String::new(), |classifier| format!("-{classifier}"));
+        format!(
+            "{}-{}{}.{}",
+            self.artifact,
+            version.as_str(),
+            classifier,
+            artifact.extension
+        )
     }
 
-    /// The URL of this coordinate's main artifact in a repository rooted at `base`.
-    pub(crate) fn artifact_url(&self, base: &str, version: &Version, extension: &str) -> String {
+    /// The URL of one artifact of this coordinate in a repository rooted at `base`.
+    pub(crate) fn artifact_url(
+        &self,
+        base: &str,
+        version: &Version,
+        artifact: &ArtifactType,
+    ) -> String {
         format!(
             "{}/{}/{}",
             base.trim_end_matches('/'),
             self.version_directory(version),
-            self.artifact_file(version, extension)
+            self.artifact_file(version, artifact)
         )
     }
 }
@@ -120,6 +138,7 @@ struct PomDependency {
     scope: Option<String>,
     optional: bool,
     type_: Option<String>,
+    classifier: Option<String>,
 }
 
 impl PomDependency {
@@ -130,6 +149,93 @@ impl PomDependency {
             self.group_id.as_ref()?,
             self.artifact_id.as_ref()?
         ))
+    }
+}
+
+/// The artifact file a POM dependency names.
+///
+/// Maven's `<type>` is not the file extension one-for-one (`test-jar` is the `-tests` jar; a
+/// `maven-plugin` is a jar), and `<classifier>` is the leg that tells two artifacts of one
+/// coordinate apart (`-tests`, `-linux-x86_64`). Together they are the artifact's file name, and
+/// whether it is a jar a classpath can carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArtifactType {
+    /// The file extension Maven's type maps to (`jar`, `tar.gz`, `war`, ...).
+    extension: String,
+    /// The `-<classifier>` leg of the file name, when one is named.
+    classifier: Option<String>,
+}
+
+impl ArtifactType {
+    /// The default Maven artifact: the plain jar.
+    pub(crate) fn jar() -> Self {
+        Self {
+            extension: "jar".to_owned(),
+            classifier: None,
+        }
+    }
+
+    /// The POM itself: `.pom`, never classified.
+    fn pom() -> Self {
+        Self {
+            extension: "pom".to_owned(),
+            classifier: None,
+        }
+    }
+
+    /// Map a dependency's `<type>`/`<classifier>` onto its artifact.
+    ///
+    /// An empty value is absent. The known jar aliases map to `jar`; `test-jar` additionally
+    /// names the `tests` classifier (an explicit classifier wins, as Maven's artifact handler is
+    /// only consulted when the dependency does not name one). Everything else keeps the written
+    /// type as the extension, which is what makes `tar.gz` a `.tar.gz` request instead of a
+    /// `.jar` 404.
+    fn of(type_: Option<&str>, classifier: Option<&str>) -> Self {
+        let classifier = classifier
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let type_ = type_.map(str::trim).filter(|value| !value.is_empty());
+        match type_ {
+            // Everything in this arm is a jar under a different Maven name.
+            None
+            | Some("jar" | "maven-plugin" | "bundle" | "ejb" | "hk2-jar" | "orbit" | "scala-jar") => {
+                Self {
+                    extension: "jar".to_owned(),
+                    classifier,
+                }
+            }
+            Some("test-jar") => Self {
+                extension: "jar".to_owned(),
+                classifier: classifier.or_else(|| Some("tests".to_owned())),
+            },
+            Some("ejb-client") => Self {
+                extension: "jar".to_owned(),
+                classifier: classifier.or_else(|| Some("client".to_owned())),
+            },
+            Some("java-source") => Self {
+                extension: "jar".to_owned(),
+                classifier: classifier.or_else(|| Some("sources".to_owned())),
+            },
+            Some("javadoc") => Self {
+                extension: "jar".to_owned(),
+                classifier: classifier.or_else(|| Some("javadoc".to_owned())),
+            },
+            Some(other) => Self {
+                extension: other.to_owned(),
+                classifier,
+            },
+        }
+    }
+
+    /// Whether this artifact is a jar a compile classpath can carry.
+    ///
+    /// A `sources`/`javadoc` jar happens to have the extension but carries `.java` (or
+    /// documentation), never classes; everything that is not a `jar` (a `tar.gz` native bundle, a
+    /// `war`) is fetched and locked but not handed to `javac`.
+    pub(crate) fn is_classpath(&self) -> bool {
+        self.extension == "jar"
+            && !matches!(self.classifier.as_deref(), Some("sources" | "javadoc"))
     }
 }
 
@@ -349,6 +455,7 @@ impl Xml {
                     "version" => dependency.version = Some(Self::leaf(reader, &start)?),
                     "scope" => dependency.scope = Some(Self::leaf(reader, &start)?),
                     "type" => dependency.type_ = Some(Self::leaf(reader, &start)?),
+                    "classifier" => dependency.classifier = Some(Self::leaf(reader, &start)?),
                     "optional" => {
                         dependency.optional =
                             Self::leaf(reader, &start)?.eq_ignore_ascii_case("true");
@@ -389,6 +496,10 @@ pub(crate) struct MavenProvider<'f, F: Fetcher> {
     metadata: BTreeMap<(Coordinate, RegistryId), Vec<Version>>,
     poms: BTreeMap<(Coordinate, String, RegistryId), RawPom>,
     effective: BTreeMap<(Coordinate, String, RegistryId), EffectivePom>,
+    /// The artifact file each POM dependency pinned, keyed by the package it resolves to. A POM
+    /// says `<type>`/`<classifier>`; the resolver's vocabulary has no room for them, so the
+    /// provider — the one layer that read them — keeps them for the artifact download.
+    artifacts: BTreeMap<(PackageName, Version), ArtifactType>,
 }
 
 /// Where a batch request's version list comes from.
@@ -417,7 +528,13 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
             metadata: BTreeMap::new(),
             poms: BTreeMap::new(),
             effective: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
         }
+    }
+
+    /// The artifact file each resolved package pins, for the download that follows resolution.
+    pub(crate) const fn artifact_types(&self) -> &BTreeMap<(PackageName, Version), ArtifactType> {
+        &self.artifacts
     }
 
     fn base_url<'s>(&'s self, registry: &RegistryId) -> Result<&'s str, String> {
@@ -453,7 +570,7 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
             &format!(
                 "{}/{}",
                 coordinate.version_directory(version),
-                coordinate.artifact_file(version, "pom")
+                coordinate.artifact_file(version, &ArtifactType::pom())
             ),
         )
     }
@@ -672,7 +789,11 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
     }
 
     /// Turn one effective POM into a resolver summary.
-    fn summary_of(registry: &RegistryId, effective: &EffectivePom) -> Result<Summary, String> {
+    fn summary_of(
+        registry: &RegistryId,
+        effective: &EffectivePom,
+        artifacts: &mut BTreeMap<(PackageName, Version), ArtifactType>,
+    ) -> Result<Summary, String> {
         let name = effective.coordinate.package_name();
         let version = effective
             .version
@@ -736,6 +857,19 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
             };
             if package == name {
                 continue;
+            }
+            // A POM names its dependency's artifact with `<type>`/`<classifier>`; the resolver's
+            // `DependencyRequest` has no room for either, so they travel to the download through
+            // this provider's own map. Keyed by the exact version the edge pins — a POM version is
+            // exact unless it is a range, and a range's selected version is not knowable here.
+            if let Some(exact) = requirement.exact_base() {
+                artifacts.insert(
+                    (package.clone(), exact.clone()),
+                    ArtifactType::of(
+                        dependency.type_.as_deref(),
+                        dependency.classifier.as_deref(),
+                    ),
+                );
             }
             dependencies.push(DependencyRequest {
                 name: package.clone(),
@@ -865,7 +999,7 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
         let SourceId::Registry(registry) = &id.source else {
             unreachable!("checked above");
         };
-        Self::summary_of(registry, &effective)
+        Self::summary_of(registry, &effective, &mut self.artifacts)
     }
 
     async fn candidates_batch(
@@ -1089,7 +1223,7 @@ impl<F: Fetcher> Provider for MavenProvider<'_, F> {
                 let SourceId::Registry(registry) = &ids[index].source else {
                     unreachable!("a registry id was checked while planning");
                 };
-                Self::summary_of(registry, &effective)
+                Self::summary_of(registry, &effective, &mut self.artifacts)
             }));
         }
         results
@@ -1246,6 +1380,153 @@ mod tests {
         assert_eq!(pom.dependencies.len(), 1);
         assert!(pom.dependencies[0].optional);
         assert_eq!(pom.dependencies[0].scope.as_deref(), Some("runtime"));
+    }
+
+    #[test]
+    fn a_dependency_parses_its_classifier() {
+        let pom = Xml::pom(
+            br"<project>
+                  <groupId>com.example</groupId><artifactId>lib</artifactId><version>1</version>
+                  <dependencies>
+                    <dependency><groupId>g</groupId><artifactId>a</artifactId><version>1</version><classifier>linux-x86_64</classifier></dependency>
+                  </dependencies>
+                </project>",
+        )
+        .unwrap();
+        assert_eq!(
+            pom.dependencies[0].classifier.as_deref(),
+            Some("linux-x86_64")
+        );
+    }
+
+    #[test]
+    fn artifact_type_maps_maven_types_to_file_names() {
+        let jar = ArtifactType::of(None, None);
+        assert_eq!(jar.extension, "jar");
+        assert_eq!(jar.classifier, None);
+        assert!(jar.is_classpath());
+
+        let tests = ArtifactType::of(Some("test-jar"), None);
+        assert_eq!(tests.extension, "jar");
+        assert_eq!(tests.classifier.as_deref(), Some("tests"));
+        assert!(
+            tests.is_classpath(),
+            "the `-tests` jar carries test classes"
+        );
+
+        let classified = ArtifactType::of(Some("jar"), Some("linux-x86_64"));
+        assert_eq!(classified.classifier.as_deref(), Some("linux-x86_64"));
+        assert!(classified.is_classpath());
+
+        let native = ArtifactType::of(Some("tar.gz"), None);
+        assert_eq!(native.extension, "tar.gz");
+        assert!(!native.is_classpath());
+
+        let sources = ArtifactType::of(None, Some("sources"));
+        assert!(!sources.is_classpath(), "a sources jar carries no classes");
+
+        let plugin = ArtifactType::of(Some("maven-plugin"), None);
+        assert_eq!(plugin.extension, "jar");
+        assert!(plugin.is_classpath());
+
+        // An explicit classifier wins over the type's default one, as Maven's artifact handler
+        // is only consulted when the dependency names no classifier.
+        let explicit = ArtifactType::of(Some("test-jar"), Some("linux-x86_64"));
+        assert_eq!(explicit.classifier.as_deref(), Some("linux-x86_64"));
+    }
+
+    #[test]
+    fn artifact_urls_carry_the_type_and_classifier() {
+        let native = Coordinate {
+            group: "org.example".to_owned(),
+            artifact: "svm-hosted-native-linux-amd64".to_owned(),
+        };
+        let version = Version::parse("19.3.6").unwrap();
+        assert_eq!(
+            native.artifact_url(BASE, &version, &ArtifactType::of(Some("tar.gz"), None)),
+            "https://repo.test/maven2/org/example/svm-hosted-native-linux-amd64/19.3.6/svm-hosted-native-linux-amd64-19.3.6.tar.gz"
+        );
+        assert_eq!(
+            native.artifact_url(
+                BASE,
+                &version,
+                &ArtifactType::of(None, Some("linux-x86_64"))
+            ),
+            "https://repo.test/maven2/org/example/svm-hosted-native-linux-amd64/19.3.6/svm-hosted-native-linux-amd64-19.3.6-linux-x86_64.jar"
+        );
+
+        let lib = Coordinate {
+            group: "com.example".to_owned(),
+            artifact: "lib".to_owned(),
+        };
+        let version = Version::parse("1.0.0").unwrap();
+        assert_eq!(
+            lib.artifact_url(BASE, &version, &ArtifactType::of(Some("test-jar"), None)),
+            "https://repo.test/maven2/com/example/lib/1.0.0/lib-1.0.0-tests.jar"
+        );
+    }
+
+    #[test]
+    fn a_summary_records_each_dependency_artifact_type() {
+        let mut fetcher = MapFetcher::new();
+        fetcher.add(
+            "com/example/lib/1.0.0/lib-1.0.0.pom",
+            r"<project>
+                 <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+                 <dependencies>
+                   <dependency><groupId>com.example</groupId><artifactId>native-bin</artifactId><version>19.3.6</version><type>tar.gz</type></dependency>
+                   <dependency><groupId>com.example</groupId><artifactId>helper</artifactId><version>2.0.0</version><type>test-jar</type></dependency>
+                   <dependency><groupId>com.example</groupId><artifactId>accelerated</artifactId><version>3.0.0</version><classifier>linux-x86_64</classifier></dependency>
+                 </dependencies>
+               </project>",
+        );
+        // The POM's own XSD default type is a plain jar, recorded too.
+        fetcher.add(
+            "com/example/plain/4.0.0/plain-4.0.0.pom",
+            r"<project>
+                 <groupId>com.example</groupId><artifactId>plain</artifactId><version>4.0.0</version>
+                 <dependencies>
+                   <dependency><groupId>com.example</groupId><artifactId>default-type</artifactId><version>5.0.0</version></dependency>
+                 </dependencies>
+               </project>",
+        );
+        let mut provider = provider(&fetcher);
+        let id = PackageId::new(
+            PackageName::new("com.example:lib").unwrap(),
+            Version::parse("1.0.0").unwrap(),
+            SourceId::Registry(registry()),
+        );
+        jals_exec::block_on_inline(provider.summary(&id)).unwrap();
+        let id = PackageId::new(
+            PackageName::new("com.example:plain").unwrap(),
+            Version::parse("4.0.0").unwrap(),
+            SourceId::Registry(registry()),
+        );
+        jals_exec::block_on_inline(provider.summary(&id)).unwrap();
+
+        let key = |name: &str, version: &str| {
+            (
+                PackageName::new(name).unwrap(),
+                Version::parse(version).unwrap(),
+            )
+        };
+        let artifacts = provider.artifact_types();
+        assert_eq!(
+            artifacts.get(&key("com.example:native-bin", "19.3.6")),
+            Some(&ArtifactType::of(Some("tar.gz"), None))
+        );
+        assert_eq!(
+            artifacts.get(&key("com.example:helper", "2.0.0")),
+            Some(&ArtifactType::of(Some("test-jar"), None))
+        );
+        assert_eq!(
+            artifacts.get(&key("com.example:accelerated", "3.0.0")),
+            Some(&ArtifactType::of(None, Some("linux-x86_64")))
+        );
+        assert_eq!(
+            artifacts.get(&key("com.example:default-type", "5.0.0")),
+            Some(&ArtifactType::jar())
+        );
     }
 
     #[test]
