@@ -956,6 +956,152 @@ url = "https://repo.test/maven2"
     }
 }
 
+/// A `[package] version` the version parser rejects is no longer a silent `0.0.0`: resolution
+/// still uses the fallback — the root is not a lock entry, and its version only matters to a
+/// requirement naming the root package — but the run says so, exactly once even though the lock
+/// pass asks the same manifest twice. The version from the report parses as a Maven version and
+/// needs no fallback at all.
+#[test]
+fn an_unparsable_package_version_warns_once_and_still_resolves() {
+    const BASE: &str = "https://repo.test/maven2";
+    let broken_manifest = manifest(
+        r#"version = "1 .0"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:lib" = { version = "=1.0.0", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version></project>",
+    );
+    let lib_features = features(&broken_manifest);
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve(
+            &broken_manifest,
+            DependencyScope::Build,
+            &lib_features,
+            &fetcher,
+            None,
+            jals_classpath::LockMode::Generate,
+        )
+        .await
+        .unwrap()
+    })
+    .unwrap();
+    assert_eq!(graphs.warnings.len(), 1, "{:?}", graphs.warnings);
+    assert!(
+        graphs.warnings[0].contains("is not a version"),
+        "{:?}",
+        graphs.warnings
+    );
+    let locked: Vec<String> = graphs
+        .lock
+        .as_ref()
+        .expect("a lock was produced")
+        .packages
+        .iter()
+        .map(|package| format!("{} {}", package.id.name, package.id.version))
+        .collect();
+    assert_eq!(
+        locked,
+        vec!["com.example:lib 1.0.0"],
+        "resolution is unaffected"
+    );
+
+    // `999.0.0-HEAD-jre-SNAPSHOT` — the version from the report — is a Maven version and parses,
+    // so it is used as-is and nothing is said.
+    let maven_manifest = manifest(
+        r#"version = "999.0.0-HEAD-jre-SNAPSHOT"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:lib" = { version = "=1.0.0", registry = "test" }
+"#,
+    );
+    let maven_features = features(&maven_manifest);
+    let graphs = jals_exec::tokio_rt::run(|_| async {
+        jals_classpath::RegistryResolver::resolve(
+            &maven_manifest,
+            DependencyScope::Build,
+            &maven_features,
+            &fetcher,
+            None,
+            jals_classpath::LockMode::Generate,
+        )
+        .await
+        .unwrap()
+    })
+    .unwrap();
+    assert!(graphs.warnings.is_empty(), "{:?}", graphs.warnings);
+}
+
+/// The fallback warning reaches a build as a classpath warning — not an error: the build proceeds
+/// on the fallback exactly as before, and the user can see why `0.0.0` appears.
+#[test]
+fn a_package_version_fallback_reaches_the_build_as_a_warning() {
+    const BASE: &str = "https://repo.test/maven2";
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    let manifest = manifest(
+        r#"version = "1 .0"
+[registries.test]
+url = "https://repo.test/maven2"
+
+[dependencies]
+"com.example:lib" = { version = "=1.0.0", registry = "test" }
+"#,
+    );
+    let mut fetcher = MapFetcher::new();
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.pom"),
+        br"<project><groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version></project>",
+    );
+    fetcher.add(
+        &format!("{BASE}/com/example/lib/1.0.0/lib-1.0.0.jar"),
+        b"lib-bytes",
+    );
+    let fetcher_ref = &fetcher;
+    let inputs = jals_exec::tokio_rt::run(|exec| {
+        let manifest = manifest.clone();
+        let project = project.path().to_path_buf();
+        async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            let (inputs, _) = NativeProjectPlan::assemble_native(
+                &manifest,
+                DependencyScope::Build,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                fetcher_ref,
+                ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
+                None,
+            )
+            .await;
+            inputs
+        }
+    })
+    .unwrap();
+    assert!(inputs.errors.is_empty(), "{:?}", inputs.errors);
+    assert_eq!(inputs.dependency_jars.len(), 1, "the build proceeds");
+    assert!(
+        inputs
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("is not a version")),
+        "{:?}",
+        inputs.warnings
+    );
+}
+
 /// slf4j's caret trap: `2.0.17` means `>=2.0.17, <3.0.0`, and `2.1.0-alpha1` sorts inside that
 /// window — but it is a pre-release, so the lock must stay at `2.0.17`. An exact pin still
 /// selects the pre-release it names.

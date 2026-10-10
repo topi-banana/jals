@@ -552,6 +552,11 @@ impl UpdateArgs {
             .map_err(|error| anyhow!("registry dependencies could not be resolved: {error}"))?;
             (root.clone(), graphs)
         };
+        // A `[package] version` fallback is advisory, not fatal: `jals update` still writes the
+        // lock it resolved.
+        for message in &graphs.warnings {
+            session.shell().warn(format_args!("{message}"));
+        }
         if graphs.packages.is_empty() {
             session
                 .shell()
@@ -2879,6 +2884,11 @@ impl App {
                             if let Some(lock) = graphs.lock {
                                 registry.lock = Some(lock.clone());
                                 registry.resolved_lock = Some(lock);
+                            }
+                            // The workspace pass produces the lock; its advisories (a member's
+                            // version fallback) belong on this run's stderr, not dropped.
+                            for message in &graphs.warnings {
+                                shell.warn(format_args!("{message}"));
                             }
                         }
                         Err(error) => shell.warn(format_args!(
