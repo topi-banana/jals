@@ -128,8 +128,9 @@ pub struct RegistryGraphs {
     pub lock: Option<Lockfile>,
     /// Names in the lock (or the selected graph when no lock was generated), id-sorted.
     pub packages: Vec<PackageName>,
-    /// Non-fatal messages from either pass.
-    warnings: Vec<String>,
+    /// Non-fatal messages from either pass: a `[package] version` fallback, or an advisory the
+    /// resolver itself produced.
+    pub warnings: Vec<String>,
 }
 
 /// Registry resolution as a standalone step.
@@ -157,19 +158,20 @@ impl RegistryResolver {
     ) -> Result<RegistryGraphs, String> {
         let registries = Self::registry_urls(manifest);
         let mut provider = MavenProvider::new(fetcher, registries.clone());
-        let selected_root = Self::root_request(manifest, features, scope, false)?;
+        let mut warnings: Vec<String> = Vec::new();
+        let selected_root = Self::root_request(manifest, features, scope, false, &mut warnings)?;
         let selected = Resolver::new(&mut provider)
             .resolve(&[selected_root], lock)
             .await
             .map_err(|error| error.to_string())?;
-        let mut warnings: Vec<String> = selected.warnings.iter().map(ToString::to_string).collect();
+        warnings.extend(selected.warnings.iter().map(ToString::to_string));
         // The lock must not move with the feature selection: a run that activates an optional
         // entry would otherwise rewrite it and every other selection would rewrite it back. So
         // the lock is generated from a second pass with every registry entry (dev included)
         // forced active, and the shared provider makes its extra POM reads cache hits.
         let lockfile = if mode == LockMode::Generate {
             if Self::needs_full_pass(manifest, scope) {
-                let full_root = Self::root_request(manifest, features, scope, true)?;
+                let full_root = Self::root_request(manifest, features, scope, true, &mut warnings)?;
                 let full = Resolver::new(&mut provider)
                     .resolve(&[full_root], lock)
                     .await
@@ -244,8 +246,15 @@ impl RegistryResolver {
         let defaults = ResolvedBuildFeatures::default();
         let mut roots = Vec::with_capacity(members.len());
         let mut names = BTreeSet::new();
+        let mut warnings: Vec<String> = Vec::new();
         for manifest in members {
-            let root = Self::root_request(manifest, &defaults, DependencyScope::Test, true)?;
+            let root = Self::root_request(
+                manifest,
+                &defaults,
+                DependencyScope::Test,
+                true,
+                &mut warnings,
+            )?;
             let name = root.summary.id.name.to_string();
             if !names.insert(name.clone()) {
                 return Err(format!(
@@ -258,6 +267,7 @@ impl RegistryResolver {
             .resolve(&roots, lock)
             .await
             .map_err(|error| error.to_string())?;
+        warnings.extend(graph.warnings.iter().map(ToString::to_string));
         let packages: Vec<PackageName> = graph
             .packages
             .iter()
@@ -271,8 +281,23 @@ impl RegistryResolver {
             // package must not make its host write `version = 1` (nor fail `--locked` against it).
             lock: (!packages.is_empty()).then(|| graph.lockfile()),
             packages,
-            warnings: graph.warnings.iter().map(ToString::to_string).collect(),
+            warnings,
         })
+    }
+
+    /// Push a root-request warning once: the lock pass asks the same manifest the same question
+    /// and would otherwise restate the same complaint in the same run.
+    fn warn_once(warnings: &mut Vec<String>, message: String) {
+        if !warnings.contains(&message) {
+            warnings.push(message);
+        }
+    }
+
+    /// The version resolution uses when a manifest names no version or one that does not parse.
+    /// The root is not a lock entry; its version matters only to a requirement naming the root
+    /// package, so the fallback is harmless — being silent about it was not.
+    fn fallback_version() -> Version {
+        Version::parse("0.0.0").expect("`0.0.0` parses")
     }
 
     /// Union of every member's `[registries]`, rejecting one name with two URLs.
@@ -318,11 +343,17 @@ impl RegistryResolver {
     ///
     /// `force_all` clears `optional` on every retained registry edge and includes the dev table,
     /// which is what makes the lock feature-independent.
+    ///
+    /// A `[package] version` that does not parse is not silently replaced: resolution still uses
+    /// `0.0.0` — the root is not a lock entry and its version only matters to a requirement naming
+    /// the root package — but the fallback is *said* through `warnings` rather than inferred by
+    /// whoever wonders why a template or a resolver error shows `0.0.0`.
     fn root_request(
         manifest: &Manifest,
         features: &ResolvedBuildFeatures,
         scope: DependencyScope,
         force_all: bool,
+        warnings: &mut Vec<String>,
     ) -> Result<RootRequest, String> {
         let root_name = manifest
             .package
@@ -332,12 +363,29 @@ impl RegistryResolver {
         let name = PackageName::new(root_name.clone()).map_err(|error| {
             format!("project name `{root_name}` is not a package name: {error}")
         })?;
-        let version = manifest
-            .package
-            .version
-            .as_deref()
-            .and_then(|text| Version::parse(text).ok())
-            .unwrap_or_else(|| Version::parse("0.0.0").expect("`0.0.0` parses"));
+        // No version at all is a stated absence, not a failed parse: `[package] version` is
+        // optional, and a project that omits it resolves as `0.0.0` without a word. A version the
+        // Maven-style parser rejects (whitespace, or an empty string) is the silent fallback the
+        // reports named, and it is reported once per manifest even though the lock pass asks the
+        // same question twice.
+        let version =
+            manifest
+                .package
+                .version
+                .as_deref()
+                .map_or_else(Self::fallback_version, |text| match Version::parse(text) {
+                    Ok(version) => version,
+                    Err(error) => {
+                        Self::warn_once(
+                            warnings,
+                            format!(
+                                "`{root_name}`: [package] version `{text}` is not a version \
+                                 ({error}); resolution uses `0.0.0`"
+                            ),
+                        );
+                        Self::fallback_version()
+                    }
+                });
         let id = PackageId::new(
             name,
             version,
@@ -827,6 +875,15 @@ impl NativeProjectPlan {
             registry.resolved_lock = Some(lock);
         }
         registry.packages = graphs.packages;
+        // Resolution's own advisories and the manifest fallbacks reach the caller as classpath
+        // diagnostics: the lock carries no channel for them, and dropping them here is what made
+        // a `0.0.0` fallback invisible.
+        for message in &graphs.warnings {
+            self.warnings.push(Warning::new(
+                WarningOrigin::External(ExternalLocator::new("registry")),
+                message.clone(),
+            ));
+        }
         registry.warnings.extend(graphs.warnings);
         // Non-jar artifacts (a `tar.gz` native bundle) are acquired through the same verified
         // path as the jars but never become classpath entries; they ride the plan's auxiliary

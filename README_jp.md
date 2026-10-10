@@ -476,7 +476,7 @@ hard graph error は root manifest に診断してから root-only analysis へ 
 依存解決は 2 系統とも実装済みです。上の transitive な JALS source-project graph と、Maven/POM
 coordinate resolution — `maven-metadata.xml`/POM の走査・coordinate version selection・transitive
 Maven download・`jals.lock` lockfile（`--locked`/`--frozen`、`jals update`）です。POM の
-exclusions/classifiers、`jals fetch`/`tree`、パッケージングは残っています。
+exclusions、`jals fetch`/`tree`、パッケージングは残っています。
 
 ### オプション
 
@@ -765,7 +765,7 @@ free function はできる限り避けます。associated function は親とな�
 バイトコード逆コンパイル（ループの `break`/`continue`、try-with-resources）はまだ未対応です。
 依存解決は 2 系統とも実装済みです。transitive な JALS `path`/`git` source-project graph と、
 Maven 座標（`group:artifact:version`）の POM/version 解決・`jals.lock` lockfile です。POM の
-exclusions/classifiers・`jals fetch`/`tree`・パッケージングは build
+exclusions・`jals fetch`/`tree`・パッケージングは build
 [ロードマップ](jals-build/README.md#roadmap)上にあります。
 
 ## ライセンス

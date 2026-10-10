@@ -902,8 +902,10 @@ downloaded into the SHA-256 verified artifact cache, and the result is pinned in
 `version` is a caret requirement (`2.0.16` = `>=2.0.16, <3.0.0`); Maven range syntax (`[1.0,2.0)`)
 is accepted verbatim. `registry = "…"` selects a `[registries]` entry — `maven-central` is
 implicit, and any other name must be declared (`[registries] internal = { url = "…" }`). The
-resolved jars join the analysis and compile classpaths like a `jar` entry. POM `exclusions`,
-classifiers, and checksum sidecars are not honored yet (roadmap §3).
+resolved jars join the analysis and compile classpaths like a `jar` entry. POM `exclusions` and
+checksum sidecars are not honored yet (roadmap §3). A dependency's `<type>`/`<classifier>` is
+reflected in the artifact file name; a non-jar artifact is fetched and locked but kept off the
+classpath.
 
 A **`git`** / **`path`** dependency selects a source-project root: the declared path or Git checkout,
 followed by `dir` when present. `jals-project` probes only `<selected-root>/jals.toml`; it never
@@ -1131,7 +1133,7 @@ Making a `features` release preset also imply a default `javac --release` is sti
 | Section                               | Cargo analogue        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[dev-dependencies]`                  | `[dev-dependencies]`  | **done** — see [§5](#5-testing). Same entry shapes as `[dependencies]`, resolved by `jals test` and by the analysis hosts and by nothing that produces output, and **not transitive**.                                                                                                                                                                                                                                                                                                    |
-| `[dependencies]`                      | `[dependencies]`      | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources); `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation; and **registry coordinates are implemented** — `{ group, version }` tables or the `group:artifact` shorthand resolve through POMs and land in the verified cache and `jals.lock`. Remaining: exclusions / classifiers, `jals tree` / `fetch`, the `target/jals/deps` view, and packaging (§3, §4). |
+| `[dependencies]`                      | `[dependencies]`      | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources); `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation; and **registry coordinates are implemented** — `{ group, version }` tables or the `group:artifact` shorthand resolve through POMs and land in the verified cache and `jals.lock`. Remaining: exclusions, `jals tree` / `fetch`, the `target/jals/deps` view, and packaging (§3, §4). |
 | `[toolchain]`                         | `rust-toolchain.toml` | **done for JDK selection**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the project-local `target/jdk` store (installed by `jals toolchain`, Adoptium or foojay Disco providers) and the host's installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). A missing distribution is auto-installed rust-toolchain style, and `jals toolchain default` claims the `system` selection. Still to come: letting a `[package] features` release preset default `[build] release`. |
 | `[registries]`                        | (registries)          | **done** — named Maven repositories; `maven-central` is implicit and may be declared to point at a mirror, and `registry = "…"` must name a declared entry |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]`         | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels)                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -1149,7 +1151,7 @@ resolved jars join the verified-cache download path; `jals-cli` reads and writes
 ignoring the pins. The lock is feature-independent: it is generated from a pass that forces every
 optional and dev registry entry active. `[workspace]` roots share one lock across their members
 (discovery + union resolution; inheritance and `-p` are not implemented yet). `jals fetch`/`tree`,
-the `target/jals/deps` view, and POM exclusions/classifiers remain. The target architecture and
+the `target/jals/deps` view, and POM exclusions remain. The target architecture and
 migration plan live in [`jals-resolve/DESIGN.md`](../jals-resolve/DESIGN.md).
 
 The plumbing follows the portable/native split the rest of the crate already uses. `jals-resolve`
@@ -1161,8 +1163,8 @@ cache) and `jals-cli` owns the lock file. `jals-build` itself only needs the _re
 classpath, fed to `Invocation::build` exactly as the discovered source list and the `jals-project`
 source/artifact projection are. No part of this changes the crate's purity.
 
-What remains from this section's original plan is the smaller half: POM `exclusions` and
-classifiers, checksum sidecars, the `jals fetch`/`tree` commands, the `target/jals/deps`
+What remains from this section's original plan is the smaller half: POM `exclusions`, checksum
+sidecars, the `jals fetch`/`tree` commands, the `target/jals/deps`
 materialized view, and packaging (§4).
 
 **Separate from Maven resolution**, JDK standard-library classes still come from the embedded
@@ -1339,7 +1341,7 @@ By Java-user impact:
    (cheap, immediately useful, no new infrastructure).
 2. ~~**`jals test`**~~ — **done**, through `#[test]` rather than JUnit (§5).
 3. ~~**Maven dependency management (§3)**~~ — **done** for registry resolution (coordinate/POM
-   resolver + `jals.lock` + `jals update`). What remains is the smaller half: exclusions /
-   classifiers, the `tree`/`fetch` commands and the `deps` view, and packaging (§4).
+   resolver + `jals.lock` + `jals update`). What remains is the smaller half: exclusions, the
+   `tree`/`fetch` commands and the `deps` view, and packaging (§4).
 4. **Packaging (§4)** — `jals jar`, then fat jars.
 5. **The rest** — `doc`, profiles, workspaces, `publish`, `bench`.

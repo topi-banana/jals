@@ -500,7 +500,7 @@ support.
 Both dependency paths are implemented: the transitive JALS source-project graph above, and
 Maven/POM coordinate resolution — `maven-metadata.xml`/POM traversal, coordinate version
 selection, transitive Maven downloads, and a `jals.lock` lockfile (`--locked`/`--frozen`,
-`jals update`). POM exclusions/classifiers, `jals fetch`/`tree`, and packaging remain.
+`jals update`). POM exclusions, `jals fetch`/`tree`, and packaging remain.
 
 ### Options
 
@@ -792,7 +792,7 @@ including types resolved from a project's classpath and `[dependencies]`; generi
 inference and richer bytecode decompilation (loop `break`/`continue`, try-with-resources) are
 still open. Both dependency paths are implemented: the transitive JALS `path`/`git`
 source-project graph, and Maven-coordinate (`group:artifact:version`) POM/version resolution with
-a `jals.lock` lockfile. POM exclusions/classifiers, `jals fetch`/`tree`, and packaging remain on
+a `jals.lock` lockfile. POM exclusions, `jals fetch`/`tree`, and packaging remain on
 the build [roadmap](jals-build/README.md#roadmap).
 
 ## License
