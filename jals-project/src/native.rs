@@ -96,7 +96,12 @@ impl NativeProjectAssembly {
     /// channels and the classpath's are one report, and a host reading either alone reports half of
     /// what the procedure said.
     pub fn report(&self) -> ProjectReport<'_> {
-        ProjectReport::new(&self.warnings, &self.errors, &self.inputs.warnings)
+        ProjectReport::new(
+            &self.warnings,
+            &self.errors,
+            &self.inputs.warnings,
+            &self.inputs.errors,
+        )
     }
 }
 

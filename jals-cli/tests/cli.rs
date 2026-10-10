@@ -1369,6 +1369,71 @@ fn registry_dependency_reaches_javac_classpath() {
     );
 }
 
+/// A registry dependency that cannot resolve stops a build before any compiler runs — the
+/// failure must be the resolution error itself, not a mountain of javac `cannot find symbol`s —
+/// while `jals lint` stays usable and reports the same condition as a warning.
+#[test]
+fn unresolvable_registry_dependency_stops_build_before_javac() {
+    let dir = tempdir().unwrap();
+    // The registry serves nothing: every POM request is a 404.
+    let registry = FixtureRegistry::start(&[]);
+    let source = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("Main.java"),
+        "package com.example;\npublic class Main {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        format!(
+            "[package]\nname = \"registry-broken\"\n\
+             [registries.local]\nurl = \"{}\"\n\
+             [dependencies]\n\"com.example:missing\" = {{ version = \"=1.0.0\", registry = \"local\" }}\n",
+            registry.base
+        ),
+    )
+    .unwrap();
+    let manifest = dir.path().join("jals.toml");
+
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "the build must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("registry dependencies could not be resolved"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("error[classpath-input]"),
+        "the failure is an error diagnostic: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.is_empty(),
+        "no compiler command is printed: {stdout}"
+    );
+
+    let output = jals()
+        .args(["lint"])
+        .arg(source.join("Main.java"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "lint still succeeds: {stderr}");
+    assert!(
+        stderr.contains("warning[classpath-input]"),
+        "lint keeps the warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("registry dependencies could not be resolved"),
+        "lint names the failure: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn dependency_classpath_directory_is_passed_once_instead_of_member_classes() {

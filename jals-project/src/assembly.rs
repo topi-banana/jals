@@ -423,15 +423,20 @@ pub struct MemoryProjectAssembly {
 impl MemoryProjectAssembly {
     /// Everything this assembly reported, in one value.
     ///
-    /// The three channels are not separately readable. The graph's warnings and errors sit here,
-    /// the classpath's input warnings sit inside `inputs`, and a host that reached for the first
-    /// two alone silently dropped the third — which is how an unreadable jar became something only
-    /// a server's stderr ever mentioned. [`ProjectDiagnostics::assemble`] takes this, so there is
-    /// nothing left to forget.
+    /// The four channels are not separately readable. The graph's warnings and errors sit here,
+    /// the classpath's input warnings and errors sit inside `inputs`, and a host that reached for
+    /// the first two alone silently dropped the third — which is how an unreadable jar became
+    /// something only a server's stderr ever mentioned. [`ProjectDiagnostics::assemble`] takes
+    /// this, so there is nothing left to forget.
     ///
     /// [`ProjectDiagnostics::assemble`]: crate::ProjectDiagnostics::assemble
     pub fn report(&self) -> ProjectReport<'_> {
-        ProjectReport::new(&self.warnings, &self.errors, &self.inputs.warnings)
+        ProjectReport::new(
+            &self.warnings,
+            &self.errors,
+            &self.inputs.warnings,
+            &self.inputs.errors,
+        )
     }
 }
 
