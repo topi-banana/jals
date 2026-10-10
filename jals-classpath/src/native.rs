@@ -37,7 +37,7 @@ use crate::maven::{ArtifactType, Coordinate, MavenProvider};
 use crate::{
     ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, FetchError, Fetcher,
     LibrarySource, NetworkPolicy, ProjectInputOptions, ProjectInputPlan, ProjectInputs,
-    RetrySchedule, Warning, WarningOrigin,
+    RegistryStatus, RetrySchedule, Warning, WarningOrigin,
 };
 
 /// The lock a host reads before registry resolution and receives back afterwards.
@@ -731,6 +731,9 @@ pub struct NativeProjectPlan {
     /// input is reported as a warning: a diagnostics pass and an editor are expected to keep
     /// working over a project whose dependencies cannot resolve, offline included.
     errors: Vec<Warning>,
+    /// What this lowering declared per dependency form and what resolution answered, for the
+    /// assembled inputs to report.
+    registry_status: RegistryStatus,
     git_dependencies: Vec<(Name, GitDependency)>,
     /// `path` dependencies outside the project root, resolved against the host filesystem by
     /// [`materialize_path_sources`](Self::materialize_path_sources).
@@ -795,6 +798,7 @@ impl NativeProjectPlan {
         native.warnings.append(&mut inputs.warnings);
         inputs.warnings = native.warnings;
         inputs.errors = native.errors;
+        inputs.registry_status = native.registry_status;
         (inputs, native.source_roots)
     }
 
@@ -885,6 +889,11 @@ impl NativeProjectPlan {
             ));
         }
         registry.warnings.extend(graphs.warnings);
+        // What the resolver answered for the selection: jars the compile classpath can carry and
+        // artifacts (`tar.gz` native bundles) it cannot. Declared counts are the manifest's and
+        // are gathered by the host that reports the line.
+        self.registry_status.jars = graphs.specs.len();
+        self.registry_status.artifacts = graphs.artifacts.len();
         // Non-jar artifacts (a `tar.gz` native bundle) are acquired through the same verified
         // path as the jars but never become classpath entries; they ride the plan's auxiliary
         // half, which `ProjectInputs::assemble` downloads beside the dependencies.
@@ -915,6 +924,7 @@ impl NativeProjectPlan {
             source_roots: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            registry_status: RegistryStatus::default(),
             git_dependencies: Vec::new(),
             path_dependencies: Vec::new(),
             registry_dependencies: Vec::new(),
