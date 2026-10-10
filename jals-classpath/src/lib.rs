@@ -58,7 +58,8 @@ pub use native::{
 };
 #[cfg(feature = "archive")]
 pub use project::{
-    MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile,
+    MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan, ProjectInputs, RegistryStatus,
+    SourceFile,
 };
 #[cfg(feature = "archive")]
 pub use remap::{JarMerge, JarRemap, JarTransforms, NestedJar, RemapRequest};

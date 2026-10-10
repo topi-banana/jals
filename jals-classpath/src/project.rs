@@ -160,6 +160,26 @@ pub enum SourceFile {
     Artifact(LibrarySource),
 }
 
+/// What registry resolution answered for one selection, for a host that reports it.
+///
+/// The manifest declares only a coordinate and a version; whether the artifact that came back is a
+/// classpath jar or a fetched-only artifact (a POM's non-jar `<type>`) is what resolution knows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryStatus {
+    /// Selected registry artifacts that are classpath jars.
+    pub jars: usize,
+    /// Selected registry artifacts fetched and locked but not classpath entries (a `tar.gz`
+    /// native bundle).
+    pub artifacts: usize,
+}
+
+impl RegistryStatus {
+    /// Selected registry packages the resolver answered for, jars and non-jars together.
+    pub const fn resolved(&self) -> usize {
+        self.jars + self.artifacts
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ProjectInputs {
     pub dependency_jars: Vec<CacheKey>,
@@ -176,6 +196,9 @@ pub struct ProjectInputs {
     /// incomplete in the way the caller's own purpose cannot tolerate. A `Compile` lowering is the
     /// only producer today: `Analysis` and `Editor` report the same condition as a warning.
     pub errors: Vec<Warning>,
+    /// What registry resolution answered for this selection, for a host that reports each
+    /// dependency form's fate.
+    pub registry_status: RegistryStatus,
 }
 
 impl ProjectInputs {
@@ -400,6 +423,9 @@ impl ProjectInputs {
             // `ProjectInputs::assemble` has no failing step of its own — everything it can
             // recover from is a warning — so the caller fills this from its lowering state.
             errors: Vec::new(),
+            // Filled by the caller too: only a lowering knows what it declared and what the
+            // resolver answered.
+            registry_status: RegistryStatus::default(),
         }
     }
 }

@@ -771,6 +771,10 @@ url = "https://repo.test/maven2"
         1,
         "the tar.gz was fetched into the verified cache"
     );
+    let status = &inputs.registry_status;
+    assert_eq!(status.jars, 1);
+    assert_eq!(status.artifacts, 1);
+    assert_eq!(status.resolved(), 2);
     let seen = fetcher.seen.borrow();
     assert!(
         seen.iter()
@@ -864,6 +868,8 @@ url = "https://repo.test/maven2"
         3,
         "the classified jar and the `-tests` jar are classpath entries too"
     );
+    assert_eq!(inputs.registry_status.jars, 3);
+    assert_eq!(inputs.registry_status.artifacts, 0);
     let seen = fetcher.seen.borrow();
     assert!(
         seen.iter()

@@ -2957,6 +2957,19 @@ impl App {
             return Err(anyhow!("the project could not be assembled"));
         }
 
+        // One line about what each declared dependency form contributed, before the compile
+        // starts. `Compile` only: an analysis pass resolves the same inputs for a reader rather
+        // than a compiler, where "not on the compile classpath" is the expected state.
+        if options == jals_classpath::ProjectInputOptions::Compile {
+            Self::report_dependency_status(
+                shell,
+                manifest,
+                scope,
+                scripts.features,
+                &assembly.inputs.registry_status,
+            );
+        }
+
         // The two halves are in hand here and nowhere else: `ProjectInputs` single-sources the
         // declared jars for every host, and the assembly states which archives the scripts added.
         // This is therefore also the only place the duplicates between them can be dropped.
@@ -3034,6 +3047,76 @@ impl App {
         result.classpath_classes = assembly.inputs.classpath_classes;
         result.feature_set = assembly.inputs.feature_set;
         Ok(result)
+    }
+
+    /// One status line about what each declared dependency form contributed to this compile.
+    ///
+    /// The forms answer different questions — `registry` and `jar` entries reach the compile
+    /// classpath, `git`/`path` entries contribute sources, and a registry artifact whose POM named
+    /// a non-jar `<type>` is fetched and locked but is not a classpath entry — so the line says
+    /// what happened per form instead of leaving a reader to infer it from warnings. Declared forms
+    /// come from the manifest (`jar`/`git`/`path` entries are graph nodes, so only the manifest has
+    /// their count); the registry half is what resolution answered. A project that declared none
+    /// prints nothing; the line is quiet-safe narration on stderr.
+    fn report_dependency_status(
+        shell: &Shell,
+        manifest: &Manifest,
+        scope: DependencyScope,
+        features: &ResolvedBuildFeatures,
+        registry: &jals_classpath::RegistryStatus,
+    ) {
+        let plural = |count: usize, singular: &str| {
+            if count == 1 {
+                singular.to_owned()
+            } else {
+                format!("{singular}s")
+            }
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if registry.jars > 0 {
+            parts.push(format!(
+                "{} registry on the compile classpath",
+                registry.jars
+            ));
+        }
+        if registry.artifacts > 0 {
+            parts.push(format!(
+                "{} registry {} not on the compile classpath",
+                registry.artifacts,
+                plural(registry.artifacts, "artifact")
+            ));
+        }
+        let (mut jars, mut git_sources, mut path_sources) = (0usize, 0usize, 0usize);
+        for (_, dependency) in manifest.active_dependencies(scope, features) {
+            match dependency {
+                Dependency::Jar(_) => jars += 1,
+                Dependency::Git(_) => git_sources += 1,
+                Dependency::Path(_) => path_sources += 1,
+                Dependency::Wasm(_) | Dependency::Registry(_) | Dependency::RegistryVersion(_) => {}
+            }
+        }
+        if jars > 0 {
+            parts.push(format!("{jars} jar on the compile classpath"));
+        }
+        if git_sources > 0 {
+            parts.push(format!(
+                "{git_sources} git {}",
+                plural(git_sources, "source")
+            ));
+        }
+        if path_sources > 0 {
+            parts.push(format!(
+                "{path_sources} path {}",
+                plural(path_sources, "source")
+            ));
+        }
+        if parts.is_empty() {
+            return;
+        }
+        shell.status(
+            Verb::Resolving,
+            format_args!("dependencies: {}", parts.join(", ")),
+        );
     }
 
     /// Read `jals.lock` beside the root manifest, when the host has one.

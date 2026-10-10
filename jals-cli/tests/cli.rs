@@ -1434,6 +1434,112 @@ fn unresolvable_registry_dependency_stops_build_before_javac() {
     );
 }
 
+/// Every declared dependency form is named with what it contributed: which entries reached the
+/// compile classpath and which did not. The line is stderr narration, so `--dry-run`'s stdout
+/// stays exactly the compiler command.
+#[test]
+fn build_reports_each_dependency_forms_classpath_state() {
+    let dir = tempdir().unwrap();
+    let (lib_jar, direct_jar) = fixture_jars(dir.path());
+    let files: [(&str, &[u8]); 7] = [
+        (
+            "/com/example/lib/maven-metadata.xml",
+            br"<metadata><versioning><versions><version>1.0.0</version></versions></versioning></metadata>",
+        ),
+        (
+            "/com/example/lib/1.0.0/lib-1.0.0.pom",
+            br"<project>
+              <groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0.0</version>
+              <dependencies>
+                <dependency><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></dependency>
+                <dependency><groupId>com.example</groupId><artifactId>native-bin</artifactId><version>19.3.6</version><type>tar.gz</type></dependency>
+              </dependencies>
+            </project>",
+        ),
+        (
+            "/com/example/direct/2.0.0/direct-2.0.0.pom",
+            br"<project><groupId>com.example</groupId><artifactId>direct</artifactId><version>2.0.0</version></project>",
+        ),
+        (
+            "/com/example/native-bin/19.3.6/native-bin-19.3.6.pom",
+            br"<project><groupId>com.example</groupId><artifactId>native-bin</artifactId><version>19.3.6</version></project>",
+        ),
+        ("/com/example/lib/1.0.0/lib-1.0.0.jar", lib_jar.as_slice()),
+        (
+            "/com/example/direct/2.0.0/direct-2.0.0.jar",
+            direct_jar.as_slice(),
+        ),
+        (
+            "/com/example/native-bin/19.3.6/native-bin-19.3.6.tar.gz",
+            b"native-tarball",
+        ),
+    ];
+    let registry = FixtureRegistry::start(&files);
+
+    std::fs::create_dir_all(dir.path().join("libs")).unwrap();
+    std::fs::write(dir.path().join("libs/legacy.jar"), b"legacy").unwrap();
+    let child = dir.path().join("child/src/main/java/pkg");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(
+        child.join("Child.java"),
+        "package pkg;\npublic class Child {}\n",
+    )
+    .unwrap();
+    let source = dir.path().join("src/main/java/app");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("Main.java"),
+        "package app;\npublic class Main {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        format!(
+            "[package]\nname = \"status-consumer\"\n\
+             [registries.local]\nurl = \"{}\"\n\
+             [dependencies]\n\
+             \"com.example:lib\" = {{ version = \"=1.0.0\", registry = \"local\" }}\n\
+             legacy = {{ jar = \"libs/legacy.jar\" }}\n\
+             child = {{ path = \"child\" }}\n",
+            registry.base
+        ),
+    )
+    .unwrap();
+    let manifest = dir.path().join("jals.toml");
+
+    let output = jals()
+        .args(["build", "--dry-run", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        "2 registry on the compile classpath",
+        "1 registry artifact not on the compile classpath",
+        "1 jar on the compile classpath",
+        "1 path source",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing `{expected}` in: {stderr}"
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        names_javac(&stdout),
+        "the preview is still the compile command: {stdout}"
+    );
+    assert!(
+        !stdout.contains("compile classpath"),
+        "the summary is stderr narration: {stdout}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn dependency_classpath_directory_is_passed_once_instead_of_member_classes() {
