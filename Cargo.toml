@@ -163,7 +163,7 @@ walkdir = { version = "2" }
 # Dev-only: jals-classpath reads jars through its own portable zip reader; the `zip` crate remains
 # solely to write test fixtures and cross-verify that reader. `deflate` is the only compression
 # jars use.
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
