@@ -48,10 +48,10 @@
 //!
 //! `$JAVA_HOME/lib/ct.sym` is the signature data `javac --release` reads: an ordinary zip of
 //! ordinary class files with their method bodies stripped. Lowering it into a
-//! [`LoweredClasspath`] gives the analysis the real JDK's own signatures, which is what the
-//! product does through `jals-classpath` when it compiles against a real dependency. Reading it
-//! needs a host path, which is why this lives in a test harness — `jals-javac`'s stdlib oracle
-//! reads the same file for the same reason.
+//! [`LoweredClasspath`] gives the analysis the real JDK's own signatures. The archive is read by
+//! `jals_build::PlatformClasses` — the same reader `jals lint`, the language server, and the
+//! in-process backend fold in — so a corpus case resolves `java.lang.Object` against the signature
+//! the product resolves it against, and a gap here is a gap there.
 //!
 //! # Pin
 //!
@@ -63,7 +63,6 @@
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use jals_classfile::ClassFile;
 use jals_hir::{FileAnalysis, FileId, LoweredClasspath, ProjectIndex};
@@ -82,14 +81,6 @@ const MAJOR_JAVA_25: u16 = 69;
 /// different measurement, in the same way a formatter similarity is only defined against a pinned
 /// release (`jals-fmt/DESIGN.md` §7.1).
 pub const JAVAC_PIN: &str = "25";
-
-/// The `ct.sym` modules whose signatures the corpus resolves against.
-///
-/// `java.*` is the platform proper. `jdk.compiler` is here because langtools' own tests routinely
-/// import `com.sun.source.*` — those files compile alone under javac, so excluding the module
-/// would move them from "the compiler could not lower this" to "the harness never showed it the
-/// types", which is exactly the confusion the real classpath exists to prevent.
-const CLASSPATH_MODULES: &[&str] = &["java.", "jdk.compiler"];
 
 /// A named compiler corpus, rooted at a path relative to the `sources/` directory.
 pub struct CompileSource {
@@ -129,104 +120,33 @@ impl Jdk {
     /// The running JDK, asked of the JVM itself.
     ///
     /// `$JAVA_HOME` is routinely unset even where a JDK is installed, so it is not consulted;
-    /// asking the JVM for `java.home` works whenever `java` is on `PATH` at all.
+    /// asking the JVM for `java.home` works whenever `java` is on `PATH` at all. Discovery lives in
+    /// `jals-build` beside the toolchain it belongs to — this harness wants the JDK its pinned
+    /// `javac` is, which is a different question from which JDK a *project* resolves to.
     pub fn detect() -> Option<Self> {
-        let output = Command::new("java")
-            .args(["-XshowSettings:properties", "-version"])
-            .output()
-            .ok()?;
-        // The settings dump goes to stderr, one `  name = value` per line.
-        let text = String::from_utf8_lossy(&output.stderr).into_owned();
-        let property = |name: &str| {
-            text.lines()
-                .filter_map(|line| line.split_once('='))
-                .find(|(key, _)| key.trim() == name)
-                .map(|(_, value)| value.trim().to_owned())
-        };
-        let home = PathBuf::from(property("java.home")?);
-        let version = property("java.specification.version")?.parse().ok()?;
+        let (home, version) =
+            jals_exec::block_on_inline(jals_build::PlatformClasses::detect_running())?;
         Some(Self { home, version })
     }
 
-    /// The letter `ct.sym` files a release under: `8` and `9` are themselves, then `A` is 10, `B`
-    /// is 11, and so on. A directory name is a *set* of these (`MNOP` covers 22 through 25), so an
-    /// entry belongs to a release when its first path segment contains that release's letter.
-    fn release_letter(version: u32) -> Option<char> {
-        match version {
-            8 | 9 => char::from_digit(version, 10),
-            10.. => char::from_u32('A' as u32 + (version - 10)),
-            _ => None,
-        }
-    }
-
-    /// Whether a `ct.sym` entry is a signature this corpus resolves against.
-    ///
-    /// Entries are named `<releases>/<module>/<package>/<Class>.sig`, where `<releases>` is the set
-    /// of release letters the signature is valid for.
-    fn is_wanted_signature(entry: &str, release: char) -> bool {
-        let Some((releases, rest)) = entry.split_once('/') else {
-            return false;
-        };
-        let Some((module, class_path)) = rest.split_once('/') else {
-            return false;
-        };
-        releases.contains(release)
-            && class_path.ends_with(".sig")
-            && CLASSPATH_MODULES
-                .iter()
-                .any(|wanted| module.starts_with(wanted))
-    }
-
     /// Lower this JDK's own signatures into the classpath the corpus resolves against.
+    ///
+    /// The archive read is `jals_build::PlatformClasses`'s, shared with `jals lint`, the language
+    /// server, and the in-process backend — so a corpus case resolves `java.lang.Object` against
+    /// the same signature those do, and a gap here is a gap there.
     ///
     /// # Errors
     /// If `ct.sym` is missing or unreadable — a JDK that ships no `ct.sym` (a JRE, or a stripped
     /// image) cannot supply the classpath, and silently falling back to the embedded stubs would
     /// report stub coverage under this harness's name.
     pub fn classpath(&self) -> Result<(LoweredClasspath, usize), String> {
-        let release = Self::release_letter(self.version)
-            .ok_or_else(|| format!("JDK {} has no ct.sym release letter", self.version))?;
-        let path = self.home.join("lib").join("ct.sym");
-        let file =
-            std::fs::File::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| format!("{} is not a zip: {e}", path.display()))?;
-
-        let mut classes = Vec::new();
-        for index in 0..archive.len() {
-            let Ok(mut entry) = archive.by_index(index) else {
-                continue;
-            };
-            let Some(name) = entry.enclosed_name() else {
-                continue;
-            };
-            let name = name.to_string_lossy().replace('\\', "/");
-            if !Self::is_wanted_signature(&name, release) {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            if std::io::Read::read_to_end(&mut entry, &mut bytes).is_err() {
-                continue;
-            }
-            // A signature entry this workspace's own reader cannot parse is a `jals-classfile`
-            // gap, but it is not this harness's subject: one missing type shows up downstream as
-            // the cases that needed it, which is the honest place for it to surface.
-            if let Ok(class) = jals_exec::block_on_inline(ClassFile::read(bytes.as_slice())) {
-                classes.push(class);
-            }
-        }
-        if classes.is_empty() {
-            return Err(format!(
-                "{} holds no signatures for release {release} — is this JDK {}?",
-                path.display(),
-                self.version
-            ));
-        }
+        let classes =
+            jals_exec::block_on_inline(jals_build::PlatformClasses::read(&self.home, self.version))
+                .map_err(|error| error.to_string())?;
         let count = classes.len();
-        Ok((
-            jals_exec::block_on_inline(ProjectIndex::lower_classpath(&classes)),
-            count,
-        ))
+        let lowered =
+            jals_exec::block_on_inline(ProjectIndex::lower_classpath(&classes.into_classes()));
+        Ok((lowered, count))
     }
 
     /// `javac <version>` — what a corpus and the rate scored over it are defined by.

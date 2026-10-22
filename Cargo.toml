@@ -160,9 +160,11 @@ ungrammar = { version = "1.16" }
 unicode-properties = { version = "=0.1.4" }
 unicode-width = { version = "0.2.1" }
 walkdir = { version = "2" }
-# Dev-only: jals-classpath reads jars through its own portable zip reader; the `zip` crate remains
-# solely to write test fixtures and cross-verify that reader. `deflate` is the only compression
-# jars use.
+# Host-side archive decoding and fixture writing. `jals-classpath` reads jars through its own
+# portable `no_std` zip reader; this crate is what a *host adapter* reaches for when it has to read
+# an archive once and never cross the `no_std` seam — `jals toolchain`'s JDK zips, `jals-build`'s
+# `lib/ct.sym` — plus the test fixtures that cross-verify the in-house reader. `deflate` is the
+# only compression jars use.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [workspace.lints.clippy]

@@ -718,6 +718,7 @@ fn compile_against_packages(
         progress: &jals_progress::Progress::SILENT,
         tree: &tree,
         classpath: &[],
+        platform_classes: &[],
         libraries,
         options: &options,
     };

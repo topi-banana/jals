@@ -32,6 +32,10 @@ ignores:
   - 'jals-build/src/invocation.rs'
   - 'jals-build/src/toolchain.rs'
   - 'jals-build/src/builtin.rs'
+  # Reads `$JAVA_HOME/lib/ct.sym`, the archive `javac --release` keeps the platform's type
+  # signatures in: a host path plus a zip walk, on exactly the same footing as `jals toolchain`'s
+  # JDK archives. `native`-gated; what it produces is portable `ClassFile`s.
+  - 'jals-build/src/platform.rs'
   # Writes a frontend's lowered tree to disk so `javac` can read it — the one place cache keys
   # become host paths. `native`-gated; the `Backend` trait it feeds stays portable.
   - 'jals-build/src/staging.rs'

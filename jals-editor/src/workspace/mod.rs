@@ -295,16 +295,39 @@ impl ProjectLayout {
         }
     }
 
-    /// Lower `classes` into this layout's [`classpath`](Self::classpath).
+    /// Lower `classes` into this layout's [`classpath`](Self::classpath), after whatever is already
+    /// there.
     ///
     /// The field stays public — a host that already holds a [`LoweredClasspath`] still assigns it,
     /// and the browser replaces one later through [`Workspace::set_classpath`]. This exists so a
     /// host that holds only the `.class` files does not have to name `jals-hir` to describe its
     /// own project: lowering is the one thing every such host was doing identically, and it is the
     /// last reason `jals lint` had to depend on the analysis crate at all.
+    ///
+    /// Appending rather than assigning so it composes with [`with_platform`](Self::with_platform):
+    /// the index keeps the *first* registration of a fully-qualified name, so which of two class
+    /// sources wins is the order they are folded in — and that order is decided in exactly one
+    /// place, here, rather than by the order a host happens to chain its builder calls in.
     #[must_use]
     pub async fn with_classpath(mut self, classes: &[jals_classfile::ClassFile]) -> Self {
-        self.classpath = ProjectIndex::lower_classpath(classes).await;
+        self.classpath
+            .append(ProjectIndex::lower_classpath(classes).await);
+        self
+    }
+
+    /// Fold the JDK's own signatures in **ahead of** [`classpath`](Self::classpath).
+    ///
+    /// `javac` resolves a platform type before it looks at a jar, and an analysis that resolved
+    /// `java.lang.Object` out of a dependency jar instead would be answering a different question
+    /// than the compile does. The order is decided *here* rather than by the order a host chains its
+    /// builder calls in, so `with_platform` and `with_classpath` commute: a host cannot get the
+    /// priority wrong by writing the two calls the other way round. Called twice, the second call
+    /// still ends up in front — there is one platform and this is where it goes.
+    #[must_use]
+    pub async fn with_platform(mut self, classes: &[jals_classfile::ClassFile]) -> Self {
+        let mut platform = ProjectIndex::lower_classpath(classes).await;
+        platform.append(core::mem::take(&mut self.classpath));
+        self.classpath = platform;
         self
     }
 }
