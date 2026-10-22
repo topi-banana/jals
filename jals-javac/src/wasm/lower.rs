@@ -5853,7 +5853,8 @@ impl Lowering<'_> {
 
     fn literal(&mut self, literal: &ast::Literal, insn: &mut Insn) -> Result<ValType> {
         use jals_syntax::SyntaxKind::{
-            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, STRING_LITERAL, TRUE_KW,
+            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, STRING_LITERAL,
+            TEXT_BLOCK, TRUE_KW,
         };
         let token = literal
             .token()
@@ -5866,7 +5867,7 @@ impl Lowering<'_> {
         // A string literal is not a value the target holds: it is a `String` object built at run
         // time from a `char[]` compiled into the module. So it too is answered before `ty_of`,
         // which would refuse the `String` type itself rather than the operation that builds one.
-        if token.kind() == STRING_LITERAL {
+        if matches!(token.kind(), STRING_LITERAL | TEXT_BLOCK) {
             return self.string_literal(literal.syntax(), token.text(), insn);
         }
         let ty = self.ty_of(literal.syntax())?;
