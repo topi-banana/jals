@@ -460,12 +460,37 @@ fn an_annotated_private_member_is_not_flagged() {
 
 #[test]
 fn the_serialization_members_are_not_flagged() {
-    // The one line that is reported comes from `naming-convention`: the name is the serialization
-    // contract's, not the author's, and that is a separate rule's quarrel with the JDK.
+    // Nothing is reported at all now: the name is the serialization contract's, not the author's,
+    // and `java.io.Serializable` reaches the field through reflection under exactly that spelling.
     check(
         "class Foo { private static final long serialVersionUID = 1L; private Object writeReplace() { return this; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn only_the_serialization_contracts_serial_version_uid_is_excepted() {
+    // The exception is the whole declaration and not the name. `static final int` is not the field
+    // the contract looks for, and neither is a boxed one — both stay checked, so a project that
+    // spells one of *those* `serialVersionUID` still hears about it.
+    check(
+        "class Foo { private static final int serialVersionUID = 1; }",
+        expect![[r"
+            naming-convention:37..53: constant name `serialVersionUID` should be UPPER_SNAKE_CASE
+        "]],
+    );
+    check(
+        "class Foo { private static final Long serialVersionUID = 1L; }",
         expect![[r"
             naming-convention:38..54: constant name `serialVersionUID` should be UPPER_SNAKE_CASE
+        "]],
+    );
+    // The other serialization members keep their ordinary reading, so the exemption is not a name
+    // on a list.
+    check(
+        "class Foo { private static final long serialPersistentFields = 1L; }",
+        expect![[r"
+            naming-convention:38..60: constant name `serialPersistentFields` should be UPPER_SNAKE_CASE
         "]],
     );
 }
