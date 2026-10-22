@@ -219,3 +219,87 @@ fn unresolved_types_reports_only_genuine_unknowns() {
     // to slice it back out of the source to word the diagnostic.
     assert_eq!(&srcs[0][found[0].range.clone()], found[0].name);
 }
+
+#[test]
+fn an_inherited_member_type_resolves_by_simple_name() {
+    // The Guava shape, reduced: `LocalCache implements ConcurrentMap` writes `Entry<K, V>` and
+    // means `Map.Entry`, because `Entry` is a type a supertype declares and is in scope under its
+    // simple name (JLS §6.5.5.1).
+    check(
+        &[
+            "package p; interface Base { class Cell { } }",
+            "package p; class Impl implements Base { Cell c; }",
+        ],
+        expect![[r"
+            file1: Base -> project `p.Base` @file0
+            file1: Cell -> project `p.Base.Cell` @file0
+        "]],
+    );
+}
+
+#[test]
+fn an_inherited_member_type_resolves_when_the_name_is_qualified() {
+    // `Base.Cell`, where `Cell` is inherited rather than declared by `Base` itself.
+    check(
+        &[
+            "package p; interface Grand { class Cell { } }",
+            "package p; interface Base extends Grand { }",
+            "package p; class Impl implements Base { Base.Cell c; }",
+        ],
+        expect![[r"
+            file1: Grand -> project `p.Grand` @file0
+            file2: Base -> project `p.Base` @file1
+            file2: Cell -> project `p.Grand.Cell` @file0
+        "]],
+    );
+}
+
+#[test]
+fn a_nested_class_of_a_superclass_resolves_in_a_new_expression() {
+    // `AbstractSetMultimap`'s `new WrappedSet(...)`: the class is declared by the superclass, so
+    // the unqualified name has to find it through the chain.
+    check(
+        &[
+            "package p; class Base { class Wrap { } }",
+            "package p; class Impl extends Base { Wrap w = new Wrap(); }",
+        ],
+        expect![[r"
+            file1: Base -> project `p.Base` @file0
+            file1: Wrap -> project `p.Base.Wrap` @file0
+            file1: Wrap -> project `p.Base.Wrap` @file0
+        "]],
+    );
+}
+
+#[test]
+fn a_declared_nested_type_wins_over_an_inherited_one() {
+    // Two candidates are not a case this crate rejects; the one the file itself wrote is the one a
+    // reader means.
+    check(
+        &[
+            "package p; class Base { class Cell { } }",
+            "package p; class Impl extends Base { class Cell { } Cell c; }",
+        ],
+        expect![[r"
+            file1: Base -> project `p.Base` @file0
+            file1: Cell -> local Class `Cell`
+        "]],
+    );
+}
+
+#[test]
+fn an_unresolvable_name_in_a_cyclic_hierarchy_is_unresolved_and_not_a_hang() {
+    // `walk_supertypes` visits each type once, so a cycle terminates — the visited set is what
+    // keeps a supertype walk from wedging a current-thread runtime or overflowing the stack.
+    check(
+        &[
+            "package p; class A extends B { Nope n; }",
+            "package p; class B extends A { }",
+        ],
+        expect![[r"
+            file0: B -> project `p.B` @file1
+            file0: Nope -> unresolved
+            file1: A -> project `p.A` @file0
+        "]],
+    );
+}
