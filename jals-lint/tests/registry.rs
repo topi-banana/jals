@@ -120,6 +120,7 @@ fn variant(section: &str, rule: &str, key: &str) -> Value {
 fn all_enabled() -> Config {
     let mut config = Config::default().with_features(FeatureSet::resolve(&[Feature::Java25]));
     config.restriction.print_to_console.level = LintLevel::Warn;
+    config.restriction.implicit_this.level = LintLevel::Warn;
     config
 }
 
@@ -206,7 +207,6 @@ fn the_default_config_enables_exactly_these_rules() {
             "dead-code",
             "empty-catch",
             "empty-javadoc",
-            "implicit-this",
             "missing-braces",
             "naming-convention",
             "nullness-mismatch",
@@ -217,7 +217,10 @@ fn the_default_config_enables_exactly_these_rules() {
             "wildcard-import",
         ]
     );
-    assert_eq!(level_of(LintLevel::Allow), ["print-to-console"]);
+    assert_eq!(
+        level_of(LintLevel::Allow),
+        ["implicit-this", "print-to-console"]
+    );
 }
 
 #[test]
