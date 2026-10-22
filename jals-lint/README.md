@@ -108,6 +108,15 @@ silent, and each is a **false negative** rather than a guess:
   else, and `jals_syntax::CfgMap` is conditional compilation rather than control flow.
 - **A conditional.** `cond ? find() : "x"` is unknown even with a nullable arm: a reader sees a
   guarded expression, and reporting the arm would be the false positive this scope avoids.
+
+One narrowing the rule *does* do, and it needs no control-flow layer at all: both arms of a
+conditional are lexically inside the scope of the test that selects them, so `a == null ? … : …`
+says which arm holds a null `a` and which holds a non-null one. It reaches expressions **inside**
+an arm as well as the arm itself — `a == null ? null : checkNotNull(doForward(a))` does not report
+the `a` reaching `doForward`, and `a == null ? use(a) : x` does report the one reaching `use`. The
+subject is matched by spelling (an unqualified name or a field access), so `this.a` and `a` are
+different spellings and no narrowing happens: a report this rule would rather miss than invent. An
+`if (x != null)` guard is still out of reach, for the reason the dereference bullet gives.
 - **A member the index read no annotations for.** An embedded stub carries none and a class file's
   are decoded but not yet lowered, so for those two an empty annotation list means *nobody looked*
   rather than *the author wrote none*. Reading it the other way would report `map.put(k, null)`.
