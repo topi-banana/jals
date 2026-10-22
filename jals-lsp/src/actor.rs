@@ -201,6 +201,9 @@ pub(crate) struct AssembledWorkspace {
     source_filters: BTreeMap<DirKey, jals_config::SourceFilter>,
     project_sources: Vec<FileKey>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
+    /// The JDK's own type signatures for the release this project compiles to, folded into the
+    /// analysis index ahead of [`classpath_classes`](Self::classpath_classes).
+    platform_classes: Vec<jals_classfile::ClassFile>,
     feature_set: FeatureSet,
     /// The root's resolved build features under the client's [`FeatureSelection`] — what each
     /// project file's `#[cfg(feature = "…")]` evaluates against when the `attributes` dialect
@@ -1111,6 +1114,7 @@ impl Actor {
             source_filters,
             project_sources,
             classpath_classes,
+            platform_classes,
             feature_set,
             build_features,
             library_sources,
@@ -1145,6 +1149,7 @@ impl Actor {
             source_roots,
             source_filters,
             project_sources,
+            &platform_classes,
             &classpath_classes,
             library_sources,
             source_dep_sources,
@@ -2059,12 +2064,26 @@ impl AssembledWorkspace {
             build_script_watch,
             &watch_paths,
         );
+        // The JDK's own signatures, from the same reader `jals lint` uses — so a diagnostic the
+        // server publishes and one the CLI prints resolve `java.lang.Object` against the same
+        // class. The JDK is not a project-graph input, which is why it is read here and not by the
+        // assembly.
+        let platform_classes =
+            match jals_build::PlatformClasses::for_project(effective_manifest, root).await {
+                jals_build::PlatformSelection::Available(classes) => classes.into_classes(),
+                jals_build::PlatformSelection::Absent => Vec::new(),
+                jals_build::PlatformSelection::Unreadable(error) => {
+                    eprintln!("jals-lsp: the JDK's platform signatures could not be read: {error}");
+                    Vec::new()
+                }
+            };
         Self {
             storage,
             source_roots,
             source_filters: effective_manifest.source_filters(),
             project_sources: project_sources.into_iter().collect(),
             classpath_classes: inputs.classpath_classes,
+            platform_classes,
             feature_set: inputs.feature_set,
             build_features,
             library_sources,
