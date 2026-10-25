@@ -80,7 +80,6 @@ impl std::error::Error for PlatformError {}
 #[derive(Debug, Default)]
 pub struct PlatformClasses {
     classes: Vec<ClassFile>,
-    release: u32,
 }
 
 /// What [`PlatformClasses::for_project`] found on this host.
@@ -107,7 +106,7 @@ impl PlatformClasses {
     /// A directory name inside the archive is a *set* of these letters (`MNOP` covers 22 through
     /// 25), so an entry belongs to a release when its first path segment contains that release's
     /// letter.
-    pub const fn release_letter(release: u32) -> Option<char> {
+    const fn release_letter(release: u32) -> Option<char> {
         match release {
             8 | 9 => char::from_digit(release, 10),
             10.. => char::from_u32('A' as u32 + (release - 10)),
@@ -129,7 +128,7 @@ impl PlatformClasses {
                   spells the suffix lower-case — a case-insensitive match would admit a member no \
                   JDK writes"
     )]
-    pub fn is_signature_entry(entry: &str, release: char) -> bool {
+    fn is_signature_entry(entry: &str, release: char) -> bool {
         let Some((releases, rest)) = entry.split_once('/') else {
             return false;
         };
@@ -161,7 +160,7 @@ impl PlatformClasses {
     ///
     /// # Errors
     /// If `home` states no feature release, or [`read`](Self::read) cannot read its `ct.sym`.
-    pub async fn read_home(home: &Path) -> Result<Self, PlatformError> {
+    async fn read_home(home: &Path) -> Result<Self, PlatformError> {
         let home = home.to_path_buf();
         on_blocking_pool(move || {
             let release = Self::feature_release(&home).ok_or_else(|| {
@@ -288,13 +287,9 @@ impl PlatformClasses {
         .await
     }
 
-    /// The feature release these signatures were read for.
-    pub const fn release(&self) -> u32 {
-        self.release
-    }
-
     /// The decoded signatures, in archive order.
-    pub fn classes(&self) -> &[ClassFile] {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn classes(&self) -> &[ClassFile] {
         &self.classes
     }
 
@@ -304,12 +299,14 @@ impl PlatformClasses {
     }
 
     /// How many signatures were read.
+    #[allow(clippy::len_without_is_empty)]
     pub const fn len(&self) -> usize {
         self.classes.len()
     }
 
     /// Whether this JDK supplied no signatures at all (never true of a successful read).
-    pub const fn is_empty(&self) -> bool {
+    #[cfg_attr(not(test), allow(dead_code))]
+    const fn is_empty(&self) -> bool {
         self.classes.is_empty()
     }
 
@@ -348,7 +345,7 @@ impl PlatformClasses {
                 home.display()
             )));
         }
-        Ok(Self { classes, release })
+        Ok(Self { classes })
     }
 
     /// The signatures of `release` out of `lib/ct.sym`, in archive order.

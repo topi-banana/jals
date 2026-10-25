@@ -139,7 +139,7 @@ impl JdkInstall {
     /// Public because it is where a JDK's own `lib/ct.sym` lives: a host that has to read this
     /// install's platform signatures — rather than spawn its `javac` — asks for the same home the
     /// tool paths are built from, so a selection and its signatures cannot name two JDKs.
-    pub fn home(&self) -> &Path {
+    pub(crate) fn home(&self) -> &Path {
         &self.home
     }
 
