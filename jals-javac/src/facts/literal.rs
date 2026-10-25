@@ -23,6 +23,7 @@
 //! the caller states what it is being spelled *into*.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use super::{FactError, Result};
 
@@ -89,13 +90,75 @@ impl Literal {
             .unwrap_or(open)
     }
 
-    /// A string / char literal's value, with its quotes stripped and escapes resolved.
+    /// A string, char, or text block literal's value: its quotes stripped, escapes resolved, and —
+    /// for a text block — its incidental white space removed.
+    ///
+    /// One entry point for all three, so a caller dispatching on the token kind still cannot get a
+    /// different string out of the same bytes. A text block is not a string literal with three
+    /// quotes: JLS §3.13.2 normalizes every line terminator to `\n`, drops the opening delimiter's
+    /// line, removes the indentation every content line shares, and treats `\` before a line
+    /// terminator as a continuation — all of which happen here, before the escapes are read, in the
+    /// order the JLS states them.
     ///
     /// An escape this does not know is reported rather than approximated. Pushing the character after
     /// the backslash — the old fallback — turned `A` into `u0041` and `\101` into `101`, which is a
     /// string constant that is simply wrong, in a class file nothing downstream checks.
     pub(crate) fn text(source: &str) -> Result<String> {
-        let inner = Self::unquote(source);
+        if source.starts_with("\"\"\"") {
+            let body = source
+                .strip_prefix("\"\"\"")
+                .and_then(|open| open.strip_suffix("\"\"\""))
+                .ok_or(FactError::Unsupported(
+                    "a text block this lowering cannot read",
+                ))?;
+            return Self::unescape(&Self::strip_incidental_whitespace(body));
+        }
+        Self::unescape(Self::unquote(source))
+    }
+
+    /// A text block's content with JLS §3.13.2's line handling applied and its escapes left alone.
+    ///
+    /// Separate from [`unescape`](Self::unescape) because the two run in that order and not as one
+    /// pass: the indentation is measured over the *stripped* lines, and a `\` continuation removes
+    /// a line terminator whose following indentation is already gone by then.
+    fn strip_incidental_whitespace(body: &str) -> String {
+        let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+        let mut lines: Vec<String> = normalized.split('\n').map(String::from).collect();
+        // The content begins after the opening delimiter's line terminator, so anything on the
+        // opening line is not content at all.
+        if lines.len() > 1 {
+            lines.remove(0);
+        }
+        // A closing delimiter preceded only by white space ends the content; its line contributes
+        // the final terminator and nothing else.
+        if let Some(last) = lines.last_mut()
+            && last.chars().all(char::is_whitespace)
+        {
+            last.clear();
+        }
+        // The indentation every content line shares. A blank line shares none and is not counted,
+        // so one short line does not leave the rest of the block indented.
+        let indent = lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.chars().take_while(|c| matches!(c, ' ' | '\t')).count())
+            .min()
+            .unwrap_or(0);
+        for line in &mut lines {
+            let mut removed = 0;
+            for character in line.chars() {
+                if removed == indent || !matches!(character, ' ' | '\t') {
+                    break;
+                }
+                removed += 1;
+            }
+            *line = String::from(&line[removed..]);
+        }
+        lines.join("\n")
+    }
+
+    /// The escapes in `inner` resolved, with its quotes already off.
+    fn unescape(inner: &str) -> Result<String> {
         let unknown = || FactError::Unsupported("an escape sequence this lowering cannot read");
         let mut out = String::with_capacity(inner.len());
         let mut chars = inner.chars().peekable();
@@ -106,6 +169,10 @@ impl Literal {
             }
             match chars.next().ok_or_else(unknown)? {
                 'n' => out.push('\n'),
+                // JLS §3.13.2: a backslash before a line terminator suppresses it, which is how a
+                // long text block is continued. The indentation of the next line is already gone by
+                // the time this runs, so there is nothing left to remove.
+                '\n' => {}
                 't' => out.push('\t'),
                 'r' => out.push('\r'),
                 'b' => out.push('\u{8}'),
@@ -267,6 +334,43 @@ mod tests {
         assert_eq!(Literal::text(r#""\ud800""#), unknown);
         // Four hex digits are required; `\u00` runs out of literal first.
         assert_eq!(Literal::text(r#""\u00""#), unknown);
+    }
+
+    /// A text block is a string literal with three quotes and a JLS §3.13.2 paragraph of its own.
+    ///
+    /// The indentation every content line shares is removed, the opening delimiter's line is not
+    /// content, and every line terminator becomes `\n` — including the one the closing delimiter's
+    /// line contributes. Getting any of that wrong produces a string constant that is *plausible*,
+    /// which is the worst kind of wrong here: nothing downstream re-derives it.
+    #[test]
+    fn a_text_block_has_its_incidental_whitespace_removed() {
+        assert_eq!(
+            Literal::text("\"\"\"\n    hello\n    world\n    \"\"\""),
+            Ok("hello\nworld\n".to_owned())
+        );
+        // One short line does not leave the rest of the block indented.
+        assert_eq!(
+            Literal::text("\"\"\"\n  a\n      b\n  \"\"\""),
+            Ok("a\n    b\n".to_owned())
+        );
+        // A blank line carries no indentation and removes none.
+        assert_eq!(
+            Literal::text("\"\"\"\n    a\n\n    b\n    \"\"\""),
+            Ok("a\n\nb\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_text_block_resolves_the_same_escapes_and_one_more() {
+        assert_eq!(
+            Literal::text("\"\"\"\n    a\\nb\n    \"\"\""),
+            Ok("a\nb\n".to_owned())
+        );
+        // A backslash before a line terminator is a continuation: both go away.
+        assert_eq!(
+            Literal::text("\"\"\"\n    a \\\n    b\n    \"\"\""),
+            Ok("a b\n".to_owned())
+        );
     }
 
     /// A number the reader cannot make sense of is reported rather than approximated, for the same
