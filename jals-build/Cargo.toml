@@ -9,7 +9,7 @@ edition.workspace = true
 # Portable target/scaffold planning stays filesystem/process-free, so `--no-default-features` builds a
 # `wasm32`-compatible core a future in-browser compiler can implement.
 default = ["native"]
-native = ["jals-storage/std", "jals-exec/tokio"]
+native = ["jals-storage/std", "jals-exec/tokio", "dep:zip"]
 # The Java build-script engine: a `build.java` is compiled to WebAssembly by the in-process
 # backend, linked against the `java.base` package, and run with a budget and statement positions.
 # `wasm-run` because that is the engine, and `jals-platform` because the script's `String` and its
@@ -27,6 +27,10 @@ wasm-run = ["dep:tinywasm"]
 jals-javac = { workspace = true }
 jals-hir = { workspace = true }
 jals-syntax = { workspace = true }
+# The decoded `.class` vocabulary: `BackendRequest` carries the JDK's own signatures across the
+# portable seam as already-parsed class files, so a host that read `ct.sym` hands them over without
+# `jals-build` reaching for a path and without the host naming a `jals-hir` type.
+jals-classfile.workspace = true
 # The pure `jals.toml` model (`Manifest` and friends) lives in `jals-config`; `jals-build` adds the
 # host-only `std::path`-based resolution (`ManifestExt`) on top. `toml` remains for `ManifestError`'s
 # `toml::de::Error` field type. `jals-storage` supplies typed project keys, revisions, and the
@@ -49,6 +53,11 @@ serde_json = { version = "1.0", optional = true, default-features = false, featu
 ] }
 tinywasm = { workspace = true, optional = true }
 toml.workspace = true
+# Host-only: reads `lib/ct.sym`, the archive `javac --release` keeps the platform's type signatures
+# in. Read once on the host and never crossing a `no_std` seam, so the battle-tested decoder is the
+# right side of that line — the root manifest says the same of `jals toolchain`'s JDK archives, and
+# portable code keeps reading jars through `jals-classpath`'s in-house reader.
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 jals-exec = { workspace = true, features = ["tokio"] }

@@ -134,6 +134,15 @@ impl JdkInstall {
         }
     }
 
+    /// The JDK home directory (the parent of `bin/`).
+    ///
+    /// Public because it is where a JDK's own `lib/ct.sym` lives: a host that has to read this
+    /// install's platform signatures — rather than spawn its `javac` — asks for the same home the
+    /// tool paths are built from, so a selection and its signatures cannot name two JDKs.
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
+    }
+
     /// Whether this install satisfies a `distribution`/`version` selector. A `None` half of the
     /// selector matches anything; a named distribution is canonicalized
     /// ([`canonical_distribution`](Self::canonical_distribution)) and then matched

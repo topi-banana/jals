@@ -331,7 +331,10 @@ filesystem reads into portable interfaces.
   remembers. The `Frontend` trait is the seam for implementors; the flag sets they take are plain
   data, and `selection.rs` is the only module here that reads `jals-config`.
 - `jals-build`: portable target/scaffold planning plus native JDK/process adapters. OS arguments,
-  environment variables, and classpath separators stay in native/host code.
+  environment variables, and classpath separators stay in native/host code. `PlatformClasses` is
+  the one reader of `$JAVA_HOME/lib/ct.sym`, and every host folds what it produces into its index —
+  `jals lint`, the language server, and the in-process backend see one platform class set because
+  there is one reader and one rule for which JDK supplies it.
   - `[build] backend` selects what compiles the lowered tree: `javac` (a host process), `jals`
     (in-process, one class file per type), or `jals-wasm` (in-process, one WebAssembly module).
     Only the `javac` adapter is host-gated — `JalsBackend` is portable and builds for `wasm32` like

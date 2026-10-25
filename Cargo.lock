@@ -1143,6 +1143,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jals-build"
 version = "0.1.0"
 dependencies = [
+ "jals-classfile",
  "jals-config",
  "jals-exec",
  "jals-hir",
@@ -1157,6 +1158,7 @@ dependencies = [
  "tempfile",
  "tinywasm",
  "toml",
+ "zip",
 ]
 
 [[package]]
@@ -1465,6 +1467,7 @@ name = "jals-tests"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "jals-build",
  "jals-classfile",
  "jals-config",
  "jals-exec",
@@ -1477,7 +1480,6 @@ dependencies = [
  "tempfile",
  "toml",
  "walkdir",
- "zip",
 ]
 
 [[package]]

@@ -125,6 +125,15 @@ pub struct BackendRequest<'a> {
     pub tree: &'a [BackendSource],
     /// Resolved classpath artifacts, in manifest order.
     pub classpath: &'a [CacheKey],
+    /// The JDK platform signatures of the release the project compiles to, already decoded.
+    ///
+    /// A backend that types its sources needs to know `java.lang.Object`, and an in-process backend
+    /// has no `javac` to ask: these are the same signatures `javac --release` reads
+    /// (`jals_build::PlatformClasses`), handed over as data so the portable seam stays portable.
+    /// The `javac` adapter reads them from the JDK it spawns and ignores this; the in-process
+    /// backend indexes them *ahead of* [`classpath`](Self::classpath), exactly as `javac` resolves a
+    /// platform type before it looks at a jar. Empty when the host has no JDK to read one from.
+    pub platform_classes: &'a [jals_classfile::ClassFile],
     /// The precompiled libraries the project links against, in dependency order.
     ///
     /// Only the wasm backend reads them, and the manifest already refuses a `wasm` dependency under
@@ -521,6 +530,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &[],
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options: &options,
         };
