@@ -575,3 +575,101 @@ fn a_project_type_named_like_a_wrapper_is_not_one() {
         "package app; class Integer {} class C { void m(Integer boxed) { int n = boxed; } }";
     assert_eq!(indexed(&[unboxing], 0).len(), 1);
 }
+
+/// The four shapes `type-mismatch` was accused of misreporting on a real corpus, each pinned to
+/// the answer this checker actually gives — and each beside the case it must still report, so
+/// neither half is a test that passes because the checker went quiet.
+///
+/// Three of the four are already right, which is what these say: subclass initialization, wildcard
+/// targets, and array covariance each resolve through a rule that was written for them. The
+/// fourth — generic invariance — is *supposed* to report `Collection<Integer>` into
+/// `Collection<Number>`, because Java generics are invariant and that program does not compile.
+#[test]
+fn a_subclass_initializer_is_not_a_mismatch() {
+    let hierarchy = [
+        "class CharMatcher { }",
+        "class NamedFastMatcher extends CharMatcher { }",
+        "class Ascii extends NamedFastMatcher { }",
+    ];
+    // `new Ascii()` where a `CharMatcher` is wanted: the chain is walked and the answer is yes.
+    let mut sources = hierarchy.to_vec();
+    sources.push("class Use { CharMatcher m = new Ascii(); }");
+    assert_eq!(
+        mismatches(&sources, 3).len(),
+        0,
+        "a subclass is assignable to its superclass"
+    );
+    // The mirror, so the assertion above is not a checker that reports nothing.
+    let mut sources = hierarchy.to_vec();
+    sources.push("class Use { Ascii m = new CharMatcher(); }");
+    assert_eq!(
+        mismatches(&sources, 3).len(),
+        1,
+        "a superclass is not assignable to its subclass"
+    );
+}
+
+#[test]
+fn a_wildcard_target_is_not_a_mismatch_but_invariance_is() {
+    // `Collection<? extends Number>` accepts a `Collection<Integer>`: the wildcard argument has no
+    // nameable type, so it is never the reason to claim a mismatch.
+    let wildcard = "import java.util.*; class Use { void f(Collection<? extends Number> c) {} \
+                    void g(Collection<Integer> xs) { f(xs); } }";
+    assert_eq!(mismatches(&[wildcard], 0).len(), 0);
+    // Generic invariance is not a false positive: `Box<A>` is not a `Box<B>` in Java, and javac
+    // says so too. Project-typed arguments, because an argument reached only by name is
+    // deliberately never the reason to claim one.
+    let invariant = [
+        "class A { }",
+        "class B { }",
+        "class Box<T> { }",
+        "class Use { void g(Box<A> b) { Box<B> o = b; } }",
+    ];
+    assert_eq!(mismatches(&invariant, 3).len(), 1);
+}
+
+#[test]
+fn a_varargs_call_is_not_a_mismatch() {
+    // A variable-arity call is not checked against the parameter list as if it were fixed-arity.
+    assert_eq!(
+        mismatches(
+            &["class Use { void f(Object... a) {} void g() { f(\"x\", 1); } }"],
+            0
+        )
+        .len(),
+        0
+    );
+    // And a fixed-arity call that really does not fit is still one.
+    assert_eq!(
+        mismatches(&["class Use { void f(String s) {} void g() { f(1); } }"], 0).len(),
+        1
+    );
+}
+
+#[test]
+fn array_covariance_is_not_a_mismatch_but_the_reverse_is() {
+    let src = "class Use { Object[] o = new String[1]; String[] s = new String[1]; \
+               Object a = s; Object[] b = s; }";
+    assert_eq!(
+        mismatches(&[src], 0).len(),
+        0,
+        "reference arrays are covariant"
+    );
+    // Project element types, because a stub `Object`/`String` is demoted to a by-name spelling
+    // before the comparison and a by-name element is deliberately lenient both ways.
+    let src = [
+        "class Base { }",
+        "class Sub extends Base { }",
+        "class Use { Sub[] s = new Base[1]; }",
+    ];
+    assert_eq!(
+        mismatches(&src, 2).len(),
+        1,
+        "and never the other way round"
+    );
+}
+
+/// The mismatches of `sources[file]`, as the rule above reads them.
+fn mismatches(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
+    indexed(sources, file)
+}
