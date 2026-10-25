@@ -4,11 +4,13 @@
 //! exists and is genuinely useful, and because folding those rules into `[style]` would have made
 //! "the code does not read the way Java is written" untrue of half of that section.
 //!
-//! **A rule's built-in level here is its own**, and no longer a property of the category.
-//! `print-to-console` is [`Allow`](super::LintLevel::Allow) because a restriction nobody asked for
-//! is not a finding — the reading this section was created under. `implicit-this` is
-//! [`Warn`](super::LintLevel::Warn): an unqualified field is a name a reader can mistake for a
-//! local, which is a hazard before it is a policy, so it speaks unless a project says otherwise.
+//! **A rule's built-in level here is its own**, and no longer a property of the category. Both
+//! rules are [`Allow`](super::LintLevel::Allow), and for one reason: a restriction nobody asked
+//! for is not a finding. `implicit-this` was [`Warn`](super::LintLevel::Warn) on the grounds that
+//! an unqualified field is a name a reader can mistake for a local — which is true, and which real
+//! code does thousands of times over. It made the rule a noise source rather than a policy, so it
+//! now speaks only to a project that turns it on. [`ThisScope`] is unchanged: a project that wants
+//! the qualifier gets exactly what it always got.
 //!
 //! The set of built-in levels is pinned in one place either way —
 //! `jals-lint/tests/registry.rs`'s `the_default_config_enables_exactly_these_rules` — so a level
@@ -87,7 +89,9 @@ lint_section! {
         /// `implicit-this` — an instance field read or written by simple name where `this.` would
         /// qualify it, for a project that wants a field distinguishable from a local by the
         /// spelling alone. Checkstyle's `RequireThis`; neither rustc nor clippy carries an
-        /// analogue, because Rust has no implicit receiver to leave out.
-        "implicit-this" => implicit_this: ImplicitThis = Warn,
+        /// analogue, because Rust has no implicit receiver to leave out. Off by default, like
+        /// every rule in this section: it is a style a project opts into, and a project that has
+        /// not opted in has thousands of these.
+        "implicit-this" => implicit_this: ImplicitThis = Allow,
     }
 }

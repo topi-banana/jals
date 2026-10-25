@@ -219,10 +219,11 @@ pub enum Category {
     /// A doc comment is missing, empty, or disagrees with what it documents.
     Documentation,
     /// The code is correct, idiomatic and fast, and the project has chosen to ban the construct
-    /// anyway. A rule here carries its own built-in level: `print-to-console` is
-    /// [`Allow`](LintLevel::Allow), because a restriction nobody asked for is not a defect, and
-    /// `implicit-this` is [`Warn`](LintLevel::Warn), because the name it reports is one a reader
-    /// can take for a local.
+    /// anyway. A rule here carries its own built-in level, and both are
+    /// [`Allow`](LintLevel::Allow): a restriction nobody asked for is not a defect. `implicit-this`
+    /// was [`Warn`](LintLevel::Warn) because the name it reports is one a reader can take for a
+    /// local — true, and true of thousands of lines of ordinary code, which made it noise rather
+    /// than policy.
     Restriction,
 }
 
