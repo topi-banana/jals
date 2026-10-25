@@ -1474,6 +1474,7 @@ dependencies = [
  "jals-fmt",
  "jals-hir",
  "jals-javac",
+ "jals-lint",
  "jals-syntax",
  "rayon",
  "similar",

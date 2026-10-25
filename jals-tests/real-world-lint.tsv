@@ -1,0 +1,13 @@
+boxed-primitive-constructor	76
+collapsible-if	61
+constant-condition	3
+dead-code	45
+empty-catch	2434
+empty-javadoc	7
+missing-braces	179
+naming-convention	9028
+nullness-mismatch	3346
+type-mismatch	120
+unused-imports	56
+unused-variables	11532
+wildcard-import	256

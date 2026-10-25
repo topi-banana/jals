@@ -9,9 +9,12 @@
 //! `google-java-format` output, rather than parser soundness. [`compile`] is a third:
 //! it compiles a corpus of real Java with `jals-javac` and asks a real JVM's bytecode
 //! verifier whether the class files that came out are ones it will load.
+//! [`lint_metrics`] is a fourth: it counts what the analysis reports per rule over real projects
+//! and ratchets those counts down.
 
 pub mod compile;
 pub mod golden;
+pub mod lint_metrics;
 pub mod wasm;
 
 use std::panic::{self, AssertUnwindSafe};

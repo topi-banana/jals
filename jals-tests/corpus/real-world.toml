@@ -1,0 +1,29 @@
+# The real-world lint corpus: the four projects M3's acceptance is measured on.
+#
+# Each is a project the milestone's own numbers came from, and each carries the config the M2
+# migration made possible — that is what makes them examples as well as subjects. The bodies are
+# **not** committed: `scripts/gen-real-world-corpus.sh` clones them into `sources/real-world/`,
+# which is gitignored exactly like the four formatter corpora and the javac one.
+#
+# `ref` is a tag or a commit and never a branch: a corpus that moves between two runs is two
+# measurements wearing one name. Bumping a ref is a new measurement and re-pins `real-world-lint.tsv`.
+
+[[project]]
+name = "hikaricp"
+url = "https://github.com/brettwooldridge/HikariCP"
+ref = "HikariCP-4.0.3"
+
+[[project]]
+name = "gson"
+url = "https://github.com/google/gson"
+ref = "gson-parent-2.11.0"
+
+[[project]]
+name = "guava"
+url = "https://github.com/google/guava"
+ref = "v33.3.1"
+
+[[project]]
+name = "netty"
+url = "https://github.com/netty/netty"
+ref = "netty-4.1.114.Final"
