@@ -2531,7 +2531,7 @@ impl CompileWasm {
                 layout.functions.insert(member, function);
                 out.push(Method {
                     owner: Some(item),
-                    node: class.clone(),
+                    node: class,
                     input: position,
                     signature,
                     index: function,
@@ -2656,7 +2656,7 @@ impl CompileWasm {
                 layout.functions.insert(member, function);
                 out.push(Method {
                     owner: (!is_static).then_some(item),
-                    node: node.clone(),
+                    node,
                     input: position,
                     signature,
                     index: function,
@@ -3238,7 +3238,7 @@ impl Layout {
                 let global =
                     u32::try_from(module.globals.len() - 1).map_err(|_| WasmError::TooLarge)?;
                 self.statics.insert(id, global);
-                out.push((id, owner, member.clone()));
+                out.push((id, owner, member));
             }
         }
         Ok(())
@@ -4093,8 +4093,7 @@ impl Lowering<'_> {
         let arguments: Vec<ast::Expr> = node
             .children()
             .find_map(ast::ArgList::cast)
-            .map(|list| list.args().collect())
-            .unwrap_or_default();
+            .map_or_default(|list| list.args().collect());
         // A constant with a body is an instance of its *own* subclass, which is where its overrides
         // live. Its global still has the enum's type, so nothing else changes.
         let built = if node.children().any(|child| child.kind() == CLASS_BODY) {
@@ -7456,8 +7455,7 @@ impl Lowering<'_> {
             .syntax()
             .children()
             .find_map(ast::ArgList::cast)
-            .map(|list| list.args().collect())
-            .unwrap_or_default();
+            .map_or_default(|list| list.args().collect());
         // A linked library's class is built by the library: its constructor's in-module shape
         // leads with a `this` no consumer has, so the export is a factory that allocates, runs
         // the constructor and returns the object. Nothing here lays the struct out.

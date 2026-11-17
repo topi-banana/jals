@@ -921,8 +921,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     pub(crate) async fn highlights(&self, file: FileId, offset: usize) -> Vec<Highlight> {
         self.queries(file)
             .await
-            .map(|queries| queries.highlights(offset))
-            .unwrap_or_default()
+            .map_or_default(|queries| queries.highlights(offset))
     }
 
     /// Classified semantic tokens for `file`, resolved against the project so a cross-file type
@@ -941,8 +940,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// synchronous read.
     pub(crate) fn outline(&self, file: FileId) -> Vec<OutlineNode> {
         self.project_file(file)
-            .map(|source| Outline::of(&source.doc.parse.syntax()))
-            .unwrap_or_default()
+            .map_or_default(|source| Outline::of(&source.doc.parse.syntax()))
     }
 
     /// The canonical diagnostics of the project file at `path` under `config`, with the project's

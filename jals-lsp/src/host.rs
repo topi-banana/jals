@@ -423,7 +423,7 @@ impl SemanticTokensHost for LspHost {
                 0
             };
             let start = doc.line_index.position(&doc.text, token.range.start);
-            let token_text = doc.text.get(token.range.clone()).unwrap_or_default();
+            let token_text = doc.text.get(token.range).unwrap_or_default();
             // A semantic token may not span lines (LSP spec), so split on '\n'. Trivia tokens
             // are dropped, but comments are kept and a block comment / text block can be
             // multi-line; each line becomes its own token starting at column 0 (after line 0).

@@ -180,13 +180,12 @@ impl Granularity {
             let members: Vec<SyntaxNode> = ImportDecl::cast(node.clone())
                 .filter(|decl| !ImportNames::is_conditional(decl))
                 .and_then(|decl| decl.group())
-                .map(|group| {
+                .map_or_default(|group| {
                     group
                         .members()
                         .map(|member| member.syntax().clone())
                         .collect()
-                })
-                .unwrap_or_default();
+                });
             // A group with no members is `import a.{};` — nothing to promote, and dropping it
             // would lose the declaration entirely.
             if members.is_empty() {

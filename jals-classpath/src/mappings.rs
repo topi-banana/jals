@@ -123,10 +123,7 @@ impl Mappings {
                     "mapping line {number} redefines class `{official}`"
                 ));
             }
-            if obf_to_official
-                .insert(obf.clone(), official.clone())
-                .is_some()
-            {
+            if obf_to_official.insert(obf.clone(), official).is_some() {
                 return Err(format!(
                     "mapping line {number} reuses obfuscated class name `{obf}`"
                 ));
