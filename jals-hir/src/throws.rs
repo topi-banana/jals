@@ -214,13 +214,12 @@ impl Cx<'_> {
                 self.rethrown_arms(&thrown, depth)
                     .unwrap_or_else(|| self.expr_item(thrown.syntax()).into_iter().collect())
             }
-            CALL_EXPR => ast::CallExpr::cast(node.clone())
-                .map(|call| self.call_throws(&call))
-                .unwrap_or_default(),
+            CALL_EXPR => {
+                ast::CallExpr::cast(node.clone()).map_or_default(|call| self.call_throws(&call))
+            }
             NEW_EXPR => ast::NewExpr::cast(node.clone())
                 .filter(|n| n.args().is_some()) // a constructor call, not array creation.
-                .map(|n| self.new_throws(&n))
-                .unwrap_or_default(),
+                .map_or_default(|n| self.new_throws(&n)),
             _ => Vec::new(),
         }
     }
@@ -310,7 +309,7 @@ impl Cx<'_> {
             if ancestor.kind() != TRY_STMT {
                 continue;
             }
-            let Some(try_stmt) = ast::TryStmt::cast(ancestor.clone()) else {
+            let Some(try_stmt) = ast::TryStmt::cast(ancestor) else {
                 continue;
             };
             if !Self::guards(&try_stmt, source) {

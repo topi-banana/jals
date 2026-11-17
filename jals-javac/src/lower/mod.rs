@@ -807,8 +807,7 @@ impl Compile {
         let own_body: Vec<SyntaxNode> = node
             .children()
             .find(|child| ast::ClassBody::cast(child.clone()).is_some())
-            .map(|body| body.children().collect())
-            .unwrap_or_default();
+            .map_or_default(|body| body.children().collect());
         let inner: Vec<&SyntaxNode> = own_body
             .iter()
             .filter(|child| {
@@ -971,8 +970,7 @@ impl Compile {
         }
         node.children()
             .find(|child| ast::ClassBody::cast(child.clone()).is_some())
-            .map(|body| body.children().collect())
-            .unwrap_or_default()
+            .map_or_default(|body| body.children().collect())
     }
 
     /// Everything inside a type declaration a lambda may be written in.
@@ -1000,8 +998,7 @@ impl Compile {
     fn declared_constants(node: &SyntaxNode) -> Vec<ast::EnumConstant> {
         node.children()
             .find_map(ast::EnumBody::cast)
-            .map(|body| body.constants().collect())
-            .unwrap_or_default()
+            .map_or_default(|body| body.constants().collect())
     }
 
     /// The access level a type declaration has, with what the language implies filled in.
@@ -2474,12 +2471,10 @@ impl Compile {
         let own: Vec<ast::TypeParam> = node
             .children()
             .find_map(ast::TypeParams::cast)
-            .map(|params| params.params().collect())
-            .unwrap_or_default();
+            .map_or_default(|params| params.params().collect());
         let parameters: Vec<ast::Type> = decl
             .params()
-            .map(|list| list.params().filter_map(|param| param.ty()).collect())
-            .unwrap_or_default();
+            .map_or_default(|list| list.params().filter_map(|param| param.ty()).collect());
         let returns = decl.return_type();
         let generic = !own.is_empty()
             || parameters

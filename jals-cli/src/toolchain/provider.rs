@@ -267,15 +267,12 @@ impl Provider {
             Self::adoptium_os()?,
         );
         let value = Self::json(fetcher, &url).await?;
-        Ok(value["releases"]
-            .as_array()
-            .map(|releases| {
-                releases
-                    .iter()
-                    .filter_map(|release| release.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default())
+        Ok(value["releases"].as_array().map_or_default(|releases| {
+            releases
+                .iter()
+                .filter_map(|release| release.as_str().map(str::to_owned))
+                .collect()
+        }))
     }
 
     /// Adoptium's available GA major versions.
@@ -285,16 +282,16 @@ impl Provider {
             "https://api.adoptium.net/v3/info/available_releases",
         )
         .await?;
-        let mut majors: Vec<u32> = value["available_releases"]
-            .as_array()
-            .map(|releases| {
-                releases
-                    .iter()
-                    .filter_map(serde_json::Value::as_u64)
-                    .filter_map(|major| u32::try_from(major).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut majors: Vec<u32> =
+            value["available_releases"]
+                .as_array()
+                .map_or_default(|releases| {
+                    releases
+                        .iter()
+                        .filter_map(serde_json::Value::as_u64)
+                        .filter_map(|major| u32::try_from(major).ok())
+                        .collect()
+                });
         majors.sort_unstable();
         Ok(majors)
     }
@@ -408,7 +405,7 @@ impl Provider {
         };
         let mut majors: Vec<u32> = distribution["versions"]
             .as_array()
-            .map(|versions| {
+            .map_or_default(|versions| {
                 versions
                     .iter()
                     .filter_map(|version| version.as_str())
@@ -417,8 +414,7 @@ impl Provider {
                     .filter(|version| !version.contains("-ea"))
                     .filter_map(Version::major_of)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         majors.sort_unstable();
         majors.dedup();
         Ok(majors)

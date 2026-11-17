@@ -130,13 +130,12 @@ impl Ctx<'_> {
         let members: Vec<SyntaxNode> = decl
             .children()
             .find(|child| child.kind() == S::IMPORT_GROUP)
-            .map(|group| {
+            .map_or_default(|group| {
                 group
                     .children()
                     .filter(|child| child.kind() == S::QUALIFIED_NAME)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
 
         if members.is_empty() {
             // A plain declaration: everything but its last segment is already in the prefix.

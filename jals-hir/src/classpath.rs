@@ -75,8 +75,7 @@ impl ClasspathLower {
         let class_sig = Self::class_signature(cf, pool);
         let type_params = class_sig
             .as_ref()
-            .map(|s| Self::lower_type_params(&s.type_parameters))
-            .unwrap_or_default();
+            .map_or_default(|s| Self::lower_type_params(&s.type_parameters));
         let supertypes = Self::lower_supertypes(cf, class_sig.as_ref(), pool);
         let members = Self::lower_members(cf, pool, Fqn::simple_name_of(&fqn)).await;
         Some(ClassfileClass {

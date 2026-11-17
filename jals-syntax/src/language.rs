@@ -8,6 +8,9 @@ use num_traits::{FromPrimitive, ToPrimitive};
 use crate::syntax_kind::SyntaxKind;
 
 /// jals が対象とする Java の言語定義(`rowan` 用のマーカ型)。
+///
+/// 値を持たない uninhabited 型であることが意図なので、`empty_enums` は許可する。
+#[allow(clippy::empty_enums)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JavaLanguage {}
 

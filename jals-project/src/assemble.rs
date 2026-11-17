@@ -356,8 +356,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             .graph
             .exports
             .get(&node.id)
-            .map(|exports| exports.compile_sources.clone())
-            .unwrap_or_default();
+            .map_or_default(|exports| exports.compile_sources.clone());
         let mut published = Vec::with_capacity(publications.len());
         for file in &publications {
             match self.cache.lookup(&file.key).await {

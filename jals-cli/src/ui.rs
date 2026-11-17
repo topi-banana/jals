@@ -254,8 +254,7 @@ impl Display {
         let files = batch.finished;
         let elapsed = batch
             .started
-            .map(|started| started.elapsed().as_secs_f64())
-            .unwrap_or_default();
+            .map_or_default(|started| started.elapsed().as_secs_f64());
         self.shell.status(
             Verb::Downloaded,
             format_args!(

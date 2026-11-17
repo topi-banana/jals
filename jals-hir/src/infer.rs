@@ -511,10 +511,7 @@ impl TypeInference {
         file: FileId,
     ) -> Option<CallResolution<'_>> {
         let (owner, name) = self.call_target(call, index, file)?;
-        let args: Vec<ast::Expr> = call
-            .args()
-            .map(|list| list.args().collect())
-            .unwrap_or_default();
+        let args: Vec<ast::Expr> = call.args().map_or_default(|list| list.args().collect());
         let reachable = index.resolve_members_all(owner, &name, Namespace::Method);
         // Phase one: fixed arity, which is every non-varargs method taking exactly this many
         // arguments.
@@ -659,10 +656,7 @@ impl TypeInference {
             // constructor to reach.
             index.direct_superclass(enclosing)?
         };
-        let args: Vec<ast::Expr> = call
-            .args()
-            .map(|list| list.args().collect())
-            .unwrap_or_default();
+        let args: Vec<ast::Expr> = call.args().map_or_default(|list| list.args().collect());
         let candidates: Vec<MemberId> = index
             .own_members(owner)
             .iter()
@@ -699,8 +693,7 @@ impl TypeInference {
             .syntax()
             .children()
             .find_map(ast::ArgList::cast)
-            .map(|list| list.args().collect())
-            .unwrap_or_default();
+            .map_or_default(|list| list.args().collect());
         self.resolve_constructor(owner, &args, index)
     }
 
@@ -1361,10 +1354,7 @@ impl<'a> Inferer<'a> {
             // are typed first — so the written type answers instead of the inferred one.
             NEW_EXPR => ast::NewExpr::cast(call).and_then(|new| {
                 let owner = self.new_ty(&new).project_id()?;
-                let args: Vec<ast::Expr> = new
-                    .args()
-                    .map(|list| list.args().collect())
-                    .unwrap_or_default();
+                let args: Vec<ast::Expr> = new.args().map_or_default(|list| list.args().collect());
                 self.inference.resolve_constructor(owner, &args, index)
             }),
             // An `enum` constant's arguments are a constructor invocation too (JLS §8.9.2) — the
@@ -1834,10 +1824,11 @@ impl<'a> Inferer<'a> {
             // substituted with. A bare call has none: the enclosing type is used raw, exactly as
             // the fallback below uses it.
             let arguments = match call.callee() {
-                Some(ast::Expr::FieldAccess(access)) => access
-                    .receiver()
-                    .map(|receiver| self.expr_ty(receiver.syntax()).type_arguments().to_vec())
-                    .unwrap_or_default(),
+                Some(ast::Expr::FieldAccess(access)) => {
+                    access.receiver().map_or_default(|receiver| {
+                        self.expr_ty(receiver.syntax()).type_arguments().to_vec()
+                    })
+                }
                 _ => Vec::new(),
             };
             return index.selected_member_ty(resolution.owner, &arguments, selected);

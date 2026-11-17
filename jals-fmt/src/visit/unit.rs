@@ -120,10 +120,7 @@ impl Ctx<'_> {
         //
         // Without this the comment vanished, and the only thing that noticed was a `debug_assert`
         // that fires in no shipped build.
-        let dropped: Vec<SyntaxNode> = plan
-            .as_ref()
-            .map(|plan| plan.dropped().to_vec())
-            .unwrap_or_default();
+        let dropped: Vec<SyntaxNode> = plan.as_ref().map_or_default(|plan| plan.dropped().to_vec());
 
         // A planned block states its own separation exactly: the plan decides where a group
         // boundary is, so a blank line the author left *inside* a group is not preserved but

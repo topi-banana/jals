@@ -10,6 +10,12 @@
 //! `std::path`-based resolution (classpath / source-root / dependency-source / invocation / scaffold) lives
 //! in `jals-build`'s `ManifestExt`.
 
+// The tagged kinds below use fieldless struct variants (`Proguard {}`, `Vanilla {}`, `Javac {}`)
+// so serde honors `deny_unknown_fields`; the `Deserialize` derive expands each into an empty
+// helper enum for its fields, and `empty_enums` fires on that generated code. An item-level
+// allow does not reach derive output, so the allowance lives at module scope.
+#![allow(clippy::empty_enums)]
+
 use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;

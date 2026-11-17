@@ -87,24 +87,20 @@ impl Outline {
         kind: DefKind,
         body: Option<ClassBody>,
     ) -> OutlineNode {
-        let children = body
-            .map(|b| b.members().filter_map(|m| Self::for_member(&m)).collect())
-            .unwrap_or_default();
+        let children =
+            body.map_or_default(|b| b.members().filter_map(|m| Self::for_member(&m)).collect());
         Self::node(node, name, kind, children)
     }
 
     /// An enum node, whose children are its constants followed by its members.
     fn for_enum(d: &EnumDecl) -> OutlineNode {
-        let children = d
-            .body()
-            .map(|b| {
-                let constants = b
-                    .constants()
-                    .map(|c| Self::leaf(c.syntax(), c.name(), DefKind::EnumConstant));
-                let members = b.members().filter_map(|m| Self::for_member(&m));
-                constants.chain(members).collect()
-            })
-            .unwrap_or_default();
+        let children = d.body().map_or_default(|b| {
+            let constants = b
+                .constants()
+                .map(|c| Self::leaf(c.syntax(), c.name(), DefKind::EnumConstant));
+            let members = b.members().filter_map(|m| Self::for_member(&m));
+            constants.chain(members).collect()
+        });
         Self::node(d.syntax(), d.name(), DefKind::Enum, children)
     }
 

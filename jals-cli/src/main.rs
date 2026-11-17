@@ -4255,8 +4255,7 @@ impl HostFeatures {
         let features = match Manifest::discover_path(&key).await {
             Some(path) => Manifest::from_file(&path)
                 .await
-                .map(|manifest| manifest.feature_set())
-                .unwrap_or_default(),
+                .map_or_default(|manifest| manifest.feature_set()),
             None => FeatureSet::default(),
         };
         self.by_dir.insert(key, features);

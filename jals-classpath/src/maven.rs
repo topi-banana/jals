@@ -845,7 +845,7 @@ impl<'f, F: Fetcher> MavenProvider<'f, F> {
             }
             // A POM version is exact in Maven unless it is a range.
             let requirement = if version_text.starts_with(['[', '(']) {
-                version_text.clone()
+                version_text
             } else {
                 format!("={version_text}")
             };
