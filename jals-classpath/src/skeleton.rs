@@ -230,7 +230,7 @@ impl SkeletonGroup<'_> {
                 return;
             };
             let pad = "    ".repeat(indent);
-            let simple = path.last().map(String::as_str).unwrap_or_default();
+            let simple = path.last().map_or_default(String::as_str);
             let class_sig = Self::class_signature(cf);
 
             let _ = writeln!(
@@ -432,8 +432,7 @@ impl SkeletonGroup<'_> {
             // A `static final` field's compile-time constant becomes its initializer (`= 42`), so a
             // navigated declaration shows the value.
             let mut init = Attrs::constant_value_initializer(field, pool)
-                .map(|value| format!(" = {value}"))
-                .unwrap_or_default();
+                .map_or_default(|value| format!(" = {value}"));
             // Interface fields must be initialized; when ConstantValue is missing fraudulently,
             // supply a type-appropriate default so compile mode still produces valid Java.
             if compile && init.is_empty() && cf.access_flags.is_interface() {

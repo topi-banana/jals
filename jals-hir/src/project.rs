@@ -2655,7 +2655,7 @@ impl SourceLocations {
                         .entry((fqn.clone(), member.name.clone(), member.params.len()))
                         .or_insert_with(|| loc.clone());
                     self.members_by_name
-                        .entry((fqn.clone(), member.name.clone()))
+                        .entry((fqn.clone(), member.name))
                         .or_insert(loc);
                 }
                 Some(alloc::rc::Rc::<str>::from(fqn.as_str()))
@@ -2739,8 +2739,7 @@ impl ProjectIndex {
                     // makes the lambda a *subtype* of the interface, which is what a dispatch built on
                     // subtyping needs to find it.
                     raw_supertypes: Self::lambda_target_of(&node)
-                        .map(|ty| alloc::vec![MemberType::of(Some(ty))])
-                        .unwrap_or_default(),
+                        .map_or_default(|ty| alloc::vec![MemberType::of(Some(ty))]),
                 });
             }
             // An anonymous class body is a type declaration with no name and no keyword. Nothing else
@@ -3338,7 +3337,7 @@ impl ProjectIndex {
     fn type_params_of(node: &SyntaxNode) -> Vec<TypeParamDecl> {
         node.children()
             .find_map(ast::TypeParams::cast)
-            .map(|tps| {
+            .map_or_default(|tps| {
                 tps.params()
                     .map(|tp| TypeParamDecl {
                         name: tp.name().unwrap_or_default(),
@@ -3346,7 +3345,6 @@ impl ProjectIndex {
                     })
                     .collect()
             })
-            .unwrap_or_default()
     }
 }
 

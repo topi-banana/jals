@@ -171,14 +171,13 @@ impl FeatureSelection {
         let features = scope
             .get("features")
             .and_then(serde_json::Value::as_array)
-            .map(|values| {
+            .map_or_default(|values| {
                 values
                     .iter()
                     .filter_map(serde_json::Value::as_str)
                     .map(str::to_owned)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let flag = |key: &str| {
             scope
                 .get(key)

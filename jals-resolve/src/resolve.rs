@@ -280,14 +280,12 @@ impl<'p, P: Provider> Resolver<'p, P> {
         roots: &[RootRequest],
         lock: Option<&Lockfile>,
     ) -> Result<ResolveGraph, ResolveError<P::Error>> {
-        let locked: BTreeMap<PackageName, LockedPackage> = lock
-            .map(|lock| {
-                lock.packages
-                    .iter()
-                    .map(|package| (package.id.name.clone(), package.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let locked: BTreeMap<PackageName, LockedPackage> = lock.map_or_default(|lock| {
+            lock.packages
+                .iter()
+                .map(|package| (package.id.name.clone(), package.clone()))
+                .collect()
+        });
         let mut pins: BTreeMap<PackageName, PackageId> = locked
             .iter()
             .map(|(name, package)| (name.clone(), package.id.clone()))
@@ -387,8 +385,7 @@ impl PassOutcome {
         let mut edges: Vec<ResolvedDependency> = self
             .edges
             .get(name)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+            .map_or_default(Vec::as_slice)
             .iter()
             .filter_map(|request| {
                 self.chosen
@@ -628,11 +625,7 @@ impl<'a, P: Provider> Pass<'a, P> {
         let mut misses: Vec<PackageName> = Vec::new();
         while let Some(name) = self.package_queue.pop_front() {
             if let Some(root_id) = self.root_ids.get(&name) {
-                let requirements = self
-                    .requirements
-                    .get(&name)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
+                let requirements = self.requirements.get(&name).map_or_default(Vec::as_slice);
                 if !requirements
                     .iter()
                     .all(|origin| origin.requirement.matches(&root_id.version))
@@ -698,11 +691,7 @@ impl<'a, P: Provider> Pass<'a, P> {
                 .get(&(request.source.clone(), name.clone()))
                 .cloned()
                 .unwrap_or_default();
-            let requirements = self
-                .requirements
-                .get(name)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+            let requirements = self.requirements.get(name).map_or_default(Vec::as_slice);
             let pin = self.pins.get(name);
             let pin_checksum = self
                 .locked
@@ -754,9 +743,8 @@ impl<'a, P: Provider> Pass<'a, P> {
                 continue;
             }
             self.feature_queue.push_back(name.clone());
-            let dependencies: Vec<DependencyRequest> = self
-                .summary(name)
-                .map(|summary| {
+            let dependencies: Vec<DependencyRequest> =
+                self.summary(name).map_or_default(|summary| {
                     summary
                         .dependencies
                         .iter()
@@ -764,8 +752,7 @@ impl<'a, P: Provider> Pass<'a, P> {
                         .filter(|dependency| !dependency.optional)
                         .cloned()
                         .collect()
-                })
-                .unwrap_or_default();
+                });
             for dependency in dependencies {
                 self.enqueue_dependency(name, &dependency)?;
             }
@@ -917,11 +904,7 @@ impl<'a, P: Provider> Pass<'a, P> {
     fn validate(&self) -> Result<BTreeMap<PackageName, PackageId>, ResolveError<P::Error>> {
         let mut pins = BTreeMap::new();
         for (name, id) in &self.chosen {
-            let requirements = self
-                .requirements
-                .get(name)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+            let requirements = self.requirements.get(name).map_or_default(Vec::as_slice);
             if requirements
                 .iter()
                 .all(|origin| origin.requirement.matches(&id.version))
@@ -1077,13 +1060,12 @@ mod tests {
             let mut candidates: Vec<Candidate> = self
                 .packages
                 .get(&request.package)
-                .map(|versions| {
+                .map_or_default(|versions| {
                     versions
                         .iter()
                         .map(|summary| Candidate::new(summary.id.clone()))
                         .collect()
-                })
-                .unwrap_or_default();
+                });
             if let Some(locked) = locked
                 && !candidates.iter().any(|candidate| candidate.id == locked.id)
             {
