@@ -330,6 +330,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: sources,
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options,
         }

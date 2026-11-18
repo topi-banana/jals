@@ -3797,11 +3797,13 @@ fn a_failed_in_process_compile_does_not_reach_the_run_step() {
     std::fs::remove_file(&java_args).unwrap();
 
     // Now edit the source into something `jals-javac` has no lowering for. The class file from the
-    // first run is still on disk and still runnable.
+    // first run is still on disk and still runnable. A lambda with *no* target type is that
+    // something whatever the platform holds: a project that resolves `Runnable` compiles
+    // `Runnable r = () -> {}`, so the gap this pins has to be one no index closes.
     std::fs::write(
         &source,
         "package com.example;\n\
-         public class Main { public static void main(String[] a) { Runnable r = () -> {}; } }\n",
+         public class Main { public static void main(String[] a) { Object o = () -> {}; } }\n",
     )
     .unwrap();
 

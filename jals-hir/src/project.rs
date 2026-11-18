@@ -750,6 +750,18 @@ pub struct LoweredClasspath {
     classes: Vec<crate::classpath::ClassfileClass>,
 }
 
+impl LoweredClasspath {
+    /// Fold `other`'s classes in **after** this one's.
+    ///
+    /// Two sources of `.class` files reach one index — the JDK's own `ct.sym` signatures and the
+    /// project's classpath — and `by_fqn` keeps the *first* registration of a fully-qualified name,
+    /// so the order two lowered classpaths are folded in is their priority. Nothing here picks that
+    /// order; a caller states it by deciding which one it starts from.
+    pub fn append(&mut self, other: Self) {
+        self.classes.extend(other.classes);
+    }
+}
+
 /// Where the types and members of a project's **library sources** are declared.
 ///
 /// Keyed so a `.class`-derived [`Classpath`](ItemOrigin::Classpath) item can be pointed at its real

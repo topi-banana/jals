@@ -1318,6 +1318,7 @@ mod tests {
         let request = BackendRequest {
             tree: &tree,
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options: &options,
             progress: &Progress::SILENT,

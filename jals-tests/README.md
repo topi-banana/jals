@@ -302,10 +302,12 @@ formatter corpora it is **generated locally and gitignored, never committed**.
 an editor buffer, nowhere near enough to compile arbitrary Java. Scoring against them would
 report *stub coverage* wearing a compiler's name. `$JAVA_HOME/lib/ct.sym` is the signature data
 `javac --release` reads (an ordinary zip of ordinary class files with their bodies stripped), so
-the harness lowers it into the `LoweredClasspath` the analysis resolves against — the same thing
-the product does through `jals-classpath` for a real dependency. Reading it needs a host path,
-which is why this lives in a test harness; `jals-javac`'s own stdlib oracle reads the same file
-for the same reason.
+the harness lowers it into the `LoweredClasspath` the analysis resolves against. The archive is
+read by `jals_build::PlatformClasses` — the same reader `jals lint`, the language server, and the
+in-process backend fold in — so a case resolves `java.lang.Object` against the signature the
+product resolves it against, and a gap here is a gap there. Every signature of the release is read,
+with no module filter: `javac` compiles against the whole platform, and an analysis that dropped
+part of it would report the missing part as a defect in the project.
 
 ### What fails the run, and what only lowers the rate
 

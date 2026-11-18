@@ -2210,13 +2210,13 @@ impl LintProject {
     ) -> Result<Self> {
         let shell = session.shell();
         let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
-            return Self::detached(start_dir, exec).await;
+            return Self::detached(start_dir, exec, shell).await;
         };
         let manifest = match Manifest::from_file(&manifest_path).await {
             Ok(manifest) => manifest,
             Err(error) => {
                 shell.warn(format_args!("project analysis inputs unavailable: {error}"));
-                return Self::detached(start_dir, exec).await;
+                return Self::detached(start_dir, exec, shell).await;
             }
         };
         // `Path::new("jals.toml").parent()` is `Some("")`, not `None`, so the fallback below only
@@ -2250,7 +2250,7 @@ impl LintProject {
                 shell.warn(format_args!(
                     "project analysis inputs unavailable: {error:#}"
                 ));
-                return Self::detached(start_dir, exec).await;
+                return Self::detached(start_dir, exec, shell).await;
             }
         };
         // The project's analysis inputs, best-effort: the classpath `.class` from `[build]
@@ -2306,6 +2306,10 @@ impl LintProject {
                     &storage.view(),
                 )
                 .source_roots;
+                // The platform is not one of the inputs the failed assembly was carrying: it comes
+                // from a JDK rather than from the project graph, so a degraded run still sees
+                // `java.lang.Object`. That is the one input this fallback refuses to give up.
+                let platform = App::platform_classes(shell, &manifest, root).await;
                 return Ok(Self {
                     root: root.to_path_buf(),
                     storage,
@@ -2322,7 +2326,9 @@ impl LintProject {
                         native_sources: Self::native_layout_sources(shell, &manifest),
                         source_filters: manifest.source_filters(),
                         ..jals_editor::ProjectLayout::new(source_roots)
-                    },
+                    }
+                    .with_platform(&platform)
+                    .await,
                 });
             }
         };
@@ -2339,6 +2345,8 @@ impl LintProject {
             build_features: features.into_features(),
             ..jals_editor::ProjectLayout::default()
         }
+        .with_platform(&inputs.platform_classes)
+        .await
         .with_classpath(&inputs.classpath_classes)
         .await;
         layout.source_dep_sources =
@@ -2356,14 +2364,19 @@ impl LintProject {
     /// An empty scope list is what makes the snapshot empty, so nothing is read from disk. Every
     /// reported file is then mounted, which makes the index exactly the files the caller named —
     /// what a run outside a project always had.
-    async fn detached(anchor: &Path, exec: &Exec) -> Result<Self> {
+    async fn detached(anchor: &Path, exec: &Exec, shell: &Shell) -> Result<Self> {
         let storage = NativeStorage::for_project_scoped(anchor, [], exec.clone())
             .await
             .with_context(|| format!("opening {} for analysis", anchor.display()))?;
+        // No project, so no `[toolchain] compiler` to follow — but a standalone file still needs
+        // `java.lang.Object`. This is the one input a detached run can still get for itself.
+        let platform = App::platform_classes(shell, &Manifest::default(), anchor).await;
         Ok(Self {
             root: anchor.to_path_buf(),
             storage,
-            layout: jals_editor::ProjectLayout::default(),
+            layout: jals_editor::ProjectLayout::default()
+                .with_platform(&platform)
+                .await,
         })
     }
 
@@ -2541,6 +2554,11 @@ struct HostProjectInputs {
     /// them again would be the same bytes acquired a second way.
     remap_hierarchy: Vec<jals_storage::CacheKey>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
+    /// The JDK's own type signatures (`lib/ct.sym`) for the release this project compiles to,
+    /// decoded once per run. Folded into the analysis index *ahead of*
+    /// [`classpath_classes`](Self::classpath_classes) and the embedded stubs, so `java.lang.Object`
+    /// is the platform's and not a partial stub's or a jar's. Empty when this host has no JDK.
+    platform_classes: Vec<jals_classfile::ClassFile>,
     extra_sources: Vec<PathBuf>,
     /// The manifest's source roots as the assembly resolved them — the directory half of a
     /// [`jals_editor::ProjectLayout`]. Derived once, here, so no host re-lowers
@@ -2624,6 +2642,10 @@ struct CompilePlan {
     /// [`jals_build::WasmForeignModule`].
     foreign: Vec<(String, Vec<u8>)>,
     options: jals_build::BackendOptions,
+    /// The JDK's own type signatures for this compile's release, so an in-process backend types
+    /// against the same platform `javac` would. The `javac` adapter reads them from the JDK it
+    /// spawns and ignores the request's copy.
+    platform_classes: Vec<jals_classfile::ClassFile>,
     /// Attributed to the package being compiled, so an in-process backend's per-file counting lands
     /// under the same name the `Compiling` line carries.
     progress: jals_progress::Progress,
@@ -2692,6 +2714,7 @@ impl CompilePlan {
                     library_bytes,
                     foreign: resolved.foreign,
                     options: jals_build::BackendOptions::from_manifest(manifest),
+                    platform_classes: inputs.platform_classes.clone(),
                     progress,
                 })
             }
@@ -2706,11 +2729,12 @@ impl CompilePlan {
         jals_build::BackendRequest {
             progress: &self.progress,
             tree: &self.tree,
-            // The in-process compiler reads its library signatures from the embedded stubs rather
-            // than from the classpath; wiring dependency classes in is what would let it compile
-            // against them. The `javac` adapter takes the real classpath as a host input instead,
-            // because its entries are paths and this request is portable.
+            // The in-process compiler reads its library signatures from the platform classes on the
+            // request rather than from the classpath; wiring dependency classes in is what would let
+            // it compile against them too. The `javac` adapter takes the real classpath as a host
+            // input instead, because its entries are paths and this request is portable.
             classpath: &[],
+            platform_classes: &self.platform_classes,
             libraries: &self.libraries,
             options: &self.options,
         }
@@ -2841,6 +2865,30 @@ impl App {
         NativeStorage::for_project_scoped(root, scopes, exec.clone())
             .await
             .context("opening project storage")
+    }
+
+    /// The JDK's own type signatures for the release this project compiles to, or nothing when
+    /// this host has no JDK to read them from.
+    ///
+    /// One place, so every host path in this crate folds in the same set: `jals lint`, the build
+    /// inputs, and the in-process backend all describe the platform the same way or not at all.
+    /// Which JDK is [`jals_build::PlatformClasses`]'s question, not this crate's.
+    async fn platform_classes(
+        shell: &Shell,
+        manifest: &Manifest,
+        root: &Path,
+    ) -> Vec<jals_classfile::ClassFile> {
+        match jals_build::PlatformClasses::for_project(manifest, root).await {
+            jals_build::PlatformSelection::Available(classes) => classes.into_classes(),
+            jals_build::PlatformSelection::Absent => Vec::new(),
+            jals_build::PlatformSelection::Unreadable(error) => {
+                shell.warn(format_args!(
+                    "the JDK's platform signatures could not be read ({error}); `java.lang` and \
+                     the rest of the platform will not resolve"
+                ));
+                Vec::new()
+            }
+        }
     }
 
     /// Discover and preprocess the complete dependency graph, then project it together with the
@@ -3130,6 +3178,11 @@ impl App {
             }
         }
         result.classpath_classes = assembly.inputs.classpath_classes;
+        // The JDK's own signatures, for the release `[toolchain]` resolves to. Read here rather
+        // than at each consumer so `jals lint`, the language server, and the in-process backend all
+        // fold in one set — one reader and one rule for which JDK, which is what makes the three
+        // hosts unable to disagree about the platform.
+        result.platform_classes = Self::platform_classes(shell, manifest, root).await;
         result.feature_set = assembly.inputs.feature_set;
         Ok(result)
     }
