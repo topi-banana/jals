@@ -101,4 +101,4 @@ empty-javadoc = "warn"
 # own built-in level rather than the section deciding one for all of them.
 [restriction]
 print-to-console = { level = "allow", streams = "both" }
-implicit-this = { level = "warn", scope = "always" }
+implicit-this = { level = "allow", scope = "always" }
