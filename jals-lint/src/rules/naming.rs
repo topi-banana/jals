@@ -36,7 +36,7 @@ use alloc::vec::Vec;
 
 use jals_syntax::SyntaxKind::{
     self, ANNOTATION_TYPE_DECL, CLASS_DECL, ENUM_DECL, FIELD_DECL, FINAL_KW, IDENT, INTERFACE_DECL,
-    LOCAL_VAR_DECL, METHOD_DECL, MODIFIERS, PARAM, RECORD_DECL, STATIC_KW,
+    LOCAL_VAR_DECL, METHOD_DECL, MODIFIERS, PARAM, RECORD_DECL, STATIC_KW, TYPE,
 };
 use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 
@@ -92,6 +92,9 @@ impl NamingConvention {
                     }
                 }
                 FIELD_DECL => {
+                    if Self::is_serial_version_uid(&node) {
+                        continue;
+                    }
                     let (case, what) = Self::field_cell(&node, table);
                     for tok in Self::name_idents(&node) {
                         Self::push_if_bad(&tok, case, what, &mut out);
@@ -145,6 +148,39 @@ impl NamingConvention {
         } else {
             (table.fields, "field")
         }
+    }
+
+    /// A `static final long serialVersionUID` — the one field in Java whose name is not its
+    /// author's to choose. `java.io.Serializable` reaches it by that exact spelling through
+    /// reflection, so a naming table has no say in it and every reading of one would report the
+    /// JDK's own convention back at the project. `dead-code` carries the same exemption, for the
+    /// same reason and against the same list.
+    ///
+    /// The exception is the whole declaration and not the name: `static final int serialVersionUID`
+    /// and a boxed `Long` one are not the field the contract looks for, and both stay checked — so
+    /// a project that spells one of *those* `serialVersionUID` still hears about it.
+    fn is_serial_version_uid(field: &SyntaxNode) -> bool {
+        let modifiers = field.children().find(|c| c.kind() == MODIFIERS);
+        let has = |kind| modifiers.as_ref().is_some_and(|m| Self::has_token(m, kind));
+        if !has(STATIC_KW) || !has(FINAL_KW) {
+            return false;
+        }
+        // The type as written: `long` and nothing else, so `Long` is not the exception either.
+        let Some(ty) = field.children().find(|c| c.kind() == TYPE) else {
+            return false;
+        };
+        let mut written = ty
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|token| !token.kind().is_trivia());
+        let is_long = matches!(
+            (written.next(), written.next()),
+            (Some(token), None) if token.text() == "long"
+        );
+        is_long
+            && Self::name_idents(field)
+                .iter()
+                .any(|tok| tok.text() == "serialVersionUID")
     }
 
     fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
