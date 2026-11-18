@@ -58,7 +58,8 @@
 //!   wrong would report.
 //! - A **conditional** (`cond ? find() : "x"`) is unknown even when one arm is nullable. A reader
 //!   sees a guarded expression, and reporting the arm would be the false positive this scope was
-//!   chosen to avoid.
+//!   chosen to avoid. What a conditional does contribute is the one narrowing this rule can do with
+//!   no control-flow layer at all — see [the narrowing note](NullnessRule::narrowed_by).
 //! - A name neither route binds — an inherited member, a receiver whose type is unresolved.
 //! - An **overloaded** callee, on the file-local route only: the scope chain binds a call to *an*
 //!   overload rather than to the one the arguments select. With an index there is no such doubt,
@@ -82,8 +83,8 @@ use jals_config::lint::{Config, Nullness, NullnessMismatch as Options};
 use jals_exec::{LocalBoxFuture, Yielder};
 use jals_hir::{DefKind, FileAnalysis, FileSemantics, Member, Namespace, TypedFile};
 use jals_syntax::SyntaxKind::{
-    ASSIGNMENT_EXPR, CALL_EXPR, CONSTRUCTOR_DECL, ENUM_CONSTANT, FIELD_DECL, IDENT, LAMBDA_EXPR,
-    LOCAL_VAR_DECL, METHOD_DECL, NEW_EXPR, NULL_KW, PARAM, RESOURCE, RETURN_STMT,
+    ASSIGNMENT_EXPR, BANG_EQ, CALL_EXPR, CONSTRUCTOR_DECL, ENUM_CONSTANT, EQ_EQ, FIELD_DECL, IDENT,
+    LAMBDA_EXPR, LOCAL_VAR_DECL, METHOD_DECL, NEW_EXPR, NULL_KW, PARAM, RESOURCE, RETURN_STMT,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxNode};
@@ -113,6 +114,16 @@ enum Declared {
     Contradictory,
     /// Neither, so [`Options::default`] decides.
     Absent,
+}
+
+/// What an enclosing conditional's test proves about one expression.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Narrowed {
+    /// The test proves this expression *is* `null` in the branch it sits in.
+    Null,
+    /// The test proves this expression is *not* `null` there, so its declaration's `@Nullable`
+    /// says nothing about what this branch holds.
+    NonNull,
 }
 
 /// What an expression is known to produce.
@@ -608,6 +619,15 @@ impl NullnessRule {
         typed: Option<TypedFile<'_>>,
         vocabulary: &Vocabulary<'_>,
     ) -> Value {
+        // Before anything reads a declaration: a conditional's test can already have settled this
+        // expression's nullness, and it settles it for expressions *inside* an arm as well as for
+        // the arm itself — which is what `a == null ? null : f(a)` needs.
+        if let Some(narrowed) = Self::narrowed_by(value) {
+            return match narrowed {
+                Narrowed::Null => Value::Null,
+                Narrowed::NonNull => Value::Unknown,
+            };
+        }
         match value {
             // Parentheses change nothing about what the expression produces.
             ast::Expr::Paren(paren) => paren.expr().map_or(Value::Unknown, |inner| {
@@ -752,6 +772,120 @@ impl NullnessRule {
     }
 
     /// A node's own byte range — the key the inference memo records against.
+    /// What an enclosing conditional's test proves about `value`, if anything.
+    ///
+    /// **The one narrowing this rule does**, and the reason it can do any at all: both arms of a
+    /// conditional are lexically inside the scope of the test that selects them, so `a == null ? …
+    /// : …` says which arm holds a null `a` and which holds a non-null one — with no control-flow
+    /// layer, no definite-assignment analysis, and no guess about whether a block ran. Everything
+    /// the module doc refuses (`if (x != null)` guards, dereferences) is refused for want of
+    /// exactly that, and an `if` is still refused.
+    ///
+    /// The subject is matched by **spelling** — an unqualified name or a field access, the two
+    /// forms a test can name — because a rule that resolved both sides instead would be asking the
+    /// analysis this rule deliberately does not depend on. A test on `this.a` and a use of `a` are
+    /// therefore different spellings and no narrowing happens, which costs a report this rule
+    /// would rather miss than invent.
+    fn narrowed_by(value: &ast::Expr) -> Option<Narrowed> {
+        let subject = Self::subject_spelling(value)?;
+        let start = Self::span(value.syntax()).start;
+        for ancestor in value.syntax().ancestors() {
+            let Some(ternary) = ast::TernaryExpr::cast(ancestor) else {
+                continue;
+            };
+            let mut parts = ternary.parts();
+            let Some(condition) = parts.next() else {
+                continue;
+            };
+            let then_arm = parts.next();
+            let else_arm = parts.next();
+            let (proves_null, tested) = Self::null_test(&condition)?;
+            if tested != subject {
+                continue;
+            }
+            let in_then = then_arm.is_some_and(|arm| Self::span(arm.syntax()).contains(&start));
+            let in_else =
+                !in_then && else_arm.is_some_and(|arm| Self::span(arm.syntax()).contains(&start));
+            if !in_then && !in_else {
+                continue;
+            }
+            // `a == null` proves `a` null in the *then* arm and non-null in the other; `a != null`
+            // proves the two the other way round. Which side the literal is written on changes
+            // nothing: `null == a` tests the same thing.
+            let null_here = proves_null == in_then;
+            return Some(if null_here {
+                Narrowed::Null
+            } else {
+                Narrowed::NonNull
+            });
+        }
+        None
+    }
+
+    /// What `condition` proves about one name: `a == null` / `a != null`, in either spelling.
+    ///
+    /// Answers `(true, subject)` when the test proves the subject *null* on the true branch — so
+    /// `a != null` answers `(false, "a")` rather than asking every caller to invert an operator.
+    fn null_test(condition: &ast::Expr) -> Option<(bool, String)> {
+        let ast::Expr::Binary(binary) = condition else {
+            return None;
+        };
+        let lhs = binary.lhs()?;
+        let rhs = binary.rhs()?;
+        let left_is_null = Self::is_null_literal(&lhs);
+        let right_is_null = Self::is_null_literal(&rhs);
+        if left_is_null == right_is_null {
+            return None;
+        }
+        let equal = Self::eq_operator(binary)?;
+        let subject = Self::subject_spelling(if left_is_null { &rhs } else { &lhs })?;
+        Some((equal, subject))
+    }
+
+    /// Whether `binary` is `==` (rather than `!=`). Anything else is not a null test.
+    fn eq_operator(binary: &ast::BinaryExpr) -> Option<bool> {
+        let operator = binary
+            .syntax()
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find(|token| matches!(token.kind(), EQ_EQ | BANG_EQ))?;
+        Some(operator.kind() == EQ_EQ)
+    }
+
+    /// Whether `expr` is the `null` literal.
+    fn is_null_literal(expr: &ast::Expr) -> bool {
+        matches!(expr, ast::Expr::Literal(literal) if literal
+            .syntax()
+            .children_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .any(|token| token.kind() == NULL_KW))
+    }
+
+    /// The spelling of the name or field access `value` is, through any parentheses, or `None` for
+    /// every other kind of expression — those have no name a test could be about.
+    fn subject_spelling(value: &ast::Expr) -> Option<String> {
+        let mut node = value.syntax().clone();
+        while let Some(ast::Expr::Paren(paren)) = ast::Expr::cast(node.clone()) {
+            node = paren.expr()?.syntax().clone();
+        }
+        match ast::Expr::cast(node.clone()) {
+            Some(ast::Expr::NameRef(_)) if Self::ident_text(&node).is_empty() => return None,
+            Some(ast::Expr::NameRef(_) | ast::Expr::FieldAccess(_)) => {}
+            _ => return None,
+        }
+        Some(Self::spelling(&node))
+    }
+
+    /// `node`'s text with trivia dropped, so `a`, `a.b` and `(a)` written in two places read as the
+    /// same subject only when they are written the same way.
+    fn spelling(node: &SyntaxNode) -> String {
+        node.descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|token| !token.kind().is_trivia())
+            .map(|token| token.text().to_owned())
+            .collect()
+    }
+
     fn memo_span(node: &SyntaxNode) -> Range<usize> {
         let range = node.text_range();
         usize::from(range.start())..usize::from(range.end())
