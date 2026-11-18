@@ -507,6 +507,42 @@ Two things the ladder does **not** yet report, because on this corpus they never
 function that trapped, and a disagreement. Both have their own listing, so the day one appears it
 is named rather than averaged in.
 
+## Real-world lint metrics — `jals-lint-metrics`
+
+The compiler corpus measures what lowers and what a JVM links. This one measures what the
+*analysis* says about code somebody actually shipped, per rule, and ratchets those counts down.
+
+| Command | What it does |
+| --- | --- |
+| `cargo run -p jals-tests --bin jals-lint-metrics` | measure the corpus and print per-rule counts |
+| `… -- --pin` | measure and rewrite `real-world-lint.tsv` |
+| `… -- --check` | measure and exit non-zero on any count the pin does not allow |
+
+The corpus is **generated, never committed** — `scripts/gen-real-world-corpus.sh` clones the four
+projects `corpus/real-world.toml` names into `sources/real-world/`, which is gitignored exactly
+like the four formatter corpora and the javac one. Each `ref` is a tag or a commit and never a
+branch: a corpus that moves between two runs is two measurements wearing one name. That script is
+the only step that needs the network; measuring is offline.
+
+### What a pin is for
+
+`real-world-lint.tsv` is a **ratchet** and not an expectation. A fix moves a number down and the
+pin moves with it; a regression moves one up and `--check` fails. The pin is data beside the
+harness rather than a number inside a test, so the diff that changes it is the diff that changed
+the analysis.
+
+A rule the pin does not mention is allowed **nothing**, so a rule added since the pin was written
+comes with a refreshed one and is under the ratchet from the same diff that added it.
+
+### What it does not measure
+
+One file at a time, with the default configuration and no project index — the reading the counts
+are defined against. A project's own `jalslint.toml` is deliberately not read, so two projects are
+counted on the same terms; and because there is no index, the rules that need one (`cannot-resolve`
+against a classpath, `type-mismatch` subtyping) report only what a single file settles. Those are
+the numbers `jals lint` over the project itself gives, and they are a different measurement with a
+different name.
+
 ## In CI
 
 The `corpus-reports` job downloads each pinned tool, generates the four OpenJDK formatter corpora
