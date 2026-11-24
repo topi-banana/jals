@@ -39,7 +39,7 @@ jobs:
 
     steps:
       - name: Run OpenCodeReview
-        uses: alibaba/open-code-review@55450a95e5999dfd00ec2d582c23d76e269922fb # v1.13.2
+        uses: alibaba/open-code-review@d29ca2044a42ea297a7fa93692d0f5ac8f38d84e # v1.14.0
         env:
           # The npm launcher spawns a detached self-update on every `ocr`
           # invocation; once a newer release exists, its `npm i -g` briefly
