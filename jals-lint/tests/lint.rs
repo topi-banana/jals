@@ -1036,6 +1036,70 @@ fn a_conditional_stands_down() {
 }
 
 #[test]
+fn a_null_test_narrows_the_branch_it_does_not_hold() {
+    // The shape that motivated the narrowing: `a == null ? null : checkNotNull(doForward(a))`.
+    // The `a` reaching `doForward` is the branch where `a` is *not* null, so the declaration's
+    // `@Nullable` says nothing about what that branch holds.
+    assert_eq!(
+        nullness(
+            "class C { @Nullable A find() { return null; } \
+             A id(A a) { return a == null ? null : use_(a); } \
+             A use_(A a) { return a; } }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_null_test_narrows_the_branch_that_holds_the_null() {
+    // And the mirror: the *then* branch of `a == null` holds a null `a` whatever the declaration
+    // says, so passing it on is the finding the rule exists for.
+    expect![[r"
+        46..47: `null` cannot be passed to parameter `a` of `use_`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { A id(A a) { return a == null ? use_(a) : a; } A use_(A a) { return a; } }",
+    ));
+}
+
+#[test]
+fn a_non_null_test_narrows_the_branch_it_selects() {
+    // `a != null` proves the opposite of `a == null` and settles the *then* branch instead.
+    assert_eq!(
+        nullness(
+            "class C { A id(A a) { return a != null ? use_(a) : a; } A use_(A a) { return a; } }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_null_test_on_a_field_access_narrows_by_spelling() {
+    // A field access is the other form a test can name, and the arm is narrowed when it is written
+    // the same way.
+    assert_eq!(
+        nullness(
+            "class C { @Nullable A a; A id() { return a == null ? null : use_(a); } \
+             A use_(A x) { return x; } }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_null_test_narrows_only_the_expression_it_names() {
+    // The test is about `a`; a nullable call in the same branch is exactly as nullable as its
+    // declaration says.
+    expect![[r"
+        89..95: a nullable value cannot be passed to parameter `x` of `use_`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { @Nullable A find() { return null; } \
+             A id(A a) { return a == null ? null : use_(find()); } A use_(A x) { return x; } }",
+    ));
+}
+
+#[test]
 fn an_overloaded_callee_stands_down() {
     // The scope chain binds a call to *an* overload rather than to the one the arguments select,
     // so neither the parameter nor the return type read off `take` is known to be the one this
