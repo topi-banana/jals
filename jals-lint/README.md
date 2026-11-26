@@ -47,6 +47,11 @@ There is one diagnostic outside the table: `cfg`, a structurally malformed `#[cf
 at `error` and is not configurable, because it is the same failure the compile frontend rejects a
 build with, not a judgement about the code.
 
+`serialVersionUID` is excepted from `naming-convention` when — and only when — it is the
+`static final long` field `java.io.Serializable` reaches by that name through reflection. The name
+is the contract's and not its author's, and every reading of a casing table would report the JDK's
+own convention back at the project. `dead-code` exempts the same declaration, for the same reason.
+
 ### What `cannot-resolve` stands down on
 
 It is the one `error`-level rule, so it answers only where the index settles the question. Four
