@@ -1739,6 +1739,52 @@ fn type_mismatch_return_flagged() {
     );
 }
 
+/// The `type-mismatch` findings of `src`, one `start..end: message` line each, filtered to that
+/// rule so a fixture about one conversion does not have to also satisfy `naming-convention` and
+/// `unused-variables`.
+fn mismatch(src: &str) -> String {
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &Config::default()));
+    let mut lines = String::new();
+    for d in out.diagnostics.iter().filter(|d| d.rule == "type-mismatch") {
+        writeln!(lines, "{}..{}: {}", d.range.start, d.range.end, d.message).unwrap();
+    }
+    lines
+}
+
+#[test]
+fn a_subclass_initializer_is_not_a_type_mismatch() {
+    // The reverse needs a project index to be knowable (`project_subtyping_mismatch_needs_the_index`
+    // in `jals-hir`), so at source level the interesting half is the one that must stay silent.
+    assert_eq!(
+        mismatch("class A { } class B extends A { } class C { A a = new B(); }"),
+        ""
+    );
+}
+
+#[test]
+fn a_wildcard_target_is_not_a_type_mismatch() {
+    assert_eq!(
+        mismatch(
+            "import java.util.*; class C { void f(Collection<? extends Number> c) {} \
+         void g(List<Integer> xs) { f(xs); } }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_varargs_call_is_not_a_type_mismatch() {
+    assert_eq!(
+        mismatch("class C { void f(Object... a) {} void g() { f(\"x\", 1); } }"),
+        ""
+    );
+}
+
+#[test]
+fn array_covariance_is_not_a_type_mismatch() {
+    assert_eq!(mismatch("class C { Object[] o = new String[1]; }"), "");
+}
+
 // ===== compact-source-file =====
 
 /// Lint `src` with the project's feature set resolved from the given `[package] features` list
