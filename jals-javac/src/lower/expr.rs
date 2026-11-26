@@ -370,7 +370,8 @@ impl Expr {
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
         use jals_syntax::SyntaxKind::{
-            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, STRING_LITERAL, TRUE_KW,
+            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, STRING_LITERAL,
+            TEXT_BLOCK, TRUE_KW,
         };
         let token = literal
             .token()
@@ -380,7 +381,9 @@ impl Expr {
             TRUE_KW => emit.asm.const_int(1)?,
             FALSE_KW => emit.asm.const_int(0)?,
             NULL_KW => emit.asm.const_null()?,
-            STRING_LITERAL => emit.asm.const_string(&Literal::text(text)?)?,
+            // A text block is a string constant by the time `Literal::text` is done with it, so
+            // the two share this arm rather than the alternative one.
+            STRING_LITERAL | TEXT_BLOCK => emit.asm.const_string(&Literal::text(text)?)?,
             CHAR_LITERAL => emit.asm.const_int(Literal::character(text)? as i32)?,
             // The lexer has one integer kind and one floating kind; the `L` / `f` suffix decides
             // the width, and inference has already turned that suffix into a type. Reading the type

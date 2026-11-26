@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 
 use jals_hir::DefKind;
 use jals_syntax::SyntaxKind::{
-    CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, IDENT, INT_LITERAL, STRING_LITERAL, TRUE_KW,
+    CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, IDENT, INT_LITERAL, STRING_LITERAL, TEXT_BLOCK, TRUE_KW,
 };
 use jals_syntax::ast::{self, AstNode as _};
 
@@ -194,7 +194,7 @@ impl Const<'_> {
                 .next()
                 .map(ConstValue::Char)
                 .ok_or(FactError::Unsupported("an empty character literal")),
-            STRING_LITERAL => Ok(ConstValue::Text(Literal::text(raw)?)),
+            STRING_LITERAL | TEXT_BLOCK => Ok(ConstValue::Text(Literal::text(raw)?)),
             TRUE_KW => Ok(ConstValue::Bool(true)),
             FALSE_KW => Ok(ConstValue::Bool(false)),
             _ => Err(FactError::Unsupported("a `case` of this literal kind")),
