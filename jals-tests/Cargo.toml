@@ -2,8 +2,8 @@
 name = "jals-tests"
 version.workspace = true
 edition.workspace = true
-# The crate ships four binaries (jals-tests, jals-golden, jals-compile, jals-wasm); keep `cargo run
-# -p jals-tests` resolving to the parse-soundness CLI.
+# The crate ships four binaries (jals-tests, jals-golden, jals-compile, jals-wasm, jals-lint-metrics); keep
+# `cargo run -p jals-tests` resolving to the parse-soundness CLI.
 default-run = "jals-tests"
 
 [lib]
@@ -26,6 +26,10 @@ path = "src/bin/compile.rs"
 name = "jals-wasm"
 path = "src/bin/wasm.rs"
 
+[[bin]]
+name = "jals-lint-metrics"
+path = "src/bin/lint-metrics.rs"
+
 # A binary cannot see `[dev-dependencies]`, so the compiler harness's crates are ordinary
 # dependencies even though nothing but a test corpus reads them.
 [dependencies]
@@ -43,6 +47,9 @@ jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
 jals-javac.workspace = true
+# The rule engine, for the real-world lint metrics harness: what this measures is what the
+# analysis reports per rule, so the measurement runs the same rules a `jals lint` does.
+jals-lint.workspace = true
 jals-syntax.workspace = true
 rayon.workspace = true
 similar.workspace = true
