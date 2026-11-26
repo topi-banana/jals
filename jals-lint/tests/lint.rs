@@ -744,11 +744,12 @@ fn print_to_console_reports_the_configured_streams() {
 
 /// The `implicit-this` findings alone, as `start..end: message` lines.
 ///
-/// The rule is `allow` by default, so a test has to raise it — and a fixture that exercises it
-/// trips `dead-code` and `naming-convention` on the same fields, which is noise this rule's
-/// expectations should not carry.
+/// The rule is `allow` by default — a restriction nobody asked for is not a finding — so a test
+/// has to raise it. A fixture that exercises it trips `dead-code` and `naming-convention` on the
+/// same fields, which is noise this rule's expectations should not carry.
 fn implicit_this(src: &str, scope: ThisScope) -> String {
     let mut config = Config::default();
+    config.restriction.implicit_this.level = LintLevel::Warn;
     config.restriction.implicit_this.options.scope = scope;
     let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
     let mut s = String::new();
@@ -764,12 +765,26 @@ fn check_this(src: &str, expected: Expect) {
 }
 
 #[test]
-fn implicit_this_is_on_by_default() {
-    // The one `[restriction]` rule that is not `allow`. The section no longer decides a level for
-    // every rule it holds: an unqualified field is a name a reader can take for a local, which is
-    // a hazard before it is a policy.
+fn implicit_this_is_off_by_default() {
+    // Both `[restriction]` rules are `allow`: a restriction nobody asked for is not a finding, and
+    // an unqualified field is a name real code writes thousands of times. Silence is the default,
+    // not a suppression.
     let out = lint("class C { int count; void m() { count++; } }");
-    assert!(out.contains("implicit-this"), "{out}");
+    assert!(!out.contains("implicit-this"), "{out}");
+}
+
+#[test]
+fn implicit_this_still_reports_when_a_project_asks_for_it() {
+    // Turning it on is the whole feature, and it is unchanged by the default moving: the same
+    // fixture, the same finding.
+    let out = implicit_this(
+        "class C { int count; void m() { count++; } }",
+        ThisScope::Always,
+    );
+    assert!(
+        out.contains("field `count` should be qualified with `this.`"),
+        "{out}"
+    );
 }
 
 #[test]
