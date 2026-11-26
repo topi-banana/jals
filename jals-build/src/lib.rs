@@ -87,6 +87,8 @@ mod wasm_test;
 
 #[cfg(feature = "native")]
 mod native;
+#[cfg(feature = "native")]
+mod platform;
 
 pub use backend::{
     Assertions, Backend, BackendAbsence, BackendError, BackendFuture, BackendLibrary,
@@ -101,6 +103,8 @@ pub use jals_backend::JalsBackend;
 pub use javac_backend::{HostCompileInputs, JavacBackend};
 #[cfg(feature = "native")]
 pub use manifest_ext::{ManifestError, ManifestExt};
+#[cfg(feature = "native")]
+pub use platform::{PlatformClasses, PlatformError, PlatformSelection};
 // Only `RunRequest` is exported. `CompileRequest` is crate-internal along with the `Compiler` trait
 // it feeds — hosts assemble a portable `BackendRequest` plus `HostCompileInputs` now, and the
 // `javac` adapter turns those into the compile request.

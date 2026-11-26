@@ -248,6 +248,7 @@ impl Compile {
             // from the classpath, so resolved dependency jars do not participate — the same `&[]`
             // `jals-cli` passes.
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options: &options,
         };

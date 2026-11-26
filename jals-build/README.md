@@ -1182,9 +1182,21 @@ What remains from this section's original plan is the smaller half: POM `exclusi
 sidecars, the `jals fetch`/`tree` commands, the `target/jals/deps`
 materialized view, and packaging (§4).
 
-**Separate from Maven resolution**, JDK standard-library classes still come from the embedded
-`java.lang`/`java.util` stubs rather than the JDK's `jimage`/`modules`; reading those is a
-separate, still-unwired step.
+**Separate from Maven resolution**, JDK standard-library classes come from the JDK's own
+`lib/ct.sym` — the archive `javac --release` reads — through `jals_build::PlatformClasses`. The
+home is the one that owns the `javac` `[toolchain] compiler` selects (falling back to the project's
+default toolchain, `$JAVA_HOME`, and discovery), and the release is `[build] release` or the JDK's
+own. The signatures are decoded to `jals_classfile::ClassFile` values and folded into the analysis
+index *ahead of* the project classpath and the embedded `java.lang`/`java.util` stubs. `jals lint`,
+the language server, and the in-process `jals` backend all take the same set from the same reader,
+so the three cannot disagree about the platform. A host with no JDK at all still gets the stubs,
+exactly as before.
+
+One gap is deliberate and named on the reader: a `ct.sym` describes the releases a JDK can
+*target* and often not the release it *is*, so that release is read as the newest one the archive
+describes. What is missing is the API the JDK's own release added; closing it means reading the
+modules the JDK ships, which carry method bodies and cost a full decode of the platform on every
+run.
 
 ## 4. Packaging
 

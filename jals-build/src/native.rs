@@ -250,7 +250,7 @@ impl SubprocessToolchain {
     /// blindly: a value carrying a path separator, `.`, or `..` is ignored, so a marker can only
     /// ever name a direct child of the store. A dangling name (the install was uninstalled) reads
     /// as no default rather than as a broken path.
-    fn project_default(project_root: &Path) -> Option<PathBuf> {
+    pub(crate) fn project_default(project_root: &Path) -> Option<PathBuf> {
         let store = project_root.join(jals_config::MANAGED_TOOLCHAIN_ROOT);
         let name = std::fs::read_to_string(store.join("default")).ok()?;
         let name = name.trim();
@@ -262,7 +262,7 @@ impl SubprocessToolchain {
     }
 
     /// Resolve `tool` to a concrete program path, probing candidate existence off the executor.
-    async fn resolve_program(&self, tool: Tool, project_root: &Path) -> PathBuf {
+    pub(crate) async fn resolve_program(&self, tool: Tool, project_root: &Path) -> PathBuf {
         self.candidates(tool, project_root)
             .pick_async(async |path: &Path| {
                 let path = path.to_path_buf();

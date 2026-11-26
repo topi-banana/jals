@@ -299,6 +299,7 @@ impl ProjectWorkspace {
     async fn load(
         project_root: PathBuf,
         source_roots: &[PathBuf],
+        platform_classes: &[jals_classfile::ClassFile],
         classfiles: &[jals_classfile::ClassFile],
         library_sources: &[PathBuf],
         source_dep_sources: &[PathBuf],
@@ -338,6 +339,7 @@ impl ProjectWorkspace {
             source_roots,
             BTreeMap::new(),
             Vec::new(),
+            platform_classes,
             classfiles,
             library_sources,
             source_dep_sources,
@@ -358,9 +360,21 @@ impl ProjectWorkspace {
     /// (see [`DetachedWorkspace`], which mounts one file at a time and walks nothing).
     pub(crate) async fn bare(root: &Path, exec: Exec) -> Self {
         let root = root.to_path_buf();
+        // The JDK is not one of the inputs a failed assembly produced, so a bare workspace still
+        // reads it: `java.lang.Object` is the one type an analysis cannot do without, and this is
+        // the fallback that most needs every input it can still get.
+        let platform = match jals_build::PlatformClasses::for_host(&root).await {
+            jals_build::PlatformSelection::Available(classes) => classes.into_classes(),
+            jals_build::PlatformSelection::Absent => Vec::new(),
+            jals_build::PlatformSelection::Unreadable(error) => {
+                eprintln!("jals-lsp: the JDK's platform signatures could not be read: {error}");
+                Vec::new()
+            }
+        };
         Self::load(
             root.clone(),
             std::slice::from_ref(&root),
+            &platform,
             &[],
             &[],
             &[],
@@ -382,6 +396,7 @@ impl ProjectWorkspace {
         source_roots: Vec<DirKey>,
         source_filters: BTreeMap<DirKey, jals_config::SourceFilter>,
         project_sources: Vec<FileKey>,
+        platform_classes: &[jals_classfile::ClassFile],
         classfiles: &[jals_classfile::ClassFile],
         library_sources: Vec<FileKey>,
         source_dep_sources: Vec<FileKey>,
@@ -403,6 +418,8 @@ impl ProjectWorkspace {
             build_features,
             ..ProjectLayout::default()
         }
+        .with_platform(platform_classes)
+        .await
         .with_classpath(classfiles)
         .await;
         // The materialized paths are host facts; the host renders addresses. Convert once, here,
@@ -1318,6 +1335,7 @@ mod tests {
             let ws = ProjectWorkspace::load(
                 dir.path().to_path_buf(),
                 &[dir.path().to_path_buf()],
+                &[],
                 std::slice::from_ref(&box_class),
                 &[],
                 &[],

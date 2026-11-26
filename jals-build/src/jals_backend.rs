@@ -284,10 +284,17 @@ impl JalsBackend {
         // and on this target, where the implementations are linked in as a package, a package's Java
         // outranks the stub of the same name. A native package's Java is that opposite case: it *is*
         // compiled into the artifact, so what it does not declare the program does not have.
+        //
+        // The host's `ct.sym` signatures are indexed first of all the external inputs — ahead of the
+        // stubs, which `build_inner` already guarantees by registering the classpath before them,
+        // and ahead of the classpath, because `javac` resolves a platform type before it looks at a
+        // jar. A compile with no host JDK gets the stubs alone, exactly as it did before.
+        let platform = ProjectIndex::lower_classpath(request.platform_classes).await;
         let (project_roots, native_roots) = roots.split_at(project_files);
         let index = ProjectIndex::builder(project_roots)
             .with_native_packages(native_roots)
             .with_source_deps(&library_roots)
+            .with_classpath(&platform)
             .with_stdlib()
             .build()
             .await;
@@ -510,6 +517,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options: &options,
         };
@@ -546,6 +554,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options: &options,
         };
@@ -580,6 +589,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options: &options,
         };
@@ -621,6 +631,7 @@ mod tests {
             progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
+            platform_classes: &[],
             libraries: &[],
             options: &options,
         };
