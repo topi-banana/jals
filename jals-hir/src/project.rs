@@ -1621,15 +1621,21 @@ impl ProjectIndex {
             return TypeResolution::Project(id);
         }
 
-        // 3. A *nested* type of a type declared in this file. `class Outer { static class Counter {} }`
-        //    puts `Counter` in scope inside `Outer` under its simple name, and its fully-qualified name
-        //    is `<package>.Outer.Counter` — which step 2 cannot find, because it only appends the name
-        //    to the *package*.
+        // 3. A *nested* type of a type declared in this file, or *inherited* by one. `class Outer
+        //    { static class Counter {} }` puts `Counter` in scope inside `Outer` under its simple
+        //    name, and its fully-qualified name is `<package>.Outer.Counter` — which step 2 cannot
+        //    find, because it only appends the name to the *package*. A type a supertype declares
+        //    is in scope the same way (JLS §6.5.5.1): `for (Entry<K, V> e : …)` inside a
+        //    `ConcurrentMap` implementation binds to `Map.Entry`, and `new WrappedSet(…)` to a
+        //    nested class a superclass declares.
         //
-        //    Every type declared in the file is tried as the enclosing one, longest name first, so a
-        //    nested type nested more deeply wins over a shallower one of the same name. That is wider
-        //    than JLS §6.5.5's scoping, which would only look at the *enclosing* declarations of the use
-        //    — but this crate does no checking, and a legal program has exactly one candidate anyway.
+        //    Every type declared in the file is tried as the enclosing one, longest name first, so
+        //    a nested type nested more deeply wins over a shallower one of the same name. That is
+        //    wider than JLS §6.5.5's scoping, which would only look at the *enclosing* declarations
+        //    of the use — but this crate does no checking, and a legal program has exactly one
+        //    candidate anyway. A *declared* nested type is preferred over an inherited one for the
+        //    same reason: two candidates are a program this crate is not going to reject, and the
+        //    one the file itself wrote is the one a reader means.
         if let Some(id) = self.nested_in_file(file, name) {
             return TypeResolution::Project(id);
         }
@@ -1679,32 +1685,51 @@ impl ProjectIndex {
         let Some((head, rest)) = qualified.split_once('.') else {
             return TypeResolution::External;
         };
-        if let TypeResolution::Project(outer) = self.resolve_type(file, head)
-            && let Some(&id) = self.by_fqn.get(&format!(
-                "{}.{rest}",
-                self.items[outer.0 as usize].fqn.as_str()
-            ))
-        {
-            return TypeResolution::Project(id);
+        if let TypeResolution::Project(outer) = self.resolve_type(file, head) {
+            let fqn = self.items[outer.0 as usize].fqn.as_str();
+            if let Some(&id) = self.by_fqn.get(&format!("{fqn}.{rest}")) {
+                return TypeResolution::Project(id);
+            }
+            // `ConcurrentMap.Wrapper`, where `Wrapper` is a type a *supertype* declares: the same
+            // chain the simple name walks, asked with the rest of the spelling as one name.
+            if let Some(id) = self.member_type(outer, rest) {
+                return TypeResolution::Project(id);
+            }
         }
         TypeResolution::External
     }
 
-    /// A type nested inside one this file declares, by simple name.
+    /// A type nested inside one this file declares, or inherited by one, by simple name.
     ///
     /// Longest enclosing name first, so a more deeply nested type wins over a shallower one sharing its
-    /// simple name.
+    /// simple name. A type the file declares is asked for before an inherited one: two candidates
+    /// are not a case this crate rejects, and the one the file itself wrote is the one a reader
+    /// means. The inherited pass rides [`member_type`](Self::member_type), so the supertype walk,
+    /// its cycle guard, and its "nearest declaration wins" order are the same ones every other
+    /// member lookup uses.
     fn nested_in_file(&self, file: FileId, name: &str) -> Option<ItemId> {
-        let mut enclosing: Vec<&str> = self
+        let mut enclosing: Vec<ItemId> = self
             .items
             .iter()
-            .filter(|item| item.file == file)
-            .map(|item| item.fqn.as_str())
+            .enumerate()
+            .filter(|(_, item)| item.file == file)
+            .map(|(id, _)| ItemId(id as u32))
             .collect();
-        enclosing.sort_unstable_by_key(|fqn| core::cmp::Reverse(fqn.len()));
-        enclosing
-            .into_iter()
-            .find_map(|outer| self.by_fqn.get(&format!("{outer}.{name}")).copied())
+        enclosing.sort_unstable_by_key(|outer| {
+            core::cmp::Reverse(self.items[outer.0 as usize].fqn.as_str().len())
+        });
+        let declared = || {
+            enclosing.iter().copied().find_map(|outer| {
+                self.by_fqn
+                    .get(&format!("{}.{name}", self.items[outer.0 as usize].fqn))
+                    .copied()
+            })
+        };
+        declared().or_else(|| {
+            enclosing
+                .into_iter()
+                .find_map(|outer| self.member_type(outer, name))
+        })
     }
 
     /// Resolves the type-name `reference` (simple or qualified) from `file` against the project.
@@ -1847,6 +1872,11 @@ impl ProjectIndex {
     /// nested type's identity is its enclosing type's name plus its own, which is exactly what the
     /// index keys on. The supertype walk is what makes an inherited nested type reachable, and it is
     /// the same cycle-guarded one every other member lookup rides.
+    ///
+    /// Two callers ask it, and they ask the same question: the qualified `p.new Inner()` of JLS
+    /// §15.9.1, and the *unqualified* simple name of a type a supertype declares (`Entry` inside a
+    /// `ConcurrentMap` implementation), which
+    /// [`nested_in_file`](Self::nested_in_file) reaches through here.
     pub(crate) fn member_type(&self, owner: ItemId, name: &str) -> Option<ItemId> {
         self.walk_supertypes(owner, |current| {
             self.by_fqn
